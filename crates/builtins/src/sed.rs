@@ -31,6 +31,7 @@ use std::path::PathBuf; // For file descriptors and equivalent
 use std::{
 	cell::RefCell,
 	collections::HashMap,
+	ffi::OsString,
 	fmt,
 	io::{BufRead, BufReader},
 	rc::Rc,
@@ -112,8 +113,9 @@ pub struct ProcessingContext {
 	pub substitution_made:    bool,
 	/// Elements to append at the end of each command processing cycle
 	pub append_elements:      Vec<AppendElement>,
-	/// `R` inputs by file name as written, so commands naming the same file share one handle (GNU).
-	pub line_sources:         HashMap<PathBuf, Rc<RefCell<LineSource>>>,
+	/// `R` inputs by file name as written, so commands spelling the same name share one handle;
+	/// another spelling of the file (`d/./o`, `d//o`) reads it again (GNU).
+	pub line_sources:         HashMap<OsString, Rc<RefCell<LineSource>>>,
 }
 
 impl ProcessingContext {
@@ -1620,12 +1622,12 @@ fn compile_read_line_command(
 		return compilation_error(lines, line, ERR_SANDBOX);
 	}
 	let path = read_file_path(lines, line)?;
-	let source = match context.line_sources.get(&path) {
+	let source = match context.line_sources.get(path.as_os_str()) {
 		Some(source) => Rc::clone(source),
 		None => {
 			let source =
 				Rc::new(RefCell::new(LineSource::new(path.clone(), path.as_os_str() == "/dev/stdin")));
-			context.line_sources.insert(path, Rc::clone(&source));
+			context.line_sources.insert(path.into_os_string(), Rc::clone(&source));
 			source
 		},
 	};
@@ -10405,5 +10407,27 @@ mod tests {
 		// A regex reused from another `s` expands its missing groups to nothing.
 		let (code, capture) = crate::host::run_util::<Sed>(&[r"s/a/b/;s//\1/"], "aa\n", "/");
 		assert_eq!((code, capture.out().as_str()), (0, "b\n"), "{}", capture.err());
+	}
+
+	/// GNU sed 4.9 shares one `R` file only between commands that spell its
+	/// name the same way: `R d/o` and `R d/./o` (or `R d//o`) each read `d/o`
+	/// from its start. Input `1 2`, `d/o` holding `a b`; GNU's output.
+	#[test]
+	fn r_files_are_one_for_each_name_as_written() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::create_dir(dir.path().join("d")).unwrap();
+		std::fs::write(dir.path().join("d/o"), "a\nb\n").unwrap();
+		for (second, expected) in [
+			("R d/./o", "1\na\na\n2\nb\nb\n"),
+			("R d//o", "1\na\na\n2\nb\nb\n"),
+		] {
+			let (code, capture) =
+				crate::host::run_util::<Sed>(&["-e", "R d/o", "-e", second], "1\n2\n", dir.path());
+			assert_eq!(
+				(code, capture.out().as_str(), capture.err().as_str()),
+				(0, expected, ""),
+				"{second}"
+			);
+		}
 	}
 }
