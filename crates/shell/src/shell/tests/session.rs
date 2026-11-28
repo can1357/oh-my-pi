@@ -829,6 +829,68 @@ async fn timeout_spares_background_jobs_of_earlier_commands() {
 	assert_eq!(probe.exit_code, Some(0), "the earlier job died with the timed-out command");
 }
 
+/// When no other run waits for the session, a cancelled run that cannot
+/// wind down within its grace is dropped, and the session it leaves is in an
+/// unknown state, so the next run gets a new one. The held run streams into a
+/// bounded channel that the test does not drain, as the JS bridge's. Its pipe
+/// reader parks in `emit_chunk`, which does not watch the reader's cancel,
+/// and a cancelled run waits for its reader, so the run cannot end after the
+/// cancel. Its command ignores TERM and writes until the KILL, so the reader
+/// always has a second chunk to park on. The session env gives every new
+/// session `x=new`, whatever the host exports; a later run sees the old
+/// session's `x=kept` before the drop, and the new session's `x=new` after it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dropped_run_gives_the_next_run_a_new_session() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Shell::new(Some(ShellOptions {
+		session_env: Some(HashMap::from([("x".to_string(), "new".to_string())])),
+		..Default::default()
+	}));
+	let echo = "echo \"$x\"";
+	run_ok(&shell, "x=kept").await;
+	assert_eq!(
+		run_ok(&shell, echo).await,
+		"kept\n",
+		"a run keeps the variables of the runs before it"
+	);
+
+	let (tx, held) = flume::bounded(1);
+	let mut cancel = CancelToken::default();
+	let abort = cancel.emplace_abort_token();
+	let (result, elapsed) = time::timeout(Duration::from_secs(10), async {
+		let run = shell.run(
+			ShellRunOptions {
+				command: "/bin/sh -c 'trap \"\" TERM; while :; do echo held; done'".into(),
+				..Default::default()
+			},
+			Some(tx),
+			cancel,
+		);
+		let cancel_once_held = async {
+			while !held.is_full() {
+				time::sleep(Duration::from_millis(10)).await;
+			}
+			abort.abort(AbortReason::Signal);
+			time::Instant::now()
+		};
+		let (result, cancelled_at) = tokio::join!(run, cancel_once_held);
+		(result, cancelled_at.elapsed())
+	})
+	.await
+	.expect("the held run did not fill its channel and return after the cancel within 10 s");
+	let result = result.expect("shell result");
+	assert!(result.cancelled, "{result:?}");
+	assert!(elapsed >= CANCEL_RUN_GRACE, "the held run wound down after {elapsed:?}, not dropped");
+	// Frees the reader task the aborted run left parked on this channel.
+	drop(held);
+	assert_eq!(
+		run_ok(&shell, echo).await,
+		"new\n",
+		"the run after a dropped run reused its session"
+	);
+}
+
 /// An exited `&` child must be waited on while the persistent shell is
 /// idle, not only when the host submits another command. Keep its status
 /// for a later explicit `wait` after the OS process has disappeared.
