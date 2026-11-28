@@ -1,12 +1,13 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 import { expect, test } from "bun:test";
 import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
+import { bubbleKey } from "@oh-my-pi/pi-tui/dispatch";
 import { paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import type { TranscriptEntryLike } from "../../../../src/session/transcript/transcript-entry";
 import { RewindSelector } from "../../../../src/ui/overlays/pickers/rewind-selector";
-import { pickerSuite } from "./harness";
+import { keyFromRaw, pickerSuite } from "./harness";
 
 const e = (id: string, parentId: string | null, message: unknown): TranscriptEntryLike =>
 	({ type: "message", id, parentId, timestamp: "2024-01-01T00:00:00Z", message }) as unknown as TranscriptEntryLike;
@@ -73,6 +74,38 @@ test("the terminal look opens a long branch on its recent turns", () => {
 			const screen = stripEscapes(paintNode(staticEnvironment(loadThemeSync("dark")), node!, 160).rows.join("\n"));
 			expect(screen).toContain("600/600");
 			expect(screen).toContain("a earlier turns");
+		} finally {
+			dispose();
+		}
+	});
+});
+
+test("a long selected turn stays in place when the rewind filter opens and closes", () => {
+	const longPrompt = (prefix: string) => Array.from({ length: 40 }, (_, i) => `${prefix} line ${i}`).join("\n");
+	const entries = [e("earlier", null, user(longPrompt("earlier"))), e("latest", "earlier", user(longPrompt("latest")))];
+	createRoot(dispose => {
+		try {
+			const [node] = resolveChildren(
+				<RewindSelector entries={entries} terminalRows={() => 15} onSelect={noop} onCancel={noop} />,
+			)();
+			const env = staticEnvironment(loadThemeSync("dark"));
+			const body = () => stripEscapes(paintNode(env, node!, 100).rows.slice(3, -2).join("\n"));
+			const press = (raw: string) => expect(bubbleKey([node!], keyFromRaw(raw))).toBe(true);
+
+			// The latest turn opens on its end, and redraws without a selection change keep it there.
+			const latest = body();
+			expect(latest).toContain("latest line 39");
+			expect(latest).not.toMatch(/latest line 0\b/);
+			press("f");
+			expect(body()).toBe(latest);
+			press("\x1b");
+			expect(body()).toBe(latest);
+
+			// Moving up opens the earlier turn on its top; moving back down restores the latest turn's end.
+			press("\x1b[A");
+			expect(body()).toContain("earlier line 0");
+			press("\x1b[B");
+			expect(body()).toBe(latest);
 		} finally {
 			dispose();
 		}

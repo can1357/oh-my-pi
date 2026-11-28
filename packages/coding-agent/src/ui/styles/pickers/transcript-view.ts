@@ -6,10 +6,11 @@
  * - Turns are their transcript blocks two cells in; the outlined one sits in
  *   a dotted box instead (an optional label at the right of its top edge),
  *   its trailing blank rows left below the box.
- * - The body scrolls only as far as brings the outline on screen with a row
- *   around it (from the top when the screen opens): up to its top when it
- *   starts above the view, else down to its end; the wheel scrolls it three
- *   rows a notch. A scrollbar takes the last column while it overflows.
+ * - The body scrolls just far enough to show the outline, with context when
+ *   it fits. A taller outline keeps the window within the selected turn:
+ *   reached from above (and at open) it shows its end, from below its top,
+ *   and the wheel scrolls three rows a notch up to its edges. A scrollbar
+ *   takes the last column while the body overflows.
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
@@ -39,7 +40,7 @@ export interface Lane {
 
 /** Rows a wheel notch scrolls. */
 const WHEEL_ROWS = 3;
-/** Rows kept on screen above the outline. */
+/** Rows of context kept on each side of the outline when there is room. */
 const OUTLINE_CONTEXT = 1;
 
 /**
@@ -83,9 +84,8 @@ export function wheelTranscriptView(node: UiNode, notches: -1 | 1): void {
 
 /**
  * `body` in `height` rows of `width` cells: all of it (blank rows below)
- * when it fits, else the window last drawn (moved by the wheel since) moved
- * just far enough to bring the outline in, with a scrollbar in the last
- * column.
+ * when it fits, else the last window moved by the wheel and clamped to
+ * keep as much of the outline visible as possible, with a scrollbar.
  */
 function bodyWindow(node: UiNode, cx: PaintContext, body: Lane, width: number, height: number): string[] {
 	const theme = cx.theme;
@@ -104,10 +104,20 @@ function bodyWindow(node: UiNode, cx: PaintContext, body: Lane, width: number, h
 	const last = drawn.peek();
 	let start = last.start + wheel - last.wheel;
 	if (body.outline) {
-		const top = body.outline[0] - OUTLINE_CONTEXT;
-		const bottom = body.outline[1] + OUTLINE_CONTEXT;
-		if (top < start) start = top;
-		else if (bottom > start + height) start = bottom - height;
+		const [top, bottom] = body.outline;
+		const tail = bottom - height;
+		if (top < tail) {
+			// A tall outline contains the window. The wheel stops at its edges; a
+			// window left outside it by a selection change lands on the far edge,
+			// so moving down opens a turn on its end and moving up on its top.
+			const wheeled = wheel !== last.wheel;
+			if (start < top) start = wheeled ? top : tail;
+			else if (start > tail) start = wheeled ? tail : top;
+		} else {
+			// A short outline fits inside the window with context around it.
+			const context = Math.min(OUTLINE_CONTEXT, Math.floor((top - tail) / 2));
+			start = Math.max(tail + context, Math.min(start, top - context));
+		}
 	}
 	const max = rows.length - height;
 	start = Math.max(0, Math.min(start, max));

@@ -137,6 +137,7 @@
 
 - `ask` forms now show controls wrapped by a `<label for>` that names them ([#20945](https://github.com/can1357/oh-my-pi/issues/20945)).
 - `/restart` and a fresh launch no longer show the new screen below the previous output for a frame before clearing it
+- Long turns in `/rewind` and `/copy` no longer jump between their top and bottom when the selector redraws ([#20964](https://github.com/can1357/oh-my-pi/issues/20964)).
 - Background job results delivered while the agent is idle are freed once delivered, not kept in memory until the whole turn they started ends ([#20886](https://github.com/can1357/oh-my-pi/pull/20886) by [@sjawhar](https://github.com/sjawhar))
 - Kept the prompt at the bottom when `/compact` shortens a long session or a cancelled submission restores the draft and rebuilds the same transcript ([#20912](https://github.com/can1357/oh-my-pi/pull/20912) by [@thebtf](https://github.com/thebtf))
 - In fullscreen mode, the terminal can select and copy text in `/session` info, the background jobs sheet, and command reports (`/context`, `/changelog`, `/tools`, …), which there always open as a full-screen page instead of above the editor.
