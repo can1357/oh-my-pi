@@ -3,9 +3,11 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import {
 	computeCompactionBoundaries,
 	computeContextBreakdown,
+	computeContextUsageDetails,
 	type CompactionBoundaries,
 	type ContextBreakdown,
 	type ContextSavingsEstimate,
+	type ContextUsageDetails,
 } from "./context-usage";
 import type { ScopeLike } from "../config/registry";
 import type { AgentSession } from "./agent-session";
@@ -59,4 +61,9 @@ export function computeSessionContextBreakdown(
 		sourceRevision: session.settings.revision,
 		snapcompact,
 	});
+}
+
+/** Resolve per-tool and per-skill estimates with the same attribution as the aggregate breakdown. */
+export function computeSessionContextUsageDetails(session: AgentSession): ContextUsageDetails {
+	return computeContextUsageDetails(session, { sourceRevision: session.settings.revision });
 }
