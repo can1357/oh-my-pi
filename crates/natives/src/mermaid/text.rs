@@ -161,7 +161,7 @@ pub fn normalize_label(label: &str) -> String {
 	let text = strip_single_star_emphasis(&text);
 	let text = strip_paired_marker(&text, "~~");
 	let text = mermaid_codes_to_html(&text);
-	let text = remap_c1_controls(html_escape::decode_html_entities(&text));
+	let text = remap_c1_controls(omp_web::entities::decode_html_entities(&text));
 	let text = if text.contains(['\t', '\r', '\u{c}']) {
 		text.replace(['\t', '\r', '\u{c}'], " ")
 	} else {
@@ -272,7 +272,7 @@ fn mermaid_codes_to_html(text: &str) -> Cow<'_, str> {
 			}
 			reference.push_str(name);
 			reference.push(';');
-			if matches!(html_escape::decode_html_entities(&reference), Cow::Owned(_)) {
+			if matches!(omp_web::entities::decode_html_entities(&reference), Cow::Owned(_)) {
 				out.push_str(&reference);
 				rest = &after[name_len + 1..];
 				continue;

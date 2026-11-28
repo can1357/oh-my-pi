@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type OAuthCredential, type UsageProvider, resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai";
 import * as oauth from "@oh-my-pi/pi-ai/oauth";
-import type { OAuthCredentials, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth/types";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -16,8 +16,8 @@ describe("AuthStorage account rotation", () => {
 	let usageExhausted = false;
 
 	const stickyInvalidationSource = "auth-storage-rotation-issue-4982";
-	const targetProvider = "issue-4982-target" as OAuthProviderId;
-	const unrelatedProvider = "issue-4982-unrelated" as OAuthProviderId;
+	const targetProvider = "issue-4982-target";
+	const unrelatedProvider = "issue-4982-unrelated";
 	let nextLoginCredential: OAuthCredentials | undefined;
 
 	const findSessionWhereFreshSelectionChanges = async (

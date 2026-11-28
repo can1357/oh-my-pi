@@ -233,16 +233,12 @@ fn looks_binary(sample: &[u8]) -> bool {
 	if sample.contains(&0) {
 		return true;
 	}
-	if let Err(err) = std::str::from_utf8(sample) {
-		let len = err.valid_up_to();
-		// A final partial character is legal in a full sample; the next
-		// bytes simply weren't inspected.
-		let utf8_prefix = sample.len() == TEXT_SAMPLE && err.error_len().is_none() && !sample[..len].is_ascii();
-		if utf8_prefix {
-			return false;
-		}
-	} else if !sample.is_ascii() {
-		return false;
+	match xutf::decode(sample) {
+		Ok(text) if !text.is_ascii() => return false,
+		// A full sample may cut off a character; the next bytes weren't inspected.
+		Err(xutf::DecodeError::Incomplete { valid_prefix, .. })
+			if sample.len() == TEXT_SAMPLE && !valid_prefix.is_ascii() => return false,
+		_ => {},
 	}
 	let odd = sample.iter().filter(|&&byte| !matches!(byte, 8..=10 | 12..=13 | 27 | 32..=126)).count();
 	odd * 3 > sample.len()

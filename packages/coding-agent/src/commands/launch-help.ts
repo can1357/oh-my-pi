@@ -3,6 +3,7 @@ import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { formatKey, keyHintPlatform } from "../ui/keys/format";
 import { CLI_THINKING_LEVELS } from "../thinking/levels";
 import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
+import { PREPAINT_MODES } from "../cli/prepaint";
 
 export const launchHelp = {
 	description: "AI coding assistant",
@@ -141,6 +142,11 @@ export const launchHelp = {
 		motion: Flags.string({
 			description:
 				"Animation preset: full (default), reduced (250 ms spinners, no shimmer or blink), or none (static). Overrides tui.motion and PI_MOTION for this run",
+		}),
+		prepaint: Flags.string({
+			description:
+				"Draw the composer before startup finishes: on (default; skipped when other flags or a --config overlay would change that frame), off, or force",
+			options: [...PREPAINT_MODES],
 		}),
 		"no-ui": Flags.boolean({
 			description: "With --mode rpc or rpc-ui: run extensions headless (rpc-ui tool UI remains enabled)",

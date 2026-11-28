@@ -114,14 +114,8 @@ describe("scanRenderability", () => {
 		expect(res.unrenderableRatio).toBe(0);
 	});
 
-	it("uses the embedded Silver fallback for CJK text", () => {
-		const res = snapcompact.scanRenderability("const a = '你好世界';");
-		expect(res.isSafe).toBe(true);
-		expect(res.unrenderableRatio).toBe(0);
-	});
-
-	it("detects high unrenderable rates when neither bitmap fonts nor Silver cover the text", () => {
-		const res = snapcompact.scanRenderability("\u{e000}".repeat(10));
+	it("rejects the entire transcript when even one code point has no glyph", () => {
+		const res = snapcompact.scanRenderability(`${"a".repeat(200)}\u{10ffff}`);
 		expect(res.isSafe).toBe(false);
 		expect(res.unrenderableRatio).toBe(1);
 	});
@@ -188,97 +182,45 @@ describe("isUrlSchemePath", () => {
 	});
 });
 
-interface DecodedPng {
-	width: number;
-	height: number;
-	colorType: number;
-	/** GLOBAL palette indices (mapped back through PLTE), one byte per pixel. */
-	pixels: Uint8Array;
-}
-
-/** The renderer's fixed global palette (see PALETTE in snapcompact.rs). */
-const GLOBAL_PALETTE = [
-	[255, 255, 255],
-	[109, 2, 2],
-	[109, 53, 2],
-	[24, 109, 2],
-	[2, 109, 109],
-	[2, 32, 109],
-	[75, 2, 109],
-	[0, 0, 0],
-	[255, 247, 194],
-	[128, 128, 128],
-] as const;
-
-/**
- * Minimal PNG reader for the encoder's own output (indexed, filter None,
- * 1/2/4/8-bit). The encoder narrows each frame's palette to the colors it
- * uses, so decoded indices are mapped back to GLOBAL palette slots via PLTE.
- */
-function decodePng(png: Uint8Array): DecodedPng {
-	expect(Array.from(png.subarray(0, 8))).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-	const view = new DataView(png.buffer, png.byteOffset, png.byteLength);
-	let pos = 8;
-	let width = 0;
-	let height = 0;
-	let colorType = -1;
-	let depth = 0;
-	let plte: Uint8Array | undefined;
-	const idatParts: Uint8Array[] = [];
-	while (pos < png.length) {
-		const length = view.getUint32(pos);
-		const type = String.fromCharCode(png[pos + 4], png[pos + 5], png[pos + 6], png[pos + 7]);
-		const data = png.subarray(pos + 8, pos + 8 + length);
-		if (type === "IHDR") {
-			width = view.getUint32(pos + 8);
-			height = view.getUint32(pos + 12);
-			depth = data[8];
-			colorType = data[9];
-		} else if (type === "PLTE") {
-			plte = data;
-		} else if (type === "IDAT") {
-			idatParts.push(data);
+/** Decode the renderer's packed palette indices to RGB for visual assertions. */
+function decodePng(png: Buffer) {
+	expect(png.subarray(0, 8)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+	const width = png.readUInt32BE(16);
+	const height = png.readUInt32BE(20);
+	const depth = png[24];
+	expect(png[25]).toBe(3);
+	const parts: Uint8Array[] = [];
+	const palette: number[] = [];
+	for (let offset = 8; offset < png.length;) {
+		const length = png.readUInt32BE(offset);
+		const type = png.toString("ascii", offset + 4, offset + 8);
+		const start = offset + 8;
+		if (type === "IDAT") parts.push(png.subarray(start, start + length));
+		if (type === "PLTE") {
+			for (let i = start; i < start + length; i += 3) palette.push(png.readUIntBE(i, 3));
 		}
-		pos += 12 + length;
+		offset += 12 + length;
 	}
-	// Local palette slot -> global palette index, matched by RGB.
-	const toGlobal = new Uint8Array(plte ? plte.length / 3 : 0);
-	if (plte) {
-		for (let i = 0; i < toGlobal.length; i++) {
-			const global = GLOBAL_PALETTE.findIndex(
-				([r, g, b]) => plte[i * 3] === r && plte[i * 3 + 1] === g && plte[i * 3 + 2] === b,
-			);
-			expect(global).toBeGreaterThanOrEqual(0);
-			toGlobal[i] = global;
-		}
-	}
-	let idatLength = 0;
-	for (const part of idatParts) idatLength += part.length;
-	const idat = new Uint8Array(idatLength);
-	let offset = 0;
-	for (const part of idatParts) {
-		idat.set(part, offset);
-		offset += part.length;
-	}
-	// Strip the zlib envelope (2-byte header + trailing Adler-32).
-	const raw = Bun.inflateSync(idat.subarray(2, idat.length - 4));
-	const per = 8 / depth;
-	const rowBytes = Math.ceil(width / per);
-	expect(raw.length).toBe(height * (rowBytes + 1));
+	const raw = Bun.inflateSync(Buffer.concat(parts).subarray(2, -4));
+	const perByte = 8 / depth;
+	const stride = Math.ceil(width / perByte) + 1;
 	const mask = (1 << depth) - 1;
-	const pixels = new Uint8Array(width * height);
+	expect(raw.length).toBe(height * stride);
+	const pixels = new Uint32Array(width * height);
 	for (let y = 0; y < height; y++) {
-		expect(raw[y * (rowBytes + 1)]).toBe(0); // filter byte: None
-		const row = raw.subarray(y * (rowBytes + 1) + 1, (y + 1) * (rowBytes + 1));
+		const row = y * stride;
+		expect(raw[row]).toBe(0);
 		for (let x = 0; x < width; x++) {
-			const byte = row[Math.floor(x / per)];
-			const shift = depth * (per - 1 - (x % per));
-			const local = (byte >> shift) & mask;
-			pixels[y * width + x] = colorType === 3 ? toGlobal[local] : local;
+			const byte = raw[row + 1 + Math.floor(x / perByte)];
+			const shift = 8 - ((x % perByte) + 1) * depth;
+			pixels[y * width + x] = palette[(byte >> shift) & mask];
 		}
 	}
-	return { width, height, colorType, pixels };
+	return { width, height, depth, pixels };
 }
+
+const WHITE = 0xffffff;
+const HIGHLIGHT = 0xfff7c2;
 
 describe("normalize", () => {
 	it("collapses horizontal whitespace and folds non-Latin-1 to ASCII", () => {
@@ -299,15 +241,15 @@ describe("normalize", () => {
 	it("skips characters it cannot render instead of printing ?", () => {
 		// Whole ANSI sequences vanish, not just the ESC byte.
 		expect(snapcompact.normalize("\u001b[31mred\u001b[0m plain")).toBe("red plain");
-		// Bare controls, zero-width format chars, and combining marks drop out.
-		expect(snapcompact.normalize("a\u0000b\u0007c\u200bd\ufeffe\u0301f")).toBe("abcdef");
+		// Bare controls and zero-width format chars drop out; accents compose.
+		expect(snapcompact.normalize("a\u0000b\u0007c\u200bd\ufeffe\u0301f")).toBe("abcdéf");
 		// Zero-width dim ink toggles survive untouched.
 		expect(snapcompact.normalize(`x ${snapcompact.DIM_ON}y${snapcompact.DIM_OFF} z`)).toBe(
 			`x ${snapcompact.DIM_ON}y${snapcompact.DIM_OFF} z`,
 		);
 	});
 
-	it("preserves Silver-supported kana and Hangul for bitmap font fallback", () => {
+	it("preserves kana and Hangul independently of the installed fonts", () => {
 		expect(snapcompact.normalize("こんにちは")).toBe("こんにちは");
 		expect(snapcompact.normalize("カタカナ")).toBe("カタカナ");
 		expect(snapcompact.normalize("안녕하세요")).toBe("안녕하세요");
@@ -327,8 +269,8 @@ describe("normalize", () => {
 		expect(snapcompact.normalize("⅓ cup")).toBe("1/3 cup"); // vulgar fraction
 		expect(snapcompact.normalize("𝐇𝐞𝐥𝐥𝐨")).toBe("Hello"); // math-styled alphanumerics
 		expect(snapcompact.normalize("™ ‹q› ′ ″ ⇐ ↑")).toBe(`TM <q> ' " <= ^`);
-		// Emoji drops, while characters missing from both selected font and Silver fall back to ?.
-		expect(snapcompact.normalize("emoji 🎞 \u{e000}")).toBe("emoji ?");
+		// Decorative emoji drops; an unsupported code point stays recoverable as text.
+		expect(snapcompact.normalize("emoji 🎞 \u{e000}")).toBe("emoji \u{e000}");
 	});
 });
 
@@ -377,6 +319,15 @@ describe("shape resolution", () => {
 		).toBe(8);
 	});
 
+	it("uses the measured 8×16 grid only for Opus 5.5 and GPT-6.1 Terra", () => {
+		const shapeFor = (id: string) => snapcompact.resolveShape({ api: "openai-completions", id });
+		expect(shapeFor("anthropic/claude-opus-5.5")).toMatchObject({ cellWidth: 8, cellHeight: 16, frameSize: 1932 });
+		expect(shapeFor("claude-opus-5-5")).toMatchObject({ cellWidth: 8, cellHeight: 16, frameSize: 1932 });
+		expect(shapeFor("claude-opus-4-8")).toMatchObject({ cellWidth: 11, cellHeight: 16, frameSize: 1932 });
+		expect(shapeFor("openai/gpt-6.1-terra")).toMatchObject({ cellWidth: 8, cellHeight: 16, frameSize: 1568 });
+		expect(shapeFor("gpt-6.1-sol")).toMatchObject({ cellWidth: 8, cellHeight: 22, frameSize: 1568 });
+	});
+
 	it("detects the ideal shape from the model id across gateways", () => {
 		// A high-res Claude served through an OpenAI-compatible gateway keeps
 		// its own geometry (tracked 8x13), its 1932px frame, and Anthropic's
@@ -385,7 +336,7 @@ describe("shape resolution", () => {
 			api: "openai-completions",
 			id: "anthropic/claude-fable-5",
 		});
-		expect(claudeViaOpenRouter.font).toBe("8x13");
+
 		expect(claudeViaOpenRouter.cellWidth).toBe(11); // extra tracking
 		expect(claudeViaOpenRouter.frameSize).toBe(1932);
 		expect(claudeViaOpenRouter.frameTokenEstimate).toBe(4761);
@@ -394,7 +345,7 @@ describe("shape resolution", () => {
 		// Claude on Vertex must not inherit the Gemini shape or Gemini's fixed
 		// per-image price.
 		const claudeOnVertex = snapcompact.resolveShape({ api: "google-vertex", id: "claude-fable-5@20250929" });
-		expect(claudeOnVertex.font).toBe("8x13");
+
 		expect(claudeOnVertex.cellWidth).toBe(11);
 		expect(claudeOnVertex.frameSize).toBe(1932);
 		expect(claudeOnVertex.frameTokenEstimate).toBe(4761);
@@ -632,15 +583,13 @@ describe("shape resolution", () => {
 		expect(snapcompact.isShape({ ...snapcompact.SHAPES.openai, imageDetail: "original" })).toBe(true);
 	});
 
-	it("keeps bitmap shapes render-safe via Silver fallback while CJK-heavy auto archives use Silver", () => {
-		const cjkHeavyText = "こんにちは 你好 안녕 世界 한국어";
-		const silver = snapcompact.resolveShape({ api: "anthropic-messages" }, "silver16-bw");
-
-		expect(snapcompact.scanRenderability(cjkHeavyText).isSafe).toBe(true);
-		expect(snapcompact.scanRenderability(cjkHeavyText, { shape: silver }).isSafe).toBe(true);
-		expect(snapcompact.normalize(cjkHeavyText)).toBe(cjkHeavyText);
-		expect(snapcompact.normalize(cjkHeavyText, { shape: silver })).toBe(cjkHeavyText);
-		expect(snapcompact.resolveShapeForText(cjkHeavyText, { api: "anthropic-messages" }, "auto")).toEqual(silver);
+	it("gives CJK-heavy text more room between rows in auto mode", () => {
+		const text = "こんにちは 你好 안녕 世界 한국어";
+		const model = { api: "anthropic-messages" } satisfies snapcompact.ShapeTarget;
+		const shape = snapcompact.resolveShapeForText(text, model);
+		expect(snapcompact.geometry(shape, 1568)).toEqual({ cols: 98, rows: 71, capacity: 6958 });
+		const configured = { ...model, snapcompactShape: { variant: "8on22-bw", frameSize: 1024 } };
+		expect(snapcompact.resolveShapeForText(text, configured)).toMatchObject({ cellWidth: 8, frameSize: 1024 });
 	});
 
 	it("keeps ASCII-heavy auto archives on the provider/model shape", () => {
@@ -653,7 +602,6 @@ describe("shape resolution", () => {
 		);
 
 		expect(actual).toEqual(expected);
-		expect(actual.font).not.toBe("silver");
 	});
 
 	it("respects explicit non-auto variants even for CJK-heavy text", () => {
@@ -662,15 +610,6 @@ describe("shape resolution", () => {
 		const actual = snapcompact.resolveShapeForText("こんにちは 你好 안녕 世界 한국어", model, "8on16-bw");
 
 		expect(actual).toEqual(expected);
-		expect(actual.font).not.toBe("silver");
-	});
-
-	it("reports unsupported CJK ideographs unsafe even with the Silver shape selected", () => {
-		const silver = snapcompact.resolveShape(undefined, "silver16-bw");
-		const res = snapcompact.scanRenderability("\u{31350}".repeat(12), { shape: silver });
-
-		expect(res.isSafe).toBe(false);
-		expect(res.unrenderableRatio).toBe(1);
 	});
 
 	it("images forwards the per-frame detail hint", () => {
@@ -706,13 +645,9 @@ describe("render", () => {
 		expect(decoded.width).toBe(TEST_FRAME_SIZE);
 		// A short page stays compact without creating a subminimum image.
 		expect(decoded.height).toBe(64);
-		expect(decoded.colorType).toBe(3); // indexed color
 
-		// Two sentences → glyphs printed in ink 1 then ink 2; background stays 0.
-		const used = new Set(decoded.pixels);
-		expect(used.has(1)).toBe(true);
-		expect(used.has(2)).toBe(true);
-		expect(used.has(3)).toBe(false);
+		expect(decoded.pixels.some(rgb => rgb >> 16 > (rgb & 255))).toBe(true);
+		expect(decoded.pixels.some(rgb => ((rgb >> 8) & 255) > (rgb & 255))).toBe(true);
 	});
 
 	it("pads a short final page without altering the printed rows", async () => {
@@ -725,7 +660,18 @@ describe("render", () => {
 		expect(short.height).toBe(64);
 		expect(longer.height).toBe(88);
 		expect(short.pixels.subarray(0, 22 * short.width)).toEqual(longer.pixels.subarray(0, 22 * short.width));
-		expect(short.pixels.subarray(22 * short.width).every(pixel => pixel === 0)).toBe(true);
+		expect(short.pixels.subarray(22 * short.width).every(pixel => pixel === WHITE)).toBe(true);
+	});
+
+	it("packs antialiased black ink at two bits even when scanlines need padding", async () => {
+		const shape = snapcompact.resolveShape(undefined, "8on16-bw");
+		const frame = await snapcompact.render("█Hello! █Again.", shape, 65);
+		const png = decodePng(Buffer.from(frame.data, "base64"));
+		expect(png.depth).toBe(2);
+		expect(png.pixels[15 * 65 + 7]).toBe(0);
+		expect(png.pixels[31 * 65 + 7]).toBe(0);
+		expect(png.pixels[15 * 65 + 64]).toBe(WHITE);
+		expect(png.pixels.some(rgb => rgb !== 0 && rgb !== WHITE)).toBe(true);
 	});
 
 	it("leaves the repeated-row highlight out of padding", async () => {
@@ -733,8 +679,8 @@ describe("render", () => {
 		const frame = await snapcompact.render("x", shape);
 		const decoded = decodePng(Buffer.from(frame.data, "base64"));
 		expect(decoded.height).toBe(64);
-		expect(decoded.pixels.subarray(8 * decoded.width, 16 * decoded.width).includes(8)).toBe(true);
-		expect(decoded.pixels.subarray(16 * decoded.width).every(pixel => pixel === 0)).toBe(true);
+		expect(decoded.pixels.subarray(8 * decoded.width, 16 * decoded.width).includes(HIGHLIGHT)).toBe(true);
+		expect(decoded.pixels.subarray(16 * decoded.width).every(pixel => pixel === WHITE)).toBe(true);
 	});
 
 	it("renders the repeated grid with doubled lines, black ink, and highlight bands", async () => {
@@ -744,82 +690,30 @@ describe("render", () => {
 
 		const frame = await snapcompact.render("Hello world. Again.", repeated, TEST_FRAME_SIZE);
 		const decoded = decodePng(Buffer.from(frame.data, "base64"));
-		expect(decoded.colorType).toBe(3);
-		const used = new Set(decoded.pixels);
-		expect(used.has(7)).toBe(true); // black bw ink
-		expect(used.has(8)).toBe(true); // repeat highlight band
-		expect(used.has(1)).toBe(false); // no sentence hues in bw
+		expect(decoded.pixels.includes(HIGHLIGHT)).toBe(true);
+		expect(decoded.pixels.subarray(0, 8 * decoded.width).some(rgb => rgb !== WHITE)).toBe(true);
 	});
 
-	it("renders the anthropic default (tracked 8x13) in plain black, no dim or bands", async () => {
-		const geometry = snapcompact.geometry(snapcompact.SHAPES.anthropic, TEST_FRAME_SIZE);
-		expect(geometry).toEqual({ cols: 29, rows: 20, capacity: 580 });
-
-		const frames = await snapcompact.renderMany("Reading the films of the archive. Again.", {
-			shape: snapcompact.SHAPES.anthropic,
-			frameSize: TEST_FRAME_SIZE,
-		});
-		const decoded = decodePng(Buffer.from(frames[0].data, "base64"));
-		expect(decoded.colorType).toBe(3);
-		const used = new Set(decoded.pixels);
-		expect(used.has(7)).toBe(true); // black ink for all words
-		expect(used.has(9)).toBe(false); // tracked default does not dim stopwords
-		expect(used.has(8)).toBe(false); // no repeat highlight band
-		expect(used.has(1)).toBe(false); // no sentence hues
-	});
-
-	it("still dims stopwords on the selectable 6x12-dim variant", async () => {
-		const dim = snapcompact.resolveShape({ api: "anthropic-messages" }, "6x12-dim");
-		const frames = await snapcompact.renderMany("Reading the films of the archive. Again.", {
-			shape: dim,
-			frameSize: TEST_FRAME_SIZE,
-		});
-		const used = new Set(decodePng(Buffer.from(frames[0].data, "base64")).pixels);
-		expect(used.has(7)).toBe(true); // black ink for content words
-		expect(used.has(9)).toBe(true); // dim gray ink for stopwords ("the", "of")
-	});
-
-	it("renders a stretched shape as truecolor RGB", async () => {
-		const stretched = snapcompact.resolveShape({ api: "openai-responses" }, "6x6u-sent");
-		const frame = await snapcompact.render("Hello world.", stretched, TEST_FRAME_SIZE);
-		// IHDR color type byte: 2 = truecolor RGB (anti-aliased stretch output).
-		expect(Buffer.from(frame.data, "base64")[25]).toBe(2);
-		expect(frame.cols).toBe(Math.floor(TEST_FRAME_SIZE / 6));
-	});
-
-	it("pads stretched RGB frames as well as indexed frames", async () => {
-		const shape = snapcompact.resolveShape(undefined, "6x6u-bw");
-		const frame = await snapcompact.render("x", shape);
-		const png = Buffer.from(frame.data, "base64");
-		expect(png[25]).toBe(2);
-		expect(png.readUInt32BE(20)).toBe(64);
-	});
-
-	it("renders Silver TrueType Unicode text as truecolor RGB", async () => {
-		const silver = snapcompact.resolveShape(undefined, "silver16-bw");
-		const frame = await snapcompact.render("你好안녕", silver, 64);
-		const png = Buffer.from(frame.data, "base64");
-		expect(png[25]).toBe(2);
-		expect(png.readUInt32BE(16)).toBe(64);
-		expect(png.readUInt32BE(20)).toBe(64);
-		expect(frame.cols).toBe(4);
-		expect(frame.chars).toBe(4);
-	});
-
-	it("renders a Silver fallback glyph across two cells in a bitmap frame", async () => {
-		const bitmap = snapcompact.resolveShape(undefined, "8on16-bw"); // 8px-wide cells at 64px → cols 8
-		const frame = await snapcompact.render("你", bitmap, 64);
-		const decoded = decodePng(Buffer.from(frame.data, "base64"));
-		expect(decoded.colorType).toBe(3);
-		expect(frame.chars).toBe(1);
-		// The wide glyph fills the full two-cell (16px) span, not a single 8px cell.
-		let inkBeyondFirstCell = false;
-		for (let y = 0; y < decoded.height; y++) {
-			for (let x = 8; x < 16; x++) {
-				if (decoded.pixels[y * decoded.width + x] === 7) inkBeyondFirstCell = true;
-			}
+	it("lightens stopwords without lightening content words", async () => {
+		const shape = snapcompact.resolveShape(undefined, "6x12-dim");
+		const text = "the archive";
+		const [dim] = await snapcompact.renderMany(text, { shape, frameSize: 64 });
+		const [plain] = await snapcompact.renderMany(text, { shape: { ...shape, stopwordDim: false }, frameSize: 64 });
+		const dimmed = decodePng(Buffer.from(dim.data, "base64"));
+		const normal = decodePng(Buffer.from(plain.data, "base64"));
+		let changed = false;
+		for (const [i, rgb] of dimmed.pixels.entries()) {
+			if (rgb === normal.pixels[i]) continue;
+			changed = true;
+			expect(i % 64).toBeLessThan(3 * shape.cellWidth);
+			expect(rgb).toBeGreaterThan(normal.pixels[i]);
 		}
-		expect(inkBeyondFirstCell).toBe(true);
+		expect(changed).toBe(true);
+	});
+
+	it("rejects unsupported text instead of returning a PNG with missing glyphs", async () => {
+		const shape = snapcompact.resolveShape(undefined, "cjk16-bw");
+		await expect(snapcompact.render("font\u{10ffff}", shape, 64)).rejects.toThrow("No installed font covers");
 	});
 
 	it("caps printed characters at frame capacity", async () => {
@@ -839,8 +733,8 @@ describe("render", () => {
 		const decoded = decodePng(Buffer.from(frame.data, "base64"));
 		for (let y = 0; y < 8; y++) {
 			for (let x = 5; x < 10; x++) {
-				// Pitch-black ink (palette 7), even in the sentence-hue variant.
-				expect(decoded.pixels[y * decoded.width + x]).toBe(7);
+				// Pitch-black ink, even in the sentence-hue variant.
+				expect(decoded.pixels[y * decoded.width + x]).toBe(0);
 			}
 		}
 	});
@@ -872,19 +766,22 @@ describe("renderMany", () => {
 		expect(snapcompact.frames(text, { shape, frameSize: TEST_FRAME_SIZE })).toBe(3);
 	});
 
-	it("counts wide CJK as two grid cells in bitmap shapes and one in Silver", () => {
-		const bitmap = snapcompact.resolveShape(undefined, "8on16-bw"); // cols 8 (even) at 64px
-		const cap = snapcompact.geometry(bitmap, 64).capacity;
-		// Wide glyphs take two cells, so half a frame's worth of cells fits as chars.
-		expect(snapcompact.frames("你".repeat(cap / 2), { shape: bitmap, frameSize: 64 })).toBe(1);
-		expect(snapcompact.frames("你".repeat(cap / 2 + 1), { shape: bitmap, frameSize: 64 })).toBe(2);
-		// ASCII stays one cell per char on the same shape.
-		expect(snapcompact.frames("a".repeat(cap), { shape: bitmap, frameSize: 64 })).toBe(1);
-		// The square-celled Silver shape draws CJK one cell each (no doubling).
-		const silver = snapcompact.resolveShape(undefined, "silver16-bw");
-		const silverCap = snapcompact.geometry(silver, 64).capacity;
-		expect(snapcompact.frames("你".repeat(silverCap), { shape: silver, frameSize: 64 })).toBe(1);
-	});
+	it.skipIf(!snapcompact.scanRenderability("你").isSafe)(
+		"counts wide CJK as two cells on a narrow grid and one on a full-width grid",
+		() => {
+			const bitmap = snapcompact.resolveShape(undefined, "8on16-bw"); // cols 8 (even) at 64px
+			const cap = snapcompact.geometry(bitmap, 64).capacity;
+			// Wide glyphs take two cells, so half a frame's worth of cells fits as chars.
+			expect(snapcompact.frames("你".repeat(cap / 2), { shape: bitmap, frameSize: 64 })).toBe(1);
+			expect(snapcompact.frames("你".repeat(cap / 2 + 1), { shape: bitmap, frameSize: 64 })).toBe(2);
+			// ASCII stays one cell per char on the same shape.
+			expect(snapcompact.frames("a".repeat(cap), { shape: bitmap, frameSize: 64 })).toBe(1);
+			const spaced = snapcompact.resolveShape(undefined, "cjk16-bw");
+			const spacedCap = snapcompact.geometry(spaced, 64).capacity;
+			expect(snapcompact.frames("你".repeat(spacedCap), { shape: spaced, frameSize: 64 })).toBe(1);
+			expect(snapcompact.frames("你".repeat(spacedCap + 1), { shape: spaced, frameSize: 64 })).toBe(2);
+		},
+	);
 
 	it("honors maxFrames and propagates the shape's detail hint", async () => {
 		const shape = snapcompact.SHAPES.openai;
@@ -1170,30 +1067,19 @@ describe("compact", () => {
 	});
 
 	it("carries dim tool-output spans from text into the first image frame", async () => {
-		const result = await snapcompact.compact(
-			makePreparation({
-				messagesToSummarize: [createUserMessage("Run the suite."), createToolResultMessage("FAIL ".repeat(330))],
-			}),
-			{ frameSize: TEST_FRAME_SIZE, maxFrames: 2 },
-		);
-		const archive = snapcompact.getPreservedArchive(result.preserveData);
-		expect(archive?.frames.length).toBeGreaterThanOrEqual(1);
-		const decoded = decodePng(Buffer.from(archive?.frames[0].data ?? "", "base64"));
-		// Palette index 9 is the dim tool-output ink.
-		expect(new Set(decoded.pixels).has(9)).toBe(true);
-	});
-
-	it("keeps image frames free of dim ink when dimToolResults is false", async () => {
-		const result = await snapcompact.compact(
-			makePreparation({
-				messagesToSummarize: [createUserMessage("Run."), createToolResultMessage("all good ".repeat(200))],
-			}),
-			{ frameSize: TEST_FRAME_SIZE, maxFrames: 2, dimToolResults: false },
-		);
-		const archive = snapcompact.getPreservedArchive(result.preserveData);
-		expect(archive?.frames.length).toBeGreaterThanOrEqual(1);
-		const decoded = decodePng(Buffer.from(archive?.frames[0].data ?? "", "base64"));
-		expect(new Set(decoded.pixels).has(9)).toBe(false);
+		const preparation = makePreparation({
+			messagesToSummarize: [createUserMessage("Run the suite."), createToolResultMessage("FAIL ".repeat(330))],
+		});
+		const options = { frameSize: TEST_FRAME_SIZE, maxFrames: 2 };
+		const [dim, plain] = await Promise.all([
+			snapcompact.compact(preparation, options),
+			snapcompact.compact(preparation, { ...options, dimToolResults: false }),
+		]);
+		const pixels = (result: snapcompact.CompactionResult) =>
+			decodePng(Buffer.from(snapcompact.getPreservedArchive(result.preserveData)?.frames[0].data ?? "", "base64"))
+				.pixels;
+		const bright = pixels(plain);
+		expect(pixels(dim).some((rgb, i) => rgb > bright[i] && rgb !== WHITE)).toBe(true);
 	});
 
 	it("keeps plain text at both edges and images in the middle", async () => {
@@ -1260,15 +1146,19 @@ describe("compact", () => {
 		expect(statedGrids(result.summary)).toEqual(grids);
 	});
 
-	it("keeps foveated Silver archives on the Silver font", async () => {
-		const silver = snapcompact.resolveShape(undefined, "silver16-bw");
+	it("keeps the entire transcript as text when one character cannot be covered", async () => {
+		const text = `${"readable history ".repeat(200)}\u{10ffff} tail`;
+		const options = { shape: snapcompact.SHAPES.openai, frameSize: 64, maxFrames: 1 };
+		expect(snapcompact.frames(text, options)).toBe(0);
+		expect(await snapcompact.renderMany(text, options)).toEqual([]);
 		const result = await snapcompact.compact(
-			makePreparation({ messagesToSummarize: [createUserMessage("你好世界".repeat(200))] }),
-			{ shape: silver, frameSize: 64, maxFrames: 1 },
+			makePreparation({ messagesToSummarize: [createUserMessage(text)] }),
+			options,
 		);
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
-		expect(archive?.frames.length).toBeGreaterThan(0);
-		expect(archive?.frames.every(frame => frame.font === "silver")).toBe(true);
+		expect(archive?.frames).toEqual([]);
+		expect(archive?.textHead).toContain(text);
+		expect(archive?.truncatedChars).toBe(0);
 	});
 
 	it("re-renders later compactions from the kept source text", async () => {
@@ -1505,7 +1395,7 @@ describe("frame data budget", () => {
 		const gemini = snapcompact.resolveShape({ api: "google-generative-ai", id: "gemini-3.5-flash" });
 		expect(snapcompact.maxFramesForDataBudget(gemini, budget)).toBe(highResFrames);
 		// Inkier 1568px variants keep the 1932px charge.
-		for (const variant of ["8x13-bw", "6x12-dim", "doc-8on16-sent-dim", "8on16-bw", "silver16-bw"] as const) {
+		for (const variant of ["8x13-bw", "6x12-dim", "doc-8on16-sent-dim", "8on16-bw", "cjk16-bw"] as const) {
 			expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex, variant), budget)).toBe(
 				highResFrames,
 			);
@@ -2001,9 +1891,8 @@ describe("new shape variants", () => {
 		const base = snapcompact.resolveShape(undefined, "doc-8on16-sent-dim");
 		expect(snapcompact.isShape({ ...base, columns: 3 })).toBe(false);
 		expect(snapcompact.isShape({ ...base, columns: 1 })).toBe(true);
-		expect(snapcompact.isShape({ ...base, stretch: "no" })).toBe(false);
+		expect(snapcompact.isShape({ ...base, wideCells: "no" })).toBe(false);
 		expect(snapcompact.isShape({ ...base, stopwordDim: 1 })).toBe(false);
-		expect(snapcompact.isShape({ ...base, font: "9x9" })).toBe(false);
 	});
 });
 

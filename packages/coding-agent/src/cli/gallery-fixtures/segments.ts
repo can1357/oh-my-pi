@@ -73,8 +73,9 @@ function variantsFor(id: StatusLineSegmentId): readonly SegmentVariantSpec[] {
 				{ label: "normal" },
 				{
 					label: "fast + advisor active",
-					facts: { fastMode: true, advisor: { status: "running", yielded: false } },
+					facts: { fastTier: "priority", advisor: { status: "running", yielded: false } },
 				},
+				{ label: "ultrafast", facts: { fastTier: "ultrafast" } },
 				{ label: "advisor warning", facts: { advisor: { status: "quota_exhausted", yielded: false } } },
 				{ label: "advisor error", facts: { advisor: { status: "error", yielded: false } } },
 				{ label: "advisor idle", facts: { advisor: { status: "idle", yielded: false } } },

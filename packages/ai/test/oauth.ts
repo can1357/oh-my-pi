@@ -9,7 +9,7 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import { getOAuthApiKey } from "@oh-my-pi/pi-ai/oauth";
-import type { OAuthCredentials, OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { $flag, getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 
 /**
@@ -85,7 +85,7 @@ export async function resolveApiKey(provider: string): Promise<string | undefine
 			}
 		}
 
-		const result = await getOAuthApiKey(provider as OAuthProvider, oauthCredentials);
+		const result = await getOAuthApiKey(provider, oauthCredentials);
 		if (!result) return undefined;
 
 		// Save refreshed credentials back to testauth.db

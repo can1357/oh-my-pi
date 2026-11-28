@@ -56,6 +56,7 @@ import { extensionTheme, renderExtension } from "../../extensions/render-output"
 import { type EmbedHost, EmbedFigure, parseEmbed } from "../figures/embed";
 import { figureSegments, mightHaveFigures, SvgFence } from "../figures/figure-markdown";
 import type { FigureCell } from "../figures/svg";
+import { ChartFigure } from "../figures/table-chart";
 import "../../styles/figures/figure";
 import { settledRevision } from "../../shell/transcript";
 import { ImageNode, InlineMedia } from "./image";
@@ -100,7 +101,7 @@ export interface AssistantMessageModel {
 	readonly figureRows?: Reactive<number | undefined>;
 	/** Tool-result images (default true). */
 	readonly showToolResultImages?: Reactive<boolean>;
-	/** Tables get charts (default false; a focused subagent's do not): Tern is sent each chart after its table. */
+	/** Chart numeric tables when graphics are enabled (default false; a focused subagent's do not). */
 	readonly tableCharts?: Reactive<boolean>;
 	/** Media grouped reads produced, by tool call id. */
 	readonly toolResultMedia?: Reactive<ReadonlyMap<string, ToolResultMedia>>;
@@ -176,6 +177,7 @@ type Part =
 			deferFigures?: boolean;
 			links?: ReadonlyMap<string, string>;
 	  }
+	| { kind: "chart"; source: string | Promise<void> }
 	| { kind: "svg"; source: string }
 	| { kind: "embed"; html: string }
 	| {
@@ -355,7 +357,8 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 		const showImages = flag(model.showImages, true);
 		const renderSvg = flag(model.renderSvg, false) && showFigureImages();
 		const renderEmbeds = flag(model.renderEmbeds, false);
-		const charts = showImages && flag(model.tableCharts, false) && nativeRendering();
+		const native = nativeRendering();
+		const charts = flag(model.tableCharts, false) && showFigureImages();
 		const tail = finalized ? undefined : thinkingTail(answer);
 		const links = read(model.linkTargets);
 		const proseOnly = model.proseOnlyThinking ?? true;
@@ -403,12 +406,14 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 				const linked = (text: string): string =>
 					links?.size ? rewriteLinkDestinations(text, href => links.get(href)) : text;
 				const markdown = (text: string, stream: boolean, deferFigures = false): void => {
-					const source = (stream ? holdPartialTableRow(text) : text).trim();
-					if (!charts || !hasChartTable(source)) {
+					const original = text.trim();
+					const source = native && stream ? holdPartialTableRow(text).trim() : original;
+					const segments = charts && hasChartTable(source) ? splitTableCharts(source, stream) : undefined;
+					if (!segments || segments.length === 1) {
 						out.set(slot(), {
 							kind: "text",
 							// Terminal streaming and link rewriting use the original Markdown.
-							source: text.trim(),
+							source: original,
 							native: stream ? speculativeStreamingSource(source) : linked(source),
 							stream,
 							deferFigures,
@@ -416,13 +421,14 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 						});
 						return;
 					}
-					const segments = splitTableCharts(source, stream);
+					// A terminal chart has a different node kind from the prose at its ordinal.
 					for (const [at, segment] of segments.entries()) {
 						if (segment.kind === "chart") {
 							const key = slot();
 							const chart = lookupTableChart(segment.table);
 							if (chart instanceof Promise) awaitChart(chart);
-							else if (chart)
+							if (!native && chart) out.set(`chart:${key}`, { kind: "chart", source: chart });
+							else if (typeof chart === "string")
 								out.set(key, { kind: "text", source: "", native: chartFence(chart), stream: false });
 						} else {
 							const tail = stream && at === segments.length - 1;
@@ -430,8 +436,9 @@ export function AssistantMessageBlock(props: { model: AssistantMessageModel }): 
 							out.set(slot(), {
 								kind: "text",
 								source: prose,
-								native: tail ? speculativeStreamingSource(prose) : linked(prose),
+								native: native && tail ? speculativeStreamingSource(prose) : linked(prose),
 								stream: tail,
+								deferFigures: deferFigures && at === 0,
 								links,
 							});
 						}
@@ -630,15 +637,12 @@ function sameSlots(a: readonly string[], b: readonly string[]): boolean {
 function errorPart(message: AssistantMessage, model: AssistantMessageModel): ErrorPart | undefined {
 	const presentation = resolveAssistantErrorPresentation(message);
 	if (presentation.kind === "compact-recovered") {
-		const attempt = message.retryRecovery?.attempt ?? 1;
-		const body = [message.errorMessage?.trim(), presentation.text].filter(
-			(line, index, all): line is string => !!line && all.indexOf(line) === index,
-		);
+		const { detail, outcome, text } = presentation;
 		return {
 			kind: "recovered",
-			attempt,
-			body: body.join("\n"),
-			note: presentation.text,
+			attempt: message.retryRecovery?.attempt ?? 1,
+			body: detail && detail !== outcome ? `${detail}\n${outcome}` : outcome,
+			note: text,
 		};
 	}
 	if (presentation.kind !== "full" || message.content.some(content => content.type === "toolCall")) return undefined;
@@ -687,6 +691,22 @@ function ReplyPart(props: {
 				prepared={() => (text()?.stream ? true : undefined)}
 				tone={props.tone}
 				term={() => ({ source: text()?.source, links: text()?.links, deferFigures: text()?.deferFigures })}
+			/>
+		);
+	}
+	if (kind === "chart") {
+		const source = computed(() => {
+			const part = props.part();
+			return part?.kind === "chart" ? part.source : undefined;
+		});
+		return (
+			<ChartFigure
+				source={source}
+				nodeKey={slot}
+				inline
+				cell={props.figureCell}
+				maxRows={props.figureRows}
+				theme={currentTheme}
 			/>
 		);
 	}

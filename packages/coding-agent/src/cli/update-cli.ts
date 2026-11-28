@@ -41,7 +41,7 @@ import {
 	fetchBuild,
 	type UpdateChannel,
 } from "./build-service";
-import { managedInstallName } from "./managed-install";
+import { isSourceCheckout, managedInstallName } from "./managed-install";
 import {
 	DEFAULT_NPM_REGISTRY,
 	loadNpmRegistryResolver,
@@ -52,6 +52,8 @@ import {
 
 import { cfgUpdateChannel } from "../modes/settings";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+export { isSourceCheckout };
 
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
@@ -296,16 +298,6 @@ function tryRealpath(p: string): string | undefined {
 	} catch {
 		return undefined;
 	}
-}
-
-/**
- * Whether this omp runs from a source checkout (the dev launcher or a `bun link` of
- * `src/cli.ts`) rather than a compiled binary or a package-manager install, which
- * always lives under `node_modules`. Checkouts update through git, so update
- * prompts are noise there.
- */
-export function isSourceCheckout(): boolean {
-	return !isCompiledBinary() && !import.meta.dir.split(path.sep).includes("node_modules");
 }
 
 /**

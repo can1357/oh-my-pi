@@ -491,13 +491,14 @@ describe("BTW follow-up lifecycle", () => {
 				});
 			} else {
 				const upsert = BtwHistoryStore.prototype.upsert;
-				vi.spyOn(BtwHistoryStore.prototype, "upsert").mockImplementationOnce(
-					async function (this: BtwHistoryStore, record) {
-						entered.resolve();
-						await release.promise;
-						await upsert.call(this, record);
-					},
-				);
+				vi.spyOn(BtwHistoryStore.prototype, "upsert").mockImplementationOnce(async function (
+					this: BtwHistoryStore,
+					record,
+				) {
+					entered.resolve();
+					await release.promise;
+					await upsert.call(this, record);
+				});
 			}
 			try {
 				panel.press("f");

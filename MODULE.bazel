@@ -229,17 +229,10 @@ crate.annotation(
     crate = "tree-sitter",
 )
 
-# cargo-bazel omits workspace-local build dependencies from generated registry
-# build scripts; restore nix 0.28's edge to the patched cfg_aliases crate.
-crate.annotation(
-    build_script_deps = ["@@//crates/vendor/cfg_aliases:cfg_aliases"],
-    crate = "nix",
-    version = "0.28.0",
-)
-
-# Same for normal dependencies: grep-printer's edge to the vendored
-# grep-searcher (a workspace member via [patch.crates-io]) is dropped, so its
-# rustc invocation has no `--extern grep_searcher`.
+# cargo-bazel omits workspace-local dependencies from generated registry
+# crates: grep-printer's edge to the vendored grep-searcher (a workspace
+# member via [patch.crates-io]) is dropped, so its rustc invocation has no
+# `--extern grep_searcher`. Restore it.
 crate.annotation(
     crate = "grep-printer",
     deps = ["@@//crates/vendor/grep-searcher:grep-searcher"],
@@ -317,16 +310,6 @@ crate.annotation(
         "PATH": "$${pwd}/external/+msvc_cc_repository+msvc_cc_arm64/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin",
     },
     crate = "ring",
-)
-# psm (via wasmtime and stacker) assembles windows-aarch64 from its GAS source
-# off a Windows host, but preprocesses that source only for GNU-style
-# compilers; under clang-cl its GLOBL/FUNCTION macros stay unexpanded. Hand it
-# @msvc_cc_arm64's GNU-driver clang (see the ring note). Absent elsewhere.
-crate.annotation(
-    build_script_env = {
-        "CC_aarch64_pc_windows_msvc": "$${pwd}/external/+msvc_cc_repository+msvc_cc_arm64/bin/clang",
-    },
-    crate = "psm",
 )
 # --- end msvc cross toolchain ---------------------------------------------------
 

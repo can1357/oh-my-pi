@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "@oh-my-pi/pi-coding-agent/cli/extension-flags";
 import { buildInitialMessage } from "@oh-my-pi/pi-coding-agent/cli/initial-message";
+import { aggregateExtensionFlags } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/flags";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { normalizeContinueSessionArgs } from "@oh-my-pi/pi-coding-agent/main";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
@@ -274,7 +274,7 @@ describe("registerFlag with built-in-named flags (r3323473227)", () => {
 			runtime,
 		);
 		const sink: ExtensionFlagSink = {
-			getFlags: () => ExtensionRunner.aggregateFlags([ext]),
+			getFlags: () => aggregateExtensionFlags([ext]),
 			setFlagValue: (name, value) => {
 				runtime.flagValues.set(name, value);
 			},

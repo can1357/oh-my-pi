@@ -132,16 +132,6 @@ export function singleLine(text: string): string {
 	return replaceTabs(text).replace(/[\r\n]+/g, " ");
 }
 
-// Grapheme segmenter (shared instance)
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
-/**
- * Get the shared grapheme segmenter instance.
- */
-export function getSegmenter(): Intl.Segmenter {
-	return segmenter;
-}
-
 /**
  * Extract a range of visible columns from a line. Handles ANSI codes and wide chars.
  *

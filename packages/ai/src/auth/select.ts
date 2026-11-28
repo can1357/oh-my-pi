@@ -1,7 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getOAuthApiKey, getOAuthProvider } from "../registry/oauth";
-import type { OAuthProvider } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { CredentialRankingContext, CredentialRankingStrategy, PlanGate, UsageReport } from "../usage";
 import { isWithinUsageReserve } from "../usage";
@@ -1315,7 +1314,7 @@ export class CredentialSelector {
 						newCredentials: refreshed,
 						apiKey: customProvider.getApiKey ? customProvider.getApiKey(refreshed) : refreshed.access,
 					}
-				: await getOAuthApiKey(provider as OAuthProvider, { [provider]: refreshed });
+				: await getOAuthApiKey(provider, { [provider]: refreshed });
 			if (!result) return undefined;
 			const updated = mergeRefreshedCredential(selection.credential, result.newCredentials);
 			if (credentialId !== undefined) {
