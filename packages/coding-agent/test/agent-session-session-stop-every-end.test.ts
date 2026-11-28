@@ -51,7 +51,7 @@ interface Options {
 	jobs?: AsyncJobManager;
 	registry?: AgentRegistry;
 	skipStopHandler?: boolean;
-	onStop?: () => void;
+	onStop?: (messages: AgentMessage[]) => void;
 }
 interface Case {
 	name: string;
@@ -158,7 +158,7 @@ async function setup(responses: MockHandler[], answer: Answer, options: Options 
 					events.push(stop(text));
 					if (target === undefined || text !== target) return;
 					target = undefined;
-					options.onStop?.();
+					options.onStop?.(event.messages);
 					if (answer === "continue") return { continue: true, additionalContext: HIDDEN };
 					if (answer === "block") return { decision: "block", reason: HIDDEN };
 				});
@@ -747,6 +747,37 @@ it("trailing tool call with a scheduled compaction continuation settles as conti
 	]);
 	expect(f.mock.calls).toHaveLength(3);
 });
+
+it("passes the compacted history to stop handlers when compaction blocks continuation", async () => {
+	const messagesAtStop: AgentMessage[][] = [];
+	const f = await setup([reply(SEED), reply(TARGET, GRACE_BAND)], "continue", {
+		family: "anthropic-messages",
+		settings: { "compaction.methodOrder": ["soft"], "compaction.asyncEnabled": false },
+		onStop: messages => messagesAtStop.push(messages),
+	});
+	const removed = "Earlier context to summarize.";
+	await prompt(f, `${removed} `.repeat(400));
+	f.events.length = 0;
+
+	const compact = holdSoftCompaction();
+	const turn = prompt(f);
+	try {
+		await reached(compact.started.promise, "the threshold compaction request");
+		vi.spyOn(f.session, "getContextUsage").mockReturnValue({ tokens: 120_000, contextWindow: WINDOW, percent: 94 });
+	} finally {
+		compact.finish.resolve();
+		await turn;
+	}
+
+	const summary = expect.objectContaining({ role: "compactionSummary", summary: SUMMARY });
+	expect(f.session.messages).toContainEqual(summary);
+	expect(f.events).toEqual([stop(TARGET), end(TARGET)]);
+	expect(f.mock.calls).toHaveLength(2);
+	expect(messagesAtStop).toHaveLength(1);
+	expect(messagesAtStop[0]).toContainEqual(summary);
+	expect(JSON.stringify(messagesAtStop[0])).not.toContain(removed);
+});
+
 register({
 	name: "provider abort with tool call refuses continuation but notifies",
 	continuation: "refused",

@@ -6660,9 +6660,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#sessionStopPasses.add(event);
 		const refused = continuation === "refused";
 		const loopEpoch = this.#runEpoch;
+		// These routes can reach the hook after compaction replaced the loop's captured history.
+		const stopMessages =
+			route === "compaction-blocked" ||
+			route === "active-goal-compaction-blocked" ||
+			route === "trailing-tool-call" ||
+			route === "continuation-dropped"
+				? this.agent.state.messages
+				: messages;
 		const result = await this.#extensionRunner.emitSessionStop(
 			{
-				messages,
+				messages: stopMessages,
 				turn_id: Math.max(0, this.#turnIndex - 1),
 				last_assistant_message: lastAssistantMessage,
 				session_id: this.sessionId,
