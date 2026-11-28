@@ -1152,6 +1152,10 @@ impl Drop for HaltGuard {
 /// Bytes requested per asynchronous input read.
 const READ_CHUNK: usize = 64 * 1024;
 
+/// Bytes GNU grep 3.11 asks for in its first read of an input: `-L -m 0`
+/// reads this much of standard input before it lists it.
+const FIRST_READ: usize = 96 * 1024;
+
 fn display_path_for_operand(operand: &OsStr, resolved: &Path, path: &Path) -> PathBuf {
 	let rel = path.strip_prefix(resolved).unwrap_or(path);
 	if rel.is_empty() {
@@ -1303,6 +1307,15 @@ async fn scan_into<M: Matcher, W: Write, D: Write>(
 	buf: &mut [u8],
 	mut delivery: Option<RecordDelivery<'_, D>>,
 ) -> io::Result<SearchResult> {
+	if sink.opts.max_count == Some(0) {
+		// `-L -m 0`, the one search that runs at a zero limit (see
+		// `Grep::run`), selects no line: as GNU grep does, it lists the
+		// input once its first read returns, and never runs the matcher.
+		input.read(buf).await?;
+		sink.write_path_record()?;
+		deliver_scan_output(input.host(), delivery.as_mut()).await?;
+		return Ok(sink.result);
+	}
 	let terminator = bound_terminator(searcher, sink.matcher);
 	let binary = sink.binary;
 	let mode = sink.opts.binary_files;
@@ -1877,7 +1890,7 @@ async fn search_stdin<M: Matcher>(
 		Some(_) => host.stdin.file().seek_async(SeekFrom::Current(0)).await.ok(),
 		None => None,
 	};
-	let mut buf = vec![0u8; READ_CHUNK];
+	let mut buf = vec![0u8; if opts.max_count == Some(0) { FIRST_READ } else { READ_CHUNK }];
 	let result = scan(
 		&mut ScanInput::Stdin(host),
 		&mut builder.build(),
@@ -1908,9 +1921,6 @@ async fn execute_search<M: Matcher + Clone + Send + Sync + 'static>(
 	rules: &PathRules,
 	opts: &Options,
 ) -> i32 {
-	if opts.max_count == Some(0) {
-		return 1;
-	}
 	let builder = build_searcher(cli, opts);
 	let fs = host.vfs();
 	let (_guard, outer) = HaltGuard::new();
@@ -2105,6 +2115,14 @@ impl AsyncUtility for Grep {
 			return 2;
 		},
 	};
+	let (files_with_matches, files_without_match) = resolve_file_list_modes(&matches);
+	// `-m 0` selects no line, so GNU grep exits before it compiles a pattern
+	// or opens an input, save that `-L` lists each input. `-q` lists nothing,
+	// nor does a standard output on the null device, which GNU takes for
+	// `-q`.
+	if max_count == Some(0) && (!files_without_match || cli.quiet || host.stdout_is_null_device()) {
+		return 1;
+	}
 	let matcher = match build_matcher(
 		host,
 		&patterns,
@@ -2132,7 +2150,6 @@ impl AsyncUtility for Grep {
 	let selects_no_record = (zero_patterns && !cli.invert) || inverted_empty_pattern;
 	patterns.clear();
 
-	let (files_with_matches, files_without_match) = resolve_file_list_modes(&matches);
 	let suppress_context =
 		cli.count || files_with_matches || files_without_match || cli.quiet || cli.only_matching;
 	let context = resolve_context(&cli, &matches);
@@ -2368,6 +2385,82 @@ mod tests {
 		let (code, out, _) = run(&["absent"], "hit\n").await;
 		assert_eq!(code, 1);
 		assert!(out.is_empty());
+	}
+
+	/// GNU grep 3.11's `-L -m 0` selects no line, yet lists each input it
+	/// opens once its first read returns, and never runs the matcher: a `-P`
+	/// pattern that passes PCRE2's match limit on the input cannot fail it.
+	/// Every other `-m 0` search exits 1 before it compiles the pattern or
+	/// opens an input: without `-L`, under `-q`, and with a standard output
+	/// on the null device, which GNU takes for `-q`. Regressed: `-L -m 0`
+	/// listed nothing, and `-m 0` refused an invalid pattern it never used.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn files_without_match_at_a_zero_limit_lists_each_input() {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("t"), "x\n").unwrap();
+		std::fs::write(tree.path().join("abc"), "a\nb\nc\n").unwrap();
+		std::fs::write(tree.path().join("bt"), format!("{}b\n", "a".repeat(40))).unwrap();
+		std::fs::create_dir_all(tree.path().join("d/sub")).unwrap();
+		std::fs::write(tree.path().join("d/t"), "x\n").unwrap();
+		std::fs::write(tree.path().join("d/sub/u"), "a\n").unwrap();
+		let tree_listing = "d/sub/u\nd/t\n".replace('/', std::path::MAIN_SEPARATOR_STR);
+		for (args, stdin, expected) in [
+			(&["-L", "-m0", "x", "t"][..], "", (1, "t\n", "")),
+			(&["-L", "-m0", "x", "t", "abc"], "", (1, "t\nabc\n", "")),
+			(&["-c", "-L", "-m0", "x", "t", "abc"], "", (1, "t\nabc\n", "")),
+			(&["-L", "-m0", "-P", "^(a|aa)+$", "bt"], "", (1, "bt\n", "")),
+			(&["-rL", "-m0", "x", "d"], "", (1, tree_listing.as_str(), "")),
+			(&["-L", "-m0", "x"], "x\n", (1, "(standard input)\n", "")),
+			(&["-q", "-L", "-m0", "x", "nosuch"], "", (1, "", "")),
+			(&["-l", "-m0", "x", "t"], "", (1, "", "")),
+			(&["-l", "-m0", "-E", "a(", "abc"], "", (1, "", "")),
+			(&["-q", "-L", "-m0", "-E", "a(", "abc"], "", (1, "", "")),
+			(&["-L", "-l", "-m0", "-E", "a(", "abc"], "", (1, "", "")),
+			(&["-L", "-m0", "-E", "a(", "abc"], "", (2, "", "grep: Unmatched ( or \\(\n")),
+		] {
+			let (code, capture) = run_async_util::<Grep>(args, stdin, tree.path()).await;
+			assert_eq!((code, capture.out().as_str(), capture.err().as_str()), expected, "grep {args:?}");
+		}
+		let (code, capture) = run_async_util::<Grep>(&["-L", "-m0", "x", "t", "nosuch"], "", tree.path()).await;
+		assert_eq!((code, capture.out().as_str()), (2, "t\n"));
+		assert!(capture.err().contains("nosuch"), "{}", capture.err());
+		// Without the zero limit the matcher passes its match limit on `bt`.
+		let (code, capture) = run_async_util::<Grep>(&["-L", "-P", "^(a|aa)+$", "bt"], "", tree.path()).await;
+		assert_eq!((code, capture.out().as_str()), (2, ""), "{}", capture.err());
+
+		// A standard output on the null device: no pattern is compiled and no
+		// input is opened, so neither an invalid pattern nor a missing input
+		// draws a message.
+		let null = std::path::Path::new(if cfg!(windows) { "NUL" } else { "/dev/null" });
+		for args in [
+			&["-L", "-m0", "x", "nosuch"][..],
+			&["-L", "-m0", "x", "t", "nosuch"],
+			&["-L", "-m0", "-E", "a(", "abc"],
+		] {
+			assert_eq!(run_with_stdout_file(args, tree.path(), null).await, (1, String::new()), "grep {args:?}");
+		}
+
+		// GNU's first read of standard input is 96 KiB: of 100,000 bytes it
+		// leaves 1,696 to the next reader.
+		let big = tree.path().join("big");
+		std::fs::write(&big, "a\n".repeat(50_000)).unwrap();
+		let stdin = Arc::new(std::fs::File::open(&big).unwrap());
+		let (mut host, capture) = Host::for_test_async("grep", "", tree.path());
+		host.set_test_stdin(openfiles::OpenFile::File(Arc::clone(&stdin)));
+		let code = run_parsed(&["-L", "-m0", "x"], &mut host).await;
+		host.sync_output().await.unwrap();
+		assert_eq!((code, capture.out().as_str()), (1, "(standard input)\n"), "{}", capture.err());
+		assert_eq!(std::io::Seek::stream_position(&mut &*stdin).unwrap(), 98_304);
+
+		// One read of an input that never ends, then the listing.
+		#[cfg(unix)]
+		{
+			let listed = run_async_util::<Grep>(&["-L", "-m0", "x", "/dev/zero"], "", tree.path());
+			let (code, capture) = tokio::time::timeout(std::time::Duration::from_secs(10), listed)
+				.await
+				.expect("grep -L -m0 read /dev/zero past its first read");
+			assert_eq!((code, capture.out().as_str()), (1, "/dev/zero\n"), "{}", capture.err());
+		}
 	}
 
 	/// `-e` exists so a pattern may start with `-` (GNU grep); clap used to
