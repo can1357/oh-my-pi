@@ -93,7 +93,8 @@ export interface CursorModelDiscoveryOptions {
  *   parameter axes, variants, capabilities, aliases and cost multipliers.
  *   cursor-agent runs every model it lists, including ones `GetUsableModels`
  *   omits.
- * - `GetUsableModels` is the fallback roster when `AvailableModels` fails. It
+ * - `GetUsableModels` is the fallback roster when the endpoint does not
+ *   implement `AvailableModels` (HTTP 404) or returns an empty one. It
  *   also contributes usable slugs the rich roster does not describe.
  * - `GetDefaultModelForCli` identifies the account's current default.
  *
@@ -101,8 +102,13 @@ export interface CursorModelDiscoveryOptions {
  * the bundled rows; discovery only scales them by a variant's declared multiplier.
  *
  * Returns `null` unless at least one model-list RPC (`GetUsableModels` or
- * `AvailableModels`) decoded. A successful empty catalog returns `[]`,
- * preserving model-manager retry and fallback semantics.
+ * `AvailableModels`) decoded, and also when `AvailableModels` failed
+ * transiently (timeout, transport error, non-404 status, undecodable body):
+ * the legacy roster alone lacks every rich lane (`-1m` context tiers, fast
+ * variants), so publishing it would replace a complete cached catalog with a
+ * partial one. Only an endpoint that does not implement `AvailableModels`
+ * (HTTP 404) publishes the legacy roster. A successful empty catalog returns
+ * `[]`, preserving model-manager retry and fallback semantics.
  */
 export async function fetchCursorUsableModels(
 	options: CursorModelDiscoveryOptions,
@@ -143,19 +149,20 @@ export async function fetchCursorUsableModels(
 			timeoutMs,
 		),
 	]);
-	const usable = decodeUnary(GetUsableModelsResponseSchema, usablePayload);
-	const available = decodeUnary(AvailableModelsResponseSchema, availablePayload);
+	const usable = decodeUnary(GetUsableModelsResponseSchema, rpcPayload(usablePayload));
+	const available = decodeUnary(AvailableModelsResponseSchema, rpcPayload(availablePayload));
 	// Only a decoded model list is authoritative: the default-model RPC alone
 	// must not publish an empty roster that replaces the cached catalog.
 	if (usable === null && available === null) return null;
-	const defaultModel = decodeUnary(GetDefaultModelForCliResponseSchema, defaultPayload)?.model;
+	const defaultModel = decodeUnary(GetDefaultModelForCliResponseSchema, rpcPayload(defaultPayload))?.model;
 	const parsedUsable = CursorDecodedResponseSchema(usable);
 	const references = createCursorReferenceMap();
 	const legacyModels =
 		parsedUsable instanceof type.errors
 			? []
 			: normalizeCursorModels(parsedUsable.models, options.baseUrl, references);
-	if (!available || available.models.length === 0) return legacyModels;
+	if (available === null) return availablePayload === CURSOR_RPC_UNIMPLEMENTED ? legacyModels : null;
+	if (available.models.length === 0) return legacyModels;
 	const richModels = normalizeRichCursorModels(
 		available.models,
 		options.baseUrl,
@@ -179,6 +186,14 @@ export async function fetchCursorUsableModels(
 	return richModels.sort((a, b) => a.id.localeCompare(b.id));
 }
 
+/** An RPC the endpoint does not implement (Connect `unimplemented`, HTTP 404), as opposed to a transient failure. */
+const CURSOR_RPC_UNIMPLEMENTED = Symbol("cursor-rpc-unimplemented");
+type CursorUnaryResult = Uint8Array | typeof CURSOR_RPC_UNIMPLEMENTED | null;
+
+function rpcPayload(result: CursorUnaryResult): Uint8Array | null {
+	return result instanceof Uint8Array ? result : null;
+}
+
 /**
  * One unary RPC under a single deadline. HTTP/1.1 fetch goes first; the
  * HTTP/2 Connect retry runs only after a transport-level failure (h2-only
@@ -191,7 +206,7 @@ async function fetchCursorUnary(
 	body: Uint8Array<ArrayBuffer>,
 	options: CursorModelDiscoveryOptions,
 	timeoutMs: number,
-): Promise<Uint8Array | null> {
+): Promise<CursorUnaryResult> {
 	const deadline = Date.now() + timeoutMs;
 	const signal = AbortSignal.timeout(timeoutMs);
 	let response: Response;
@@ -212,7 +227,7 @@ async function fetchCursorUnary(
 		// Older/custom Cursor endpoints may accept only an HTTP/2 Connect request.
 		return fetchViaHttp2(baseUrl, path, body, options, remainingMs);
 	}
-	if (!response.ok) return null;
+	if (!response.ok) return response.status === 404 ? CURSOR_RPC_UNIMPLEMENTED : null;
 	try {
 		return new Uint8Array(await response.arrayBuffer());
 	} catch {
@@ -227,11 +242,11 @@ async function fetchViaHttp2(
 	body: Uint8Array,
 	options: CursorModelDiscoveryOptions,
 	timeoutMs: number,
-): Promise<Uint8Array | null> {
-	const { promise, resolve } = Promise.withResolvers<Uint8Array | null>();
+): Promise<CursorUnaryResult> {
+	const { promise, resolve } = Promise.withResolvers<CursorUnaryResult>();
 	const client = http2.connect(baseUrl);
 	let settled = false;
-	const finish = (value: Uint8Array | null): void => {
+	const finish = (value: CursorUnaryResult): void => {
 		if (settled) return;
 		settled = true;
 		clearTimeout(timer);
@@ -258,7 +273,8 @@ async function fetchViaHttp2(
 	req.on("error", () => finish(null));
 	req.on("response", headers => {
 		const status = Number(headers[":status"] ?? 0);
-		if (status < 200 || status >= 300) finish(null);
+		if (status === 404) finish(CURSOR_RPC_UNIMPLEMENTED);
+		else if (status < 200 || status >= 300) finish(null);
 	});
 	req.end(Buffer.from(body));
 	return promise;

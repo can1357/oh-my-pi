@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor's long-context and other variant models (e.g. `cursor/claude-opus-5-5-1m`) disappearing until the next refresh, with "unknown model" fallback-chain warnings at startup, when one discovery pass got Cursor's basic model list but not its variant list; the previous catalog is now kept and refetched sooner ([#16554](https://github.com/can1357/oh-my-pi/pull/16554) by [@gchai](https://github.com/gchai))
 ### Breaking Changes
 
 - Removed the `KnownProvider` type and the generated `compat/auth-ids` and `compat/provider-ids` modules (`AuthProviderId`, `LoginProviderId`); provider ids are plain strings
