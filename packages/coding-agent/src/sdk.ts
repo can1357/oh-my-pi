@@ -270,7 +270,7 @@ import { buildCallContext } from "./spotlight/context";
 import { type CalledToolShaper, shapeCalledTool } from "./spotlight";
 import {
 	accessDeniedNotice,
-	NO_CREDENTIAL_NOTICE,
+	noCredentialNotice,
 	SPOTLIGHT_INTENT_DESCRIPTION,
 	SPOTLIGHT_INTENT_GUIDANCE,
 	SPOTLIGHT_NOTICE_SOURCE,
@@ -5733,10 +5733,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Lines already seen follow the live context on their own (`getContextMessages`); a new session file starts over.
 		if (spotlightExperiment) {
 			session.registerSessionChangeCallback(() => spotlightExperiment.onSessionChange());
-			spotlightExperiment.client.onCredentialMissing = () =>
-				session.emitNotice("warning", NO_CREDENTIAL_NOTICE, SPOTLIGHT_NOTICE_SOURCE);
-			spotlightExperiment.client.onAccessDenied = reason =>
-				session.emitNotice("warning", accessDeniedNotice(reason), SPOTLIGHT_NOTICE_SOURCE);
+			if (spotlightExperiment.client) {
+				const notice = noCredentialNotice(spotlightExperiment.ranker);
+				spotlightExperiment.client.onCredentialMissing = () =>
+					session.emitNotice("warning", notice, SPOTLIGHT_NOTICE_SOURCE);
+				spotlightExperiment.client.onAccessDenied = reason =>
+					session.emitNotice(
+						"warning",
+						accessDeniedNotice(reason, spotlightExperiment.ranker),
+						SPOTLIGHT_NOTICE_SOURCE,
+					);
+			}
 		}
 		// Extension factories normally register tools before session construction,
 		// but Pi-compatible extensions may discover them asynchronously from a

@@ -3,20 +3,26 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { Message } from "@oh-my-pi/pi-ai";
+import type { JudgmentRequest, JudgmentResult, Message, Questions } from "@oh-my-pi/pi-ai";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { resolveToolCallIntent } from "@oh-my-pi/pi-coding-agent/job-widgets/intent";
+import * as judgment from "@oh-my-pi/pi-coding-agent/judgment";
 import type { CustomEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SpotlightClient } from "@oh-my-pi/pi-coding-agent/spotlight/client";
 import { type CalledToolResult, shapeCalledTool } from "@oh-my-pi/pi-coding-agent/spotlight/index";
+import { JudgeScorer } from "@oh-my-pi/pi-coding-agent/spotlight/judge-scorer";
 import { buildCallContext, callSummary } from "@oh-my-pi/pi-coding-agent/spotlight/context";
 import { RecordingScorer } from "@oh-my-pi/pi-coding-agent/spotlight/scorer";
 import { readArtifactText } from "@oh-my-pi/pi-coding-agent/spotlight/sink";
 import {
+	accessDeniedNotice,
+	noCredentialNotice,
 	SpotlightExperiment,
 	type SpotlightExperimentOptions,
+	standaloneFindSpotlight,
 	startSpotlightExperiment,
 } from "@oh-my-pi/pi-coding-agent/spotlight/session";
 import { countTokens } from "@oh-my-pi/pi-coding-agent/spotlight/shape/shape";
@@ -157,6 +163,110 @@ const LONG_LOG = Array.from({ length: 400 }, (_, i) =>
 		? "ERROR: connection refused at db.ts:42"
 		: `step ${i + 1}: worker-${i % 7} synced ${(i * 37) % 1000} rows from shard-${i % 5} in ${(i * 13) % 90}ms`,
 ).join("\n");
+
+describe("spotlight ranker", () => {
+	it("journals the ranker it shaped with and asks no Spotlight client under the judge ranker", async () => {
+		const { session, manager } = await toolSession(
+			{},
+			manager => new SpotlightExperiment(undefined, "low", manager, { ranker: "judge" }),
+		);
+		const experiment = session.spotlight as SpotlightExperiment;
+		expect(experiment.sessionEntry()).toMatchObject({ ranker: "judge", model: "", urlHost: "" });
+
+		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(bashOutput(LONG_LOG));
+		await new BashTool(session).execute("b1", { command: "cat fixture.ts" });
+
+		// No judge candidate in this fixture session, so shaping keeps its unranked rules and says why.
+		const [entry] = entries(manager, SPOTLIGHT_ENTRY.shape);
+		expect(entry).toMatchObject({ tool: "bash", ranker: "judge" });
+		expect((entry!.spotlight as Record<string, unknown>).failureCauses).toMatchObject({
+			no_judge: expect.any(Number),
+		});
+	});
+
+	it("starts no client and warms nothing when the ranker is the judge role", () => {
+		const settings = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "judge" });
+		const manager = SessionManager.inMemory("/nonexistent");
+		const experiment = startSpotlightExperiment(settings, manager);
+		expect(experiment?.client).toBeUndefined();
+		expect(entries(manager, SPOTLIGHT_ENTRY.session)[0]).toMatchObject({ ranker: "judge", urlHost: "", model: "" });
+	});
+
+	it("builds the Spotlight client for auto through the real session path, and ranks with it", async () => {
+		// Policy-blocked, so the warm-up the start sends never reaches the network.
+		const settings = Settings.isolated({
+			"spotlight.experiment.enabled": true,
+			"spotlight.ranker": "auto",
+			"models.noSpotlight": true,
+		});
+		const manager = SessionManager.inMemory(await tmpDir());
+		const experiment = startSpotlightExperiment(settings, manager, () => "local");
+		expect(experiment?.client).toBeDefined();
+		expect(experiment?.ranker).toBe("auto");
+		// Auto ranks with Spotlight first, so the entry names the endpoint it will try.
+		expect(entries(manager, SPOTLIGHT_ENTRY.session)[0]).toMatchObject({ ranker: "auto" });
+		const scorer = experiment!.makeScorer({ settings, sessionManager: manager });
+		// From settings to scorer: Spotlight ranks first, and the judge reranks the whole call when a chunk cannot be
+		// answered.
+		expect(scorer.fallback).toBeDefined();
+		expect(scorer.fallback!.fallback).toBeUndefined();
+		expect(scorer.scoreFree).toBeUndefined();
+		experiment!.client!.close();
+	});
+
+	it("ranks standalone find with Spotlight under auto, and only skips it for judge", () => {
+		const auto = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "auto" });
+		const judge = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "judge" });
+		const found = standaloneFindSpotlight(auto);
+		expect(found?.client).toBeDefined();
+		found?.client.close();
+		expect(standaloneFindSpotlight(judge)).toBeUndefined();
+	});
+
+	it("gives the judge a budget of its own on every call it reranks under auto", async () => {
+		// Spotlight's client waits longer than the judge's budget: each call spends that wait before the handover.
+		const settings = Settings.isolated({ "spotlight.timeoutMs": 60 });
+		const manager = SessionManager.inMemory(await tmpDir());
+		const client = spotlightClient(fakeSpotlight({ hang: true }), 120);
+		const experiment = new SpotlightExperiment(client, "low", manager, { ranker: "auto" });
+		let asked = 0;
+		const judge = {
+			label: "fake/judge",
+			async judge<Q extends Questions>(
+				request: JudgmentRequest<Q>,
+				options?: { signal?: AbortSignal },
+			): Promise<JudgmentResult<Q>> {
+				await Promise.resolve();
+				if (options?.signal?.aborted) throw new Error("aborted");
+				asked++;
+				const answers: Record<string, unknown> = {};
+				for (const key of Object.keys(request.questions)) answers[key] = { type: "noul", noul: 0.5 };
+				return {
+					answers,
+					usage: { input: 100, output: 1, totalTokens: 101, cacheRead: 0, cacheWrite: 0, cost: { total: 0.001 } },
+				} as unknown as JudgmentResult<Q>;
+			},
+		};
+		vi.spyOn(judgment, "resolveJudge").mockReturnValue(judge as unknown as judgment.ChainJudge);
+		const scorer = experiment.makeScorer({ settings, sessionManager: manager, modelRegistry: {} as ModelRegistry });
+		const ctx = { task: "Fix the service.", said: "", intent: "", commands: [], source: "bash cat log" };
+		// Two ranking calls of one result, each as `scoreLines` runs it: Spotlight times out, the judge reranks.
+		for (let call = 0; call < 2; call++) {
+			expect(await scorer.score(["a", "b"], ctx)).toBeNull();
+			expect(await scorer.fallback!.score(["a", "b"], ctx)).toEqual([0.5, 0.5]);
+		}
+		expect(asked).toBe(2);
+		expect(scorer.fallback).toBeInstanceOf(JudgeScorer);
+		expect((scorer.fallback as JudgeScorer).usage).toMatchObject({ calls: 2, failures: 0, tokens: 200 });
+		client.close();
+	});
+
+	it("keeps the Spotlight client under the default ranker", async () => {
+		const { session } = await experimentSession();
+		expect(session.spotlight?.ranker).toBe("spotlight");
+		expect(session.spotlight?.client).toBeDefined();
+	});
+});
 
 describe("spotlight shaping hooks", () => {
 	const SOURCE =
@@ -1228,7 +1338,7 @@ describe("spotlight session entry", () => {
 		);
 		expect(experiment).toBeDefined();
 		await expect(
-			experiment!.client.rank({
+			experiment!.client!.rank({
 				state: { task: "find files" },
 				source: "search",
 				items: ["one"],
@@ -1236,7 +1346,7 @@ describe("spotlight session entry", () => {
 			}),
 		).rejects.toThrow("disabled by model policy");
 		expect(fetchSpy).not.toHaveBeenCalled();
-		experiment!.client.close();
+		experiment!.client?.close();
 	});
 	it("journals the session entry on a session change only when the journal's last one differs", async () => {
 		const manager = SessionManager.inMemory(await tmpDir());
@@ -1255,6 +1365,17 @@ describe("spotlight session entry", () => {
 		const manager = SessionManager.inMemory(await tmpDir());
 		expect(startSpotlightExperiment(Settings.isolated({}), manager)).toBeUndefined();
 		expect(entries(manager, SPOTLIGHT_ENTRY.session)).toEqual([]);
+	});
+
+	it("warns without a credential that the judge ranks under auto, not that the unranked rules cut", () => {
+		expect(noCredentialNotice("auto")).not.toBe(noCredentialNotice("spotlight"));
+	});
+
+	it("warns on denied access that the judge ranks under auto, not that the unranked rules cut", () => {
+		const reason = "This account is waitlisted.";
+		expect(accessDeniedNotice(reason, "auto")).toContain("judge role ranks tool output");
+		expect(accessDeniedNotice(reason, "auto")).not.toContain("unranked fallback rules");
+		expect(accessDeniedNotice(reason, "spotlight")).toContain("unranked fallback rules");
 	});
 });
 

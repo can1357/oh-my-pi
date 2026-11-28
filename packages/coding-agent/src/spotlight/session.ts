@@ -13,17 +13,22 @@ import {
 	cfgSpotlightExperimentScoreFree,
 	cfgSpotlightExperimentTools,
 	cfgSpotlightModel,
+	cfgSpotlightRanker,
 	cfgSpotlightThinking,
 	cfgSpotlightTimeoutMs,
 	cfgSpotlightUrl,
 } from "./settings";
+import { type SpotlightScorerSession, judgeScorerFor } from "./judge-scorer";
+import { RecordingScorer } from "./scorer";
 import { newShapeState, type ShapeState } from "./shape";
 import { ArtifactShapeSink, readArtifactText } from "./sink";
 import {
 	ALL_TOOLS,
 	DEFAULT_SPOTLIGHT_URL,
 	SPOTLIGHT_ENTRY,
+	type ScoringScorer,
 	type SpotlightEntryType,
+	type SpotlightRanker,
 	type SpotlightSession,
 	type SpotlightThinking,
 } from "./types";
@@ -46,8 +51,10 @@ export interface SpotlightSessionEntry extends SpotlightShares {
 	tools: string[];
 	model: string;
 	thinking: SpotlightThinking;
-	/** Host of the Spotlight endpoint. */
+	/** Host of the Spotlight endpoint; empty when the judge ranks and no client exists. */
 	urlHost: string;
+	/** Which service ranked this session: `spotlight`, or the `judge` role. */
+	ranker: SpotlightRanker;
 	piVersion: string;
 }
 
@@ -69,18 +76,35 @@ export interface SpotlightCoins {
 export interface SpotlightExperimentOptions extends Partial<SpotlightShares> {
 	/** Tool names whose results are shaped (`*`: every tool); default every tool. */
 	tools?: readonly string[];
+	/** The service that ranks shaped output; default `spotlight` when a client was given, else `judge`. */
+	ranker?: SpotlightRanker;
 }
 
 /** The `source` of the experiment's session notices. */
 export const SPOTLIGHT_NOTICE_SOURCE = "spotlight";
 
-/** The warning a session shows when Spotlight finds no Stencil credential. */
-export const NO_CREDENTIAL_NOTICE =
-	"No Stencil credential: Spotlight ranking is off, and tool output is cut by the unranked fallback rules. To restore it, run /login and choose Stencil, or set STENCIL_API_KEY.";
+/**
+ * The warning a session shows when Spotlight finds no Stencil credential: under `auto` the judge role ranks in its
+ * place, under `spotlight` the unranked fallback rules cut.
+ */
+export function noCredentialNotice(ranker: SpotlightRanker): string {
+	const instead =
+		ranker === "auto"
+			? "the judge role ranks tool output in its place"
+			: "tool output is cut by the unranked fallback rules";
+	return `No Stencil credential: Spotlight ranking is off, and ${instead}. To restore it, run /login and choose Stencil, or set STENCIL_API_KEY.`;
+}
 
-/** The warning a session shows when Stencil Cloud refuses the account Spotlight access (`waitlisted`/`forbidden`). */
-export function accessDeniedNotice(reason: string): string {
-	return `Spotlight ranking is off: ${reason} Tool output is cut by the unranked fallback rules; omp asks again in a few hours, or as soon as you sign in to another Stencil account.`;
+/**
+ * The warning a session shows when Stencil Cloud refuses the account Spotlight access (`waitlisted`/`forbidden`):
+ * under `auto` the judge role ranks in Spotlight's place, under `spotlight` the unranked fallback rules cut.
+ */
+export function accessDeniedNotice(reason: string, ranker: SpotlightRanker): string {
+	const instead =
+		ranker === "auto"
+			? "The judge role ranks tool output in Spotlight's place"
+			: "Tool output is cut by the unranked fallback rules";
+	return `Spotlight ranking is off: ${reason} ${instead}; omp asks again in a few hours, or as soon as you sign in to another Stencil account.`;
 }
 
 /**
@@ -88,7 +112,8 @@ export function accessDeniedNotice(reason: string): string {
  * (lines already shown, cuts made) shaping reads and updates.
  */
 export class SpotlightExperiment implements SpotlightSession {
-	readonly client: SpotlightClient;
+	readonly client: SpotlightClient | undefined;
+	readonly ranker: SpotlightRanker;
 	readonly thinking: SpotlightThinking;
 	readonly sink: ArtifactShapeSink;
 	shapeState: ShapeState = newShapeState();
@@ -103,13 +128,14 @@ export class SpotlightExperiment implements SpotlightSession {
 	readonly #random: () => number;
 
 	constructor(
-		client: SpotlightClient,
+		client: SpotlightClient | undefined,
 		thinking: SpotlightThinking,
 		sessionManager: SessionManager,
 		options: SpotlightExperimentOptions = {},
 		random: () => number = Math.random,
 	) {
 		this.client = client;
+		this.ranker = options.ranker ?? (client ? "spotlight" : "judge");
 		this.thinking = thinking;
 		this.shares = {
 			holdout: Math.min(1, Math.max(0, options.holdout ?? 0)),
@@ -160,20 +186,41 @@ export class SpotlightExperiment implements SpotlightSession {
 
 	/** The `spotlight:session` entry this session writes. */
 	sessionEntry(): SpotlightSessionEntry {
-		let urlHost = this.client.url;
+		let urlHost = this.client?.url ?? "";
 		try {
-			urlHost = new URL(this.client.url).host;
+			urlHost = new URL(urlHost).host;
 		} catch {
-			// A malformed URL keeps its text; ranking reports the transport failure.
+			// A malformed URL keeps its text; ranking reports the transport failure. No client leaves it empty.
 		}
 		return {
 			...this.shares,
 			tools: [...this.tools],
-			model: this.client.model,
+			model: this.client?.model ?? "",
 			thinking: this.thinking,
 			urlHost,
+			ranker: this.ranker,
 			piVersion: VERSION,
 		};
+	}
+
+	/**
+	 * The scorer one tool result is shaped with: a client-backed {@link RecordingScorer}, or a {@link JudgeScorer}
+	 * over this session's `judge` role. Construction is per call: the judge chain resolves lazily and the usage
+	 * lands on the result's own journal entry.
+	 */
+	makeScorer(session: SpotlightScorerSession): ScoringScorer {
+		const budgetMs = cfgSpotlightTimeoutMs.get(session.settings);
+		if (this.ranker === "judge") return judgeScorerFor(session, budgetMs, "spotlight");
+		if (!this.client) throw new Error("spotlight: no client to rank with");
+		// `auto` ranks with Spotlight and hands the whole call to the judge when Spotlight cannot answer a chunk. Each
+		// handover gets a budget of its own: Spotlight's timeout already ran before it.
+		if (this.ranker === "auto")
+			return new RecordingScorer(
+				this.client,
+				this.thinking,
+				judgeScorerFor(session, budgetMs, "spotlight", { rerank: true }),
+			);
+		return new RecordingScorer(this.client, this.thinking);
 	}
 
 	/** Text of a session artifact (a tool's full output), or null when it is gone or unreadable. */
@@ -192,6 +239,7 @@ export class SpotlightExperiment implements SpotlightSession {
 		if (
 			last?.holdout === this.shares.holdout &&
 			last.scoreFree === this.shares.scoreFree &&
+			last.ranker === this.ranker &&
 			last.tools?.join(",") === this.tools.join(",")
 		) {
 			return;
@@ -210,14 +258,18 @@ export function startSpotlightExperiment(
 	getSessionProvider?: () => string | undefined,
 ): SpotlightExperiment | undefined {
 	if (!cfgSpotlightExperimentEnabled.get(settings)) return undefined;
-	const client = spotlightClient(settings, getSessionProvider);
+	const ranker = cfgSpotlightRanker.get(settings);
+	// `auto` ranks with Spotlight first, so it needs the client as much as `spotlight` does.
+	const client = ranker === "judge" ? undefined : spotlightClient(settings, getSessionProvider);
 	const experiment = new SpotlightExperiment(client, cfgSpotlightThinking.get(settings), sessionManager, {
 		holdout: cfgSpotlightExperimentHoldout.get(settings),
 		scoreFree: cfgSpotlightExperimentScoreFree.get(settings),
 		tools: cfgSpotlightExperimentTools.get(settings),
+		ranker,
 	});
 	experiment.log(SPOTLIGHT_ENTRY.session, { ...experiment.sessionEntry() });
-	client.warm();
+	// A judge-based session asks nothing of the network until its first ranking, and needs no warm-up.
+	client?.warm();
 	return experiment;
 }
 
@@ -225,8 +277,15 @@ export function startSpotlightExperiment(
  * How `omp find` ranks filenames outside a session: Spotlight's handle when `spotlight.experiment.enabled`, else
  * undefined (the judge ranks). Nothing is journaled, since no session exists.
  */
-export function standaloneFindSpotlight(settings: Settings): Pick<SpotlightSession, "client" | "thinking"> | undefined {
-	if (!cfgSpotlightExperimentEnabled.get(settings) || cfgNoSpotlight.get(settings) || cfgOffline.get(settings)) {
+export function standaloneFindSpotlight(
+	settings: Settings,
+): { client: SpotlightClient; thinking: SpotlightThinking } | undefined {
+	if (
+		!cfgSpotlightExperimentEnabled.get(settings) ||
+		cfgSpotlightRanker.get(settings) === "judge" ||
+		cfgNoSpotlight.get(settings) ||
+		cfgOffline.get(settings)
+	) {
 		return undefined;
 	}
 	return { client: spotlightClient(settings), thinking: cfgSpotlightThinking.get(settings) };

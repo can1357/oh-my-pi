@@ -49,6 +49,8 @@
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
 - Added Codex's 17 new live voices to `live.voice`: `aube`, `bubbie`, `haetsal`, `hanul`, `himari`, `leher`, `marin`, `miko`, `neer`, `porto`, `rindo`, `rio`, `rivage`, `selva`, `sonna`, `tinta`, and `viola`.
+- `spotlight.ranker` (**Spotlight Ranker**) lets the Spotlight experiment rank shaped tool output with the `judge` role instead of Stencil, one `noul` question per line over chunks of 32 items, so shaping has a ranker without a Stencil credential ([#19907](https://github.com/can1357/oh-my-pi/pull/19907) by [@Xytronix](https://github.com/Xytronix))
+- `spotlight.ranker: auto` ranks with Spotlight and reranks the whole call with the `judge` role when Spotlight cannot answer a chunk ([#19906](https://github.com/can1357/oh-my-pi/pull/19906) by [@Xytronix](https://github.com/Xytronix))
 - Added `statusLine.segmentOptions.model.showProvider` to prefix the status-line model with its provider (`anthropic/Opus 4.8`) and `statusLine.segmentOptions.model.display` (`name`, `id` or `full`) to show the exact model id, with `statusLine.segmentOptions.model.maxLength` to cap the label ([#20559](https://github.com/can1357/oh-my-pi/pull/20559) by [@Xytronix](https://github.com/Xytronix))
 - Dictation now works with xAI speech-to-text models such as `xai-oauth/grok-voice-transcribe-2.0` ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - `/fast` now switches Devin models onto their fast lanes, replacing the separate Devin Fast model entries; set `tier.devin: priority` to start every session in fast mode

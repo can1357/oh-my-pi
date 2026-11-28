@@ -76,6 +76,18 @@ function parseShare(raw: string): number | undefined {
 	return Number.isFinite(value) && value >= 0 && value <= 1 ? value : undefined;
 }
 
+/**
+ * Which service ranks shaped tool output: Stencil Spotlight, the session's `judge` role, or `auto` (Spotlight, and
+ * the judge for the whole call when Spotlight cannot answer a chunk). `judge` needs no Stencil credential.
+ */
+export const cfgSpotlightRanker = register({
+	id: "spotlight.ranker",
+	env: "PI_SPOTLIGHT_RANKER",
+	type: "enum",
+	values: ["spotlight", "judge", "auto"] as const,
+	default: "spotlight",
+});
+
 export const cfgSpotlightUrl = register({
 	id: "spotlight.url",
 	env: "STENCIL_SPOTLIGHT_URL",

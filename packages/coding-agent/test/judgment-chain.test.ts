@@ -1527,6 +1527,9 @@ describe("ChainJudge", () => {
 		expect(second.usage.input).toBe(10);
 		expect(third.answers.a.noul).toBe(0.9);
 		expect(third.usage.cost.total).toBe(0);
+		// Only the judgment the cache answered whole says so; one that sent a question does not.
+		expect(third.cached).toBe(true);
+		expect(second.cached).toBeUndefined();
 		// The fully cached request never reaches the ledger.
 		expect(onUsage.mock.calls.map(([usage]) => usage.usage.cost.total)).toEqual([0.02, 0.01, 0.01]);
 
@@ -1543,6 +1546,57 @@ describe("ChainJudge", () => {
 			{ names: "a", price: 0.01 },
 		]);
 		expect(db.query<{ n: number }, []>("SELECT count(*) AS n FROM states").get()?.n).toBe(1);
+	});
+
+	it("does not mark an answer cache-only when a candidate tried before it reached its provider", async () => {
+		using tempDir = TempDir.createSync("@omp-judgment-cache-fallback-");
+		const cache = JudgmentCache.open(path.join(tempDir.path(), "judgment-cache.db"));
+		try {
+			const settings = Settings.isolated({
+				modelRoles: { judge: "typesafe/jev-preview" },
+				"retry.fallbackChains": { judge: [`${OPENROUTER_JEV.provider}/${OPENROUTER_JEV.id}`] },
+			});
+			const registry = makeRegistry([JEV_PREVIEW, OPENROUTER_JEV], { typesafe: "ts-key", openrouter: "or-key" });
+			const urls: string[] = [];
+			let leadStatus = 400;
+			vi.spyOn(globalThis, "fetch").mockImplementation(
+				asGlobalFetch(async url => {
+					urls.push(String(url));
+					if (String(url).endsWith("/v1/systemone")) return new Response("rejected", { status: leadStatus });
+					return Response.json({
+						model: "jev-1.13.0",
+						answers: { level: { type: "choice", choice: "high" } },
+						usage: { input_tokens: 8, output_tokens: 2 },
+					});
+				}),
+			);
+			const judge = new ChainJudge({ settings, registry, purpose: "test", cache });
+			const request = { state: "rename a local", questions: { level: TIER_QUESTION } };
+
+			// The lead fails and the fallback answers, filling the cache under the fallback's model.
+			const fresh = await judge.judge(request);
+			// The lead is sent the request again and rejects the account; the fallback answers from the cache.
+			leadStatus = 402;
+			const afterLead = await judge.judge(request);
+			// The rejected lead is skipped, so nothing reaches a provider.
+			const cacheOnly = await judge.judge(request);
+
+			expect(urls).toEqual([
+				"https://judge.example.test/v1/systemone",
+				OPENROUTER_DECISIONS_URL,
+				"https://judge.example.test/v1/systemone",
+			]);
+			expect([fresh, afterLead, cacheOnly].map(result => result.answers.level.choice)).toEqual([
+				"high",
+				"high",
+				"high",
+			]);
+			expect(fresh.cached).toBeUndefined();
+			expect(afterLead.cached).toBeUndefined();
+			expect(cacheOnly.cached).toBe(true);
+		} finally {
+			cache.close();
+		}
 	});
 
 	it("journals a native judgment by reference: state id, headline answers, and cached count", async () => {

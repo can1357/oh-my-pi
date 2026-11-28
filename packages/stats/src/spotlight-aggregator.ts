@@ -138,6 +138,7 @@ interface ResultRow {
 	sp_failure_causes: string | null;
 	sp_ms: number | null;
 	sp_cost: number | null;
+	sp_reranked: number;
 	shape_ms: number | null;
 	plain_chars: number | null;
 	plain_tokens: number | null;
@@ -197,7 +198,9 @@ export interface Result {
 	 * shown.
 	 */
 	widerThanPlain: boolean;
-	/** Some Spotlight call failed: the no-score fallback rules shaped it. */
+	/**
+	 * No ranker answered: a Spotlight call failed and no fallback reranked the call, so the no-score rules shaped it.
+	 */
 	failed: boolean;
 	/** Per-line heat (`0`–`9`, else unscored) and kept runs (1-based positions) of the original; see the trace. */
 	heat: string;
@@ -423,7 +426,7 @@ function toResult(row: ResultRow): Result {
 		scoreFree: row.score_free !== 0,
 		gated,
 		widerThanPlain: capped || (shortened && row.out_tokens > plainTokens),
-		failed: (row.sp_failures ?? 0) > 0,
+		failed: (row.sp_failures ?? 0) > 0 && row.sp_reranked === 0,
 		heat: row.heat ?? "",
 		kept: parseRanges(row.kept),
 		needs:
@@ -481,7 +484,7 @@ class SessionLoader {
 		this.#results = database.query<ResultRow, [string]>(
 			`SELECT r.tool_call_id, r.timestamp, r.tool, r.in_chars, r.out_chars, r.in_tokens, r.out_tokens,
 			 r.steps, r.holdout, r.path, r.start_line, r.lines, r.hidden, r.hidden_lines, r.artifacts, r.sp_calls,
-			 r.sp_failures, r.sp_failure_causes, r.sp_ms, r.sp_cost, r.shape_ms, r.plain_chars, r.plain_tokens, r.capped_tokens, r.score_free,
+			 r.sp_failures, r.sp_failure_causes, r.sp_ms, r.sp_cost, r.sp_reranked, r.shape_ms, r.plain_chars, r.plain_tokens, r.capped_tokens, r.score_free,
 			 r.gated, r.heat, r.kept, r.windows,
 			 n.reread AS need_reread, n.edit AS need_edit
 			 FROM spotlight_results r
@@ -1495,7 +1498,10 @@ function standardizedEstimate(
 	};
 }
 
-/** A result's fetch-back group; null for a cut the no-score fallback made because Spotlight's calls failed. */
+/**
+ * A result's fetch-back group; null for a cut the no-score fallback made because no ranker answered (a Spotlight call
+ * failed and no `auto` judge reranked the call).
+ */
 function cutGroup(result: Result): SpotlightCutGroup | null {
 	if (result.holdout) return "holdout";
 	if (result.gated) return "gated";
@@ -1505,11 +1511,11 @@ function cutGroup(result: Result): SpotlightCutGroup | null {
 }
 
 /**
- * Fetch-back rates per tool (in `tools` order): applied (Spotlight-scored) cuts, score-free cuts, held-out results,
- * unchanged results standardized to the applied cuts' original-size mix (bins without unchanged results drop from
- * both; with no applied cuts, the reference keeps its own mix), and reads pi's former edit gate kept whole (only
- * where there are any). Results without a recorded call (issued before the session's marker) and cuts whose
- * Spotlight calls failed are not measured.
+ * Fetch-back rates per tool (in `tools` order): applied (ranked: Spotlight-scored, or reranked by the `auto` ranker's
+ * judge after a Spotlight call failed) cuts, score-free cuts, held-out results, unchanged results standardized to the
+ * applied cuts' original-size mix (bins without unchanged results drop from both; with no applied cuts, the reference
+ * keeps its own mix), and reads pi's former edit gate kept whole (only where there are any). Results without a
+ * recorded call (issued before the session's marker) and cuts no ranker answered for are not measured.
  */
 function computeFetchBack(evaluated: readonly Evaluated[], tools: readonly SpotlightTool[]): SpotlightFetchBackCell[] {
 	const cells: SpotlightFetchBackCell[] = [];

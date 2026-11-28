@@ -154,6 +154,10 @@ const SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY = "spotlight_v5_arg_tokens";
 // count only with the arm that shipped. Every transcript that can hold
 // Spotlight entries is re-parsed once by the new rules.
 const SPOTLIGHT_TOGGLE_BACKFILL_KEY = "spotlight_v6_toggle";
+// Results the `auto` ranker's fallback (the judge) reranked after Spotlight
+// failed carry `sp_reranked` and the fallback's spend in `sp_cost`;
+// experiment sessions parsed before are re-parsed once.
+const SPOTLIGHT_RERANKED_BACKFILL_KEY = "spotlight_v7_reranked";
 // Snapcompact compactions are filled by the parser; transcripts ingested before
 // the table existed are re-parsed once. Compaction entries carry `method` and
 // `tokensAfter` only since this date, so older cursors stay put.
@@ -380,6 +384,7 @@ export async function initDb(): Promise<Database> {
 			sp_failure_causes TEXT,
 			sp_ms REAL,
 			sp_cost REAL,
+			sp_reranked INTEGER NOT NULL DEFAULT 0,
 			shape_ms REAL,
 			plain_chars INTEGER,
 			plain_tokens INTEGER,
@@ -487,6 +492,8 @@ export async function initDb(): Promise<Database> {
 		["sp_failure_causes", "TEXT"],
 		// A `;`/`,` list read's windows (JSON); NULL for a single-window original, which the columns above describe.
 		["windows", "TEXT"],
+		// Filled for existing rows by the `spotlight_v7_reranked` re-parse.
+		["sp_reranked", "INTEGER NOT NULL DEFAULT 0"],
 	] as const) {
 		if (!spotlightResultColumns.some(existing => existing.name === column)) {
 			db.run(`ALTER TABLE spotlight_results ADD COLUMN ${column} ${type}`);
@@ -632,6 +639,7 @@ export async function initDb(): Promise<Database> {
 	reparseSpotlightSessions(db, SPOTLIGHT_NEEDS_BACKFILL_KEY);
 	reparseSpotlightSessions(db, SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY);
 	reparseModifiedSince(db, SPOTLIGHT_TOGGLE_BACKFILL_KEY, SPOTLIGHT_SINCE_MS);
+	reparseSpotlightSessions(db, SPOTLIGHT_RERANKED_BACKFILL_KEY);
 	reparseModifiedSince(db, SNAPCOMPACT_COMPACTIONS_BACKFILL_KEY, SNAPCOMPACT_COMPACTIONS_SINCE_MS);
 	reparseModifiedSince(db, MODEL_USAGE_PURPOSE_BACKFILL_KEY, MODEL_USAGE_SINCE_MS);
 	reparseModifiedSince(db, TOOL_APPROVALS_BACKFILL_KEY, TOOL_APPROVALS_SINCE_MS);
@@ -966,7 +974,8 @@ function dropSpotlightArms(database: Database): void {
  * Spotlight rows. Keys: {@link SPOTLIGHT_EDITS_BACKFILL_KEY} (calls get
  * `edits`), {@link SPOTLIGHT_NEEDS_BACKFILL_KEY} (results get heat, kept runs,
  * plain sizes and the score-free flag, shaped reads needed lines),
- * {@link SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY} (calls get argument tokens).
+ * {@link SPOTLIGHT_ARG_TOKENS_BACKFILL_KEY} (calls get argument tokens),
+ * {@link SPOTLIGHT_RERANKED_BACKFILL_KEY} (results get the fallback's rerank).
  */
 function reparseSpotlightSessions(database: Database, key: string): void {
 	const row = database.query<{ value: string }, [string]>("SELECT value FROM meta WHERE key = ?").get(key);
@@ -2332,6 +2341,7 @@ export function upsertSpotlightShapes(rows: Iterable<SpotlightShapeRow>): number
 			"kept",
 			"gated",
 			"windows",
+			"sp_reranked",
 		],
 		identity: ["tool_call_id"],
 		upsert: `ON CONFLICT(session_file, tool_call_id) DO UPDATE SET
@@ -2340,7 +2350,8 @@ export function upsertSpotlightShapes(rows: Iterable<SpotlightShapeRow>): number
 			has_details = MAX(spotlight_results.has_details, excluded.has_details),
 			holdout = MAX(spotlight_results.holdout, excluded.holdout),
 			score_free = MAX(spotlight_results.score_free, excluded.score_free),
-			gated = MAX(spotlight_results.gated, excluded.gated)`,
+			gated = MAX(spotlight_results.gated, excluded.gated),
+			sp_reranked = MAX(spotlight_results.sp_reranked, excluded.sp_reranked)`,
 	});
 	return atomically(db, () => {
 		for (const r of rows) {
@@ -2381,6 +2392,7 @@ export function upsertSpotlightShapes(rows: Iterable<SpotlightShapeRow>): number
 					o ? JSON.stringify(o.kept) : null,
 					r.gated ? 1 : 0,
 					o && o.windows.length > 1 ? JSON.stringify(o.windows) : null,
+					r.spotlight?.reranked ? 1 : 0,
 				],
 			);
 		}

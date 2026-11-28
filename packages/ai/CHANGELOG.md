@@ -37,6 +37,7 @@
 - Added xAI speech-to-text support, including use through the authentication gateway.
 - Added the `priority` service tier for Devin models, using the fast lane and corresponding fast pricing.
 - Added an `upstreamModel` option for mock provider responses so tests and integrations can report the model that actually served a request.
+- Added `JudgmentResult.cached`, set when every answer came from an answer cache and no provider request was made ([#19907](https://github.com/can1357/oh-my-pi/pull/19907) by [@Xytronix](https://github.com/Xytronix))
 - Added a `sign-out` provider hook and `OAuthApi.signOut`: removing a login runs the hook, which deletes the account's secrets kept outside the credential store and revokes the grant at the provider
 - Fixed Kimi Code quota probing skipping API-key credentials (`KIMI_API_KEY` / `KIMI_CODE_GLOBAL_API_KEY` without an OAuth login), so `omp usage` now reports the plan windows for key-only setups ([#12405](https://github.com/can1357/oh-my-pi/pull/12405) by [@evanmaranzano](https://github.com/evanmaranzano), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
 - Logging in again to an MCP OAuth server now clears the disabled credential left by its earlier refresh failure ([#20627](https://github.com/can1357/oh-my-pi/issues/20627))

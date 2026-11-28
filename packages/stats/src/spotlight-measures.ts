@@ -406,7 +406,10 @@ function adjustedIntervals(list: readonly AdjustedSession[], tools: readonly Spo
 type RankingGroup = SpotlightRankingCell["group"];
 const RANKING_GROUPS: readonly RankingGroup[] = ["applied", "holdout", "scoreFree"];
 
-/** A shaped read's ranking group; null for a cut the no-score fallback made because Spotlight's calls failed. */
+/**
+ * A shaped read's ranking group; null for a cut the no-score fallback made because no ranker answered (a Spotlight
+ * call failed and no `auto` judge reranked the call).
+ */
 function rankingGroup(result: Result): RankingGroup | null {
 	if (result.holdout) return "holdout";
 	if (!result.shortened) return null;

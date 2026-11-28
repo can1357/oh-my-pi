@@ -49,7 +49,7 @@ const COLUMNS: Column<SpotlightOverhead>[] = [
 		header: "Spotlight failures",
 		align: "right",
 		sort: row => row.failureRate ?? -1,
-		title: "Results whose Spotlight calls failed or timed out, of those that called it: they were cut by the no-score fallback",
+		title: "Results whose Spotlight calls failed or timed out, of those that called it: the no-score fallback rules cut them, or the `auto` ranker's judge reranked them",
 		render: row =>
 			row.failureRate === null ? (
 				<span className="dim">–</span>
@@ -115,8 +115,9 @@ const COLUMNS: Column<SpotlightOverhead>[] = [
 ];
 
 /**
- * Failed Spotlight calls mean the cut came from the no-score fallback, not Spotlight's scorer: every comparison then
- * partly measures the fallback. Called out above the table once the failure rate reaches the warning rate.
+ * Failed Spotlight calls mean the cut came from the no-score fallback rules, or from the `auto` ranker's judge
+ * reranking the call, not from Spotlight's scorer: every comparison then partly measures a fallback. Called out above
+ * the table once the failure rate reaches the warning rate.
  */
 function FailureCallout({ overhead }: { overhead: SpotlightOverhead }) {
 	const rate = overhead.failureRate;
@@ -133,8 +134,9 @@ function FailureCallout({ overhead }: { overhead: SpotlightOverhead }) {
 					<span className="num">{formatShare(rate)}</span> of results that called Spotlight failed
 				</div>
 				<p className="spot-callout-copy">
-					A failed or timed-out call leaves the cut to the no-score fallback, so those results measure the fallback
-					rather than Spotlight's scorer. Read every comparison on this page with that share in mind.
+					A failed or timed-out call leaves the cut to the no-score fallback rules, or to the judge when the{" "}
+					<code>auto</code> ranker reranks the call, so those results measure that fallback rather than Spotlight's
+					scorer. Read every comparison on this page with that share in mind.
 					{waitedMs > 0 && (
 						<>
 							{" "}
@@ -145,7 +147,8 @@ function FailureCallout({ overhead }: { overhead: SpotlightOverhead }) {
 						<>
 							{" "}
 							<span className="num">{formatShare(unsigned.share)}</span> had no Stencil sign-in: run{" "}
-							<code>/login</code> and choose Stencil, or set <code>STENCIL_API_KEY</code>, to restore ranking.
+							<code>/login</code> and choose Stencil, or set <code>STENCIL_API_KEY</code>, to restore Spotlight's
+							ranking.
 						</>
 					)}
 				</p>
