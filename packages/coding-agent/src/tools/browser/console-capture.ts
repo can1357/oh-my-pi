@@ -1,3 +1,4 @@
+import { isLocalOrMetadataHost } from "@oh-my-pi/pi-ai/utils/proxy";
 import { toError } from "@oh-my-pi/pi-utils";
 import type { Protocol } from "devtools-protocol";
 import type { CDPSession, ConsoleMessage, HTTPRequest, Page } from "puppeteer-core";
@@ -71,6 +72,11 @@ export interface BrowserCaptureResult<T> {
 	nextSeq: number;
 	/** Entries evicted by bounded-buffer overflow since the last clear. */
 	dropped: number;
+	/**
+	 * Unix milliseconds when the first `console()`/`errors()` call started console and page-error capture on a public
+	 * page: console messages and uncaught exceptions before then were not recorded.
+	 */
+	captureStartedAt?: number;
 }
 
 type BrowserCaptureEntry = BrowserConsoleEntry | BrowserErrorEntry;
@@ -214,7 +220,33 @@ function protocolExceptionLocation(
 	return url ? `${url}:${details.lineNumber}:${details.columnNumber}` : undefined;
 }
 
-/** Persistent bounded capture of page console messages, uncaught exceptions, and failed requests. */
+/** Schemes whose top-level documents are local or developer content. */
+const LOCAL_DOCUMENT_PROTOCOLS: Record<string, true> = { "file:": true, "data:": true, "about:": true, "blob:": true };
+
+/**
+ * Whether a top-level document URL is a local or development origin: `file:`, `data:`, `about:` and `blob:` documents,
+ * `*.local` hosts, and the local hosts of {@link isLocalOrMetadataHost} (`localhost` and its subdomains, loopback,
+ * private, link-local and unique-local IP literals). Any other URL is public.
+ */
+export function isLocalDocumentUrl(url: string): boolean {
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return false;
+	}
+	if (LOCAL_DOCUMENT_PROTOCOLS[parsed.protocol] === true) return true;
+	return parsed.hostname.endsWith(".local") || isLocalOrMetadataHost(parsed.hostname);
+}
+
+/**
+ * Persistent bounded capture of page console messages, uncaught exceptions, and failed requests.
+ *
+ * Failed requests come from the Network domain, which page scripts cannot observe, and are recorded from install.
+ * Console messages and exceptions need the Runtime domain, whose argument serialization page scripts can detect, so a
+ * Runtime session is attached only while the top-level document is local ({@link isLocalDocumentUrl}), or for the rest
+ * of the page's life once {@link console} or {@link errors} is first called.
+ */
 export class PageConsoleCapture {
 	readonly #limit: number;
 	#entries: BrowserCaptureEntry[] = [];
@@ -224,14 +256,22 @@ export class PageConsoleCapture {
 	#generation = 0;
 	#page?: Page;
 	#cdp?: CDPSession;
+	#mainFrameId?: string;
+	#documentUrl = "";
+	#navigationRequestId?: Protocol.Network.RequestId;
+	#runtime?: CDPSession;
+	#runtimeWanted = false;
+	#runtimeEpoch = 0;
+	#arming?: Promise<void>;
+	#explicit = false;
+	#captureStartedAt?: number;
 	#consoleHandler?: (message: ConsoleMessage) => void;
 	#pageErrorHandler?: (error: unknown) => void;
 	#requestFailedHandler?: (request: HTTPRequest) => void;
-	#protocolConsoleHandler?: (event: Protocol.Runtime.ConsoleAPICalledEvent) => void;
-	#protocolExceptionHandler?: (event: Protocol.Runtime.ExceptionThrownEvent) => void;
 	#protocolRequestHandler?: (event: Protocol.Network.RequestWillBeSentEvent) => void;
 	#protocolRequestFinishedHandler?: (event: Protocol.Network.LoadingFinishedEvent) => void;
 	#protocolRequestFailedHandler?: (event: Protocol.Network.LoadingFailedEvent) => void;
+	#frameNavigatedHandler?: (event: Protocol.Page.FrameNavigatedEvent) => void;
 	readonly #requests = new Map<Protocol.Network.RequestId, { method: string; url: string }>();
 
 	constructor(limit = DEFAULT_CAPTURE_LIMIT) {
@@ -300,69 +340,15 @@ export class PageConsoleCapture {
 		try {
 			const activeSession = await page.createCDPSession();
 			session = activeSession;
-			this.#protocolConsoleHandler = event => {
-				const seq = this.#allocateSequence();
-				const serializedArgs = Promise.all(
-					event.args.map(argument => serializeRemoteObject(activeSession, argument)),
-				);
-				this.#pending = this.#pending.then(async () => {
-					const args = await serializedArgs;
-					if (this.#generation !== generation) return;
-					const text = args.map(consoleArgumentText).join(" ");
-					this.#push({
-						seq,
-						ts: event.timestamp,
-						type: "console",
-						level: protocolConsoleLevel(event.type),
-						text: boundedText(text, MAX_TEXT_CHARS),
-						location: protocolLocation(event.stackTrace) ?? page.url(),
-						args,
-					});
-				});
-			};
-			this.#protocolExceptionHandler = event => {
-				const details = event.exceptionDetails;
-				const exception = details.exception;
-				if (exception && exception.subtype !== "error") {
-					// A non-Error value's description is only its class ("Object"); keep its fields instead,
-					// bounded like console arguments.
-					const seq = this.#allocateSequence();
-					const location = protocolExceptionLocation(details, page.url());
-					const value = serializeRemoteObject(activeSession, exception);
-					this.#pending = this.#pending.then(async () => {
-						const text = exceptionValueText(await value);
-						if (this.#generation !== generation) return;
-						this.#push({
-							seq,
-							ts: event.timestamp,
-							type: "pageerror",
-							level: "error",
-							text: boundedText(text, MAX_TEXT_CHARS),
-							location,
-						});
-					});
-					return;
-				}
-				const description = exception?.description;
-				const stack = description?.includes("\n") ? description : undefined;
-				const text = description?.split("\n", 1)[0] ?? details.text;
-				this.#push({
-					seq: this.#allocateSequence(),
-					ts: event.timestamp,
-					type: "pageerror",
-					level: "error",
-					text: boundedText(text, MAX_TEXT_CHARS),
-					location: protocolExceptionLocation(details, page.url()),
-					stack: stack ? boundedText(stack, MAX_STACK_CHARS) : undefined,
-				});
-			};
 			this.#protocolRequestHandler = event => {
 				this.#requests.set(event.requestId, { method: event.request.method, url: event.request.url });
+				this.#onNavigationRequest(event);
 			};
 			this.#protocolRequestFinishedHandler = event => {
 				this.#requests.delete(event.requestId);
 			};
 			this.#protocolRequestFailedHandler = event => {
+				if (event.requestId === this.#navigationRequestId) this.#onNavigationFailed();
 				const request = this.#requests.get(event.requestId);
 				this.#requests.delete(event.requestId);
 				if (!request) return;
@@ -375,22 +361,42 @@ export class PageConsoleCapture {
 					location: request.url,
 				});
 			};
-			activeSession.on("Runtime.consoleAPICalled", this.#protocolConsoleHandler);
-			activeSession.on("Runtime.exceptionThrown", this.#protocolExceptionHandler);
+			this.#frameNavigatedHandler = event => this.#onFrameNavigated(event);
 			activeSession.on("Network.requestWillBeSent", this.#protocolRequestHandler);
 			activeSession.on("Network.loadingFinished", this.#protocolRequestFinishedHandler);
 			activeSession.on("Network.loadingFailed", this.#protocolRequestFailedHandler);
-			await Promise.all([activeSession.send("Runtime.enable"), activeSession.send("Network.enable")]);
+			activeSession.on("Page.frameNavigated", this.#frameNavigatedHandler);
+			const [{ frameTree }] = await Promise.all([
+				activeSession.send("Page.getFrameTree"),
+				activeSession.send("Network.enable"),
+				activeSession.send("Page.enable"),
+			]);
+			this.#mainFrameId = frameTree.frame.id;
+			this.#documentUrl = frameTree.frame.url;
 			this.#cdp = activeSession;
 		} catch {
 			await session?.detach().catch(() => undefined);
-			this.#protocolConsoleHandler = undefined;
-			this.#protocolExceptionHandler = undefined;
+			this.#protocolRequestHandler = undefined;
+			this.#protocolRequestFinishedHandler = undefined;
+			this.#protocolRequestFailedHandler = undefined;
+			this.#frameNavigatedHandler = undefined;
+			this.#documentUrl = page.url();
 		}
+		if (this.#generation === generation) await this.#setRuntime(isLocalDocumentUrl(this.#documentUrl), true);
+	}
+
+	/**
+	 * Detach Runtime before omp navigates the page to a public URL, so none of the new document's scripts run with
+	 * Runtime enabled. Page-initiated navigations are handled from their network request instead.
+	 */
+	async prepareNavigation(url: string): Promise<void> {
+		if (this.#explicit || !URL.canParse(url) || isLocalDocumentUrl(url)) return;
+		await this.#disarm();
 	}
 
 	/** Read captured console messages after an optional sequence cursor. */
 	async console(options: BrowserConsoleOptions = {}): Promise<BrowserCaptureResult<BrowserConsoleEntry>> {
+		await this.#armForRead();
 		await this.#pending;
 		const entries = this.#query(
 			entry => entry.type === "console" && (!options.level || entry.level === options.level),
@@ -404,6 +410,7 @@ export class PageConsoleCapture {
 
 	/** Read captured uncaught exceptions and failed requests after an optional sequence cursor. */
 	async errors(options: BrowserErrorOptions = {}): Promise<BrowserCaptureResult<BrowserErrorEntry>> {
+		await this.#armForRead();
 		await this.#pending;
 		const entries = this.#query(
 			entry => entry.type !== "console",
@@ -432,12 +439,6 @@ export class PageConsoleCapture {
 		if (this.#page && this.#consoleHandler) this.#page.off("console", this.#consoleHandler);
 		if (this.#page && this.#pageErrorHandler) this.#page.off("pageerror", this.#pageErrorHandler);
 		if (this.#page && this.#requestFailedHandler) this.#page.off("requestfailed", this.#requestFailedHandler);
-		if (this.#cdp && this.#protocolConsoleHandler) {
-			this.#cdp.off("Runtime.consoleAPICalled", this.#protocolConsoleHandler);
-		}
-		if (this.#cdp && this.#protocolExceptionHandler) {
-			this.#cdp.off("Runtime.exceptionThrown", this.#protocolExceptionHandler);
-		}
 		if (this.#cdp && this.#protocolRequestHandler) {
 			this.#cdp.off("Network.requestWillBeSent", this.#protocolRequestHandler);
 		}
@@ -447,19 +448,176 @@ export class PageConsoleCapture {
 		if (this.#cdp && this.#protocolRequestFailedHandler) {
 			this.#cdp.off("Network.loadingFailed", this.#protocolRequestFailedHandler);
 		}
-		await this.#cdp?.detach().catch(() => undefined);
+		if (this.#cdp && this.#frameNavigatedHandler) {
+			this.#cdp.off("Page.frameNavigated", this.#frameNavigatedHandler);
+		}
+		await Promise.all([this.#cdp?.detach().catch(() => undefined), this.#disarm()]);
 		this.#page = undefined;
 		this.#cdp = undefined;
+		this.#mainFrameId = undefined;
+		this.#documentUrl = "";
+		this.#navigationRequestId = undefined;
+		this.#explicit = false;
+		this.#captureStartedAt = undefined;
 		this.#consoleHandler = undefined;
 		this.#pageErrorHandler = undefined;
 		this.#requestFailedHandler = undefined;
-		this.#protocolConsoleHandler = undefined;
-		this.#protocolExceptionHandler = undefined;
 		this.#protocolRequestHandler = undefined;
 		this.#protocolRequestFinishedHandler = undefined;
 		this.#protocolRequestFailedHandler = undefined;
+		this.#frameNavigatedHandler = undefined;
 		this.#requests.clear();
 		this.clear();
+	}
+
+	#onNavigationRequest(event: Protocol.Network.RequestWillBeSentEvent): void {
+		if (event.type !== "Document" || event.frameId !== this.#mainFrameId || event.loaderId !== event.requestId)
+			return;
+		this.#navigationRequestId = event.requestId;
+		// Fires for every redirect hop before its request goes out. A Runtime session still attached when Chromium
+		// readies the next document carries Runtime into it (a `Runtime.disable` sent now lands after its scripts ran),
+		// so the session is detached instead.
+		if (!this.#explicit && !isLocalDocumentUrl(event.request.url)) void this.#disarm();
+	}
+
+	#onFrameNavigated(event: Protocol.Page.FrameNavigatedEvent): void {
+		const frame = event.frame;
+		if (frame.id !== this.#mainFrameId) return;
+		// A commit reported after a newer navigation started must not re-arm Runtime for that newer document.
+		if (this.#navigationRequestId !== undefined && frame.loaderId !== this.#navigationRequestId) return;
+		this.#navigationRequestId = undefined;
+		this.#documentUrl = frame.url;
+		// Arming after commit loses nothing: Runtime.enable replays what this document logged before it.
+		void this.#setRuntime(this.#explicit || isLocalDocumentUrl(frame.url), true);
+	}
+
+	#onNavigationFailed(): void {
+		this.#navigationRequestId = undefined;
+		// The document stays; its messages were captured already if it was local, so the replay is skipped.
+		void this.#setRuntime(this.#explicit || isLocalDocumentUrl(this.#documentUrl), false);
+	}
+
+	async #armForRead(): Promise<void> {
+		if (!this.#page) return;
+		this.#explicit = true;
+		if (this.#runtimeWanted) {
+			await this.#arming;
+			return;
+		}
+		await this.#setRuntime(true, false);
+		if (this.#runtime) this.#captureStartedAt = Date.now();
+	}
+
+	/** Attach or detach the Runtime session; `replay` keeps what Chromium replays from the current document on enable. */
+	#setRuntime(wanted: boolean, replay: boolean): Promise<void> {
+		if (!wanted) return this.#disarm();
+		if (this.#runtimeWanted) return this.#arming ?? Promise.resolve();
+		this.#runtimeWanted = true;
+		const arming = this.#arm(this.#runtimeEpoch, replay);
+		this.#arming = arming;
+		return arming;
+	}
+
+	async #arm(epoch: number, replay: boolean): Promise<void> {
+		const page = this.#page;
+		if (!page) return;
+		let session: CDPSession;
+		try {
+			session = await page.createCDPSession();
+		} catch {
+			if (this.#runtimeEpoch === epoch) {
+				this.#runtimeWanted = false;
+				this.#arming = undefined;
+			}
+			return;
+		}
+		if (this.#runtimeEpoch !== epoch) {
+			await session.detach().catch(() => undefined);
+			return;
+		}
+		this.#runtime = session;
+		// Chromium replays the document's stored console messages and exceptions before it answers Runtime.enable.
+		let replaying = true;
+		session.on("Runtime.consoleAPICalled", event => {
+			if (this.#runtime === session && (replay || !replaying)) this.#recordConsole(session, event);
+		});
+		session.on("Runtime.exceptionThrown", event => {
+			if (this.#runtime === session && (replay || !replaying)) this.#recordException(session, event);
+		});
+		try {
+			await session.send("Runtime.enable");
+		} catch {
+			// Detached while enabling (disarmed, or the page closed).
+		}
+		replaying = false;
+	}
+
+	#disarm(): Promise<void> {
+		this.#runtimeWanted = false;
+		this.#runtimeEpoch += 1;
+		this.#arming = undefined;
+		const session = this.#runtime;
+		this.#runtime = undefined;
+		return session ? session.detach().catch(() => undefined) : Promise.resolve();
+	}
+
+	#recordConsole(session: CDPSession, event: Protocol.Runtime.ConsoleAPICalledEvent): void {
+		const generation = this.#generation;
+		const fallbackUrl = this.#documentUrl;
+		const seq = this.#allocateSequence();
+		const serializedArgs = Promise.all(event.args.map(argument => serializeRemoteObject(session, argument)));
+		this.#pending = this.#pending.then(async () => {
+			const args = await serializedArgs;
+			if (this.#generation !== generation) return;
+			const text = args.map(consoleArgumentText).join(" ");
+			this.#push({
+				seq,
+				ts: event.timestamp,
+				type: "console",
+				level: protocolConsoleLevel(event.type),
+				text: boundedText(text, MAX_TEXT_CHARS),
+				location: protocolLocation(event.stackTrace) ?? fallbackUrl,
+				args,
+			});
+		});
+	}
+
+	#recordException(session: CDPSession, event: Protocol.Runtime.ExceptionThrownEvent): void {
+		const details = event.exceptionDetails;
+		const exception = details.exception;
+		const location = protocolExceptionLocation(details, this.#documentUrl);
+		if (exception && exception.subtype !== "error") {
+			// A non-Error value's description is only its class ("Object"); keep its fields instead,
+			// bounded like console arguments.
+			const generation = this.#generation;
+			const seq = this.#allocateSequence();
+			const value = serializeRemoteObject(session, exception);
+			this.#pending = this.#pending.then(async () => {
+				const text = exceptionValueText(await value);
+				if (this.#generation !== generation) return;
+				this.#push({
+					seq,
+					ts: event.timestamp,
+					type: "pageerror",
+					level: "error",
+					text: boundedText(text, MAX_TEXT_CHARS),
+					location,
+				});
+			});
+			return;
+		}
+		const description = exception?.description;
+		const stack = description?.includes("\n") ? description : undefined;
+		const text = description?.split("\n", 1)[0] ?? details.text;
+		this.#push({
+			seq: this.#allocateSequence(),
+			ts: event.timestamp,
+			type: "pageerror",
+			level: "error",
+			text: boundedText(text, MAX_TEXT_CHARS),
+			location,
+			stack: stack ? boundedText(stack, MAX_STACK_CHARS) : undefined,
+		});
 	}
 
 	#allocateSequence(): number {
@@ -489,11 +647,13 @@ export class PageConsoleCapture {
 	}
 
 	#result<T extends BrowserCaptureEntry>(entries: T[]): BrowserCaptureResult<T> {
-		return {
+		const result: BrowserCaptureResult<T> = {
 			entries,
 			nextSeq: entries.at(-1)?.seq ?? this.#nextSeq - 1,
 			dropped: this.#dropped,
 		};
+		if (this.#captureStartedAt !== undefined) result.captureStartedAt = this.#captureStartedAt;
+		return result;
 	}
 }
 

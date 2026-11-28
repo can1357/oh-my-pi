@@ -295,7 +295,7 @@ fn fdopen(interp: &mut Interp<'_>, args: Vec<Sv>, _: Cx) -> PResult<Ret> {
 fn close(interp: &mut Interp<'_>, args: Vec<Sv>, _: Cx) -> PResult<Ret> {
 	let Some(io) = as_handle(interp, &arg(&args, 0)) else { return failure(interp, bad_fd()); };
 	let closed = close_handle(interp, &io);
-	match closed { Ok(ok) => Ok(boolean(ok)), Err(err) => failure(interp, err) }
+	match closed { Ok(ok) => Ok(boolean(ok)), Err(err) => write_error(interp, err) }
 }
 
 fn binmode(interp: &mut Interp<'_>, args: Vec<Sv>, _: Cx) -> PResult<Ret> {
@@ -322,9 +322,9 @@ fn io_op(interp: &mut Interp<'_>, args: Vec<Sv>, op: Op) -> PResult<Ret> {
 			result(interp, got, |s| s.map_or(Value::Undef, Value::Str))
 		},
 		Op::Eof => Ok(boolean(io.borrow_mut().eof())),
-		Op::Flush => {
-			let got = io.borrow_mut().flush();
-			result(interp, got, |()| zero_true())
+		Op::Flush => match io.borrow_mut().flush() {
+			Ok(()) => one(zero_true()),
+			Err(err) => write_error(interp, err),
 		},
 		Op::Sync => {
 			#[cfg(unix)]
@@ -462,26 +462,26 @@ fn output(interp: &mut Interp<'_>, args: Vec<Sv>, mode: Output) -> PResult<Ret> 
 		let fmt = interp.stringify(&arg(&args, 1))?;
 		let vals = args.iter().skip(2).map(|sv| interp.read_sv(sv)).collect::<PResult<Vec<_>>>()?;
 		let formatted = sprintf(&fmt, &vals, &mut interp.conv()).map_err(|err| interp.die_msg(err))?;
-		if let Err(err) = emit(&formatted) { return failure(interp, err); }
+		if let Err(err) = emit(&formatted) { return write_error(interp, err); }
 	} else {
 		let field = interp.output_field_sep();
 		let record = interp.output_record_sep();
 		for (index, sv) in args.iter().skip(1).enumerate() {
 			if index != 0 && let Some(sep) = &field
 				&& let Err(err) = emit(sep)
-			{ return failure(interp, err); }
+			{ return write_error(interp, err); }
 			let value = interp.read_sv(sv)?;
 			let value = interp.stringify(&value)?;
-			if let Err(err) = emit(&value) { return failure(interp, err); }
+			if let Err(err) = emit(&value) { return write_error(interp, err); }
 		}
 		if matches!(mode, Output::Say) {
-			if let Err(err) = emit(&PStr::from_bytes(b"\n")) { return failure(interp, err); }
+			if let Err(err) = emit(&PStr::from_bytes(b"\n")) { return write_error(interp, err); }
 		} else if let Some(sep) = &record
 			&& let Err(err) = emit(sep)
-		{ return failure(interp, err); }
+		{ return write_error(interp, err); }
 	}
 	if matches!(mode, Output::Flush) && let Err(err) = io.borrow_mut().flush() {
-		return failure(interp, err);
+		return write_error(interp, err);
 	}
 	if wide && interp.warn_on("utf8") { interp.warn("Wide character in print"); }
 	one(Value::Int(1))
@@ -520,7 +520,7 @@ fn write(interp: &mut Interp<'_>, args: Vec<Sv>, raw: bool) -> PResult<Ret> {
 	if raw {
 		match io.borrow_mut().syswrite(&bytes.bytes[start..end]) {
 			Ok(n) => one(Value::Int(n as i64)),
-			Err(err) => stream_error(interp, err),
+			Err(err) => write_error(interp, err),
 		}
 	} else {
 		bytes.bytes.truncate(end);
@@ -531,7 +531,7 @@ fn write(interp: &mut Interp<'_>, args: Vec<Sv>, raw: bool) -> PResult<Ret> {
 				if wide && interp.warn_on("utf8") { interp.warn("Wide character in print"); }
 				one(Value::Int(end.saturating_sub(start) as i64))
 			},
-			Err(err) => failure(interp, err),
+			Err(err) => write_error(interp, err),
 		}
 	}
 }
@@ -540,6 +540,13 @@ fn stream_error(interp: &mut Interp<'_>, err: io::Error) -> PResult<Ret> {
 	let description = err.to_string();
 	if description.contains("isn't allowed on :utf8 handles") { return Err(interp.die_msg(description)); }
 	failure(interp, err)
+}
+
+/// [`stream_error`] for a write: a pipe or socket nobody reads raises
+/// `SIGPIPE` first ([`Interp::broken_pipe`]).
+fn write_error(interp: &mut Interp<'_>, err: io::Error) -> PResult<Ret> {
+	interp.broken_pipe(&err)?;
+	stream_error(interp, err)
 }
 
 enum Seek { Seek, Sys, Tell, Get, Set }

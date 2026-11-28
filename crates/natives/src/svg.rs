@@ -19,12 +19,15 @@ use crate::task;
 
 const MAX_RENDER_PIXELS: u64 = 16 * 1024 * 1024;
 
-static FONT_DB: LazyLock<Arc<Database>> = LazyLock::new(|| {
-	let mut database = Database::new();
-	database.load_system_fonts();
-	repoint_dangling_generic_families(&mut database);
-	Arc::new(database)
-});
+pub(crate) fn system_font_db() -> &'static Arc<Database> {
+	static FONT_DB: LazyLock<Arc<Database>> = LazyLock::new(|| {
+		let mut database = Database::new();
+		database.load_system_fonts();
+		repoint_dangling_generic_families(&mut database);
+		Arc::new(database)
+	});
+	&FONT_DB
+}
 
 /// Common families to stand in for a dangling generic, best match first.
 const SERIF_FAMILIES: &[&str] =
@@ -155,7 +158,7 @@ fn rasterize_svg_sync(
 		)));
 	}
 
-	let mut options = usvg::Options { fontdb: Arc::clone(&FONT_DB), ..usvg::Options::default() };
+	let mut options = usvg::Options { fontdb: Arc::clone(system_font_db()), ..usvg::Options::default() };
 	// Repository-controlled SVGs must not read arbitrary host files through an
 	// <image href="…"> reference. Embedded data URLs retain the default
 	// resolver.
@@ -204,7 +207,9 @@ mod tests {
 
 	#[test]
 	fn text_survives_a_generic_family_naming_a_missing_font() {
-		let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"><text y="15">label</text></svg>"#;
+		// `serif`, not usvg's default family: hosts with Times New Roman
+		// installed would otherwise render the text without any generic.
+		let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"><text y="15" font-family="serif">label</text></svg>"#;
 		// A text node can survive parsing and still paint nothing; the
 		// consumer sees the rendered PNG, so count the pixels it inks.
 		let draws_text = |database: Database| {
@@ -214,8 +219,10 @@ mod tests {
 			resvg::render(&tree, tiny_skia::Transform::identity(), &mut pixmap.as_mut());
 			pixmap.pixels().iter().any(|pixel| pixel.alpha() > 0)
 		};
-		let mut database = Database::new();
-		database.load_font_data(include_bytes!("fonts/Silver.ttf").to_vec());
+		let mut database = system_font_db().as_ref().clone();
+		if database.faces().next().is_none() {
+			return; // Headless machines may have no installed outlines.
+		}
 		database.set_serif_family("Not Installed");
 		assert!(!draws_text(database.clone()), "usvg drops text whose fallback font is missing");
 

@@ -11,7 +11,7 @@ use crate::{
   unregister_payload, unwrap_tagged_object, Callback, TaggedObject, Value,
 };
 #[cfg(feature = "napi5")]
-use crate::{Env, PropertyClosures};
+use crate::{Env, PropertyClosuresData};
 
 pub trait JsObjectValue<'env>: JsValue<'env> {
   /// Set the property value to the `Object`
@@ -465,11 +465,30 @@ pub trait JsObjectValue<'env>: JsValue<'env> {
 
   /// This method allows the efficient definition of multiple properties on a given object.
   fn define_properties(&mut self, properties: &[Property]) -> Result<()> {
-    let property_descriptors = properties
-      .iter()
-      .map(|property| property.raw())
-      .collect::<Vec<sys::napi_property_descriptor>>();
     let env = self.value().env;
+    let mut property_descriptors = Vec::with_capacity(properties.len());
+    for property in properties {
+      match property.raw(env) {
+        Ok(descriptor) => property_descriptors.push(descriptor),
+        Err(err) => {
+          // Free the data boxed for the properties before this one.
+          #[cfg(feature = "napi5")]
+          unsafe {
+            drop_property_closures(
+              properties
+                .iter()
+                .zip(property_descriptors.iter())
+                .filter(|(property, descriptor)| {
+                  property.has_closure_data() && !descriptor.data.is_null()
+                })
+                .map(|(_, descriptor)| descriptor.data.cast())
+                .collect(),
+            )
+          }
+          return Err(err);
+        }
+      }
+    }
     #[cfg(feature = "napi5")]
     {
       if !properties.is_empty() {
@@ -877,6 +896,42 @@ impl Object<'_> {
     Ok(())
   }
 
+  pub(crate) fn property_names_raw(&self) -> Result<(sys::napi_value, u32)> {
+    let mut names = ptr::null_mut();
+    check_status!(
+      unsafe { sys::napi_get_property_names(self.0.env, self.0.value, &mut names) },
+      "Failed to get property names of given object"
+    )?;
+    let mut len = 0;
+    check_status!(
+      unsafe { sys::napi_get_array_length(self.0.env, names, &mut len) },
+      "Failed to get the length of property names"
+    )?;
+    Ok((names, len))
+  }
+
+  pub(crate) fn property_at(
+    &self,
+    names: sys::napi_value,
+    index: u32,
+  ) -> Result<Option<(String, sys::napi_value)>> {
+    let env = self.0.env;
+    let mut key = ptr::null_mut();
+    check_status!(
+      unsafe { sys::napi_get_element(env, names, index, &mut key) },
+      "Failed to get property name at index {index}"
+    )?;
+    let mut value = ptr::null_mut();
+    check_status!(
+      unsafe { sys::napi_get_property(env, self.0.value, key, &mut value) },
+      "Failed to get property at index {index}"
+    )?;
+    if type_of!(env, value)? == ValueType::Undefined {
+      return Ok(None);
+    }
+    Ok(Some((unsafe { String::from_napi_value(env, key)? }, value)))
+  }
+
   /// Get the string keys of the `Object`
   pub fn keys(obj: &Object) -> Result<Vec<String>> {
     let mut names = ptr::null_mut();
@@ -1138,22 +1193,17 @@ pub(crate) unsafe extern "C" fn finalize_closures(
   len: *mut c_void,
 ) {
   let (length, capacity): (usize, usize) = *unsafe { Box::from_raw(len.cast()) };
-  let closures: Vec<*mut PropertyClosures> =
+  let closures: Vec<*mut PropertyClosuresData> =
     unsafe { Vec::from_raw_parts(data.cast(), length, capacity) };
+  unsafe { drop_property_closures(closures) };
+}
+
+/// Frees the data that `Property::raw` boxed for closure-backed accessors.
+#[cfg(feature = "napi5")]
+pub(crate) unsafe fn drop_property_closures(closures: Vec<*mut PropertyClosuresData>) {
   for closure_ptr in closures.into_iter() {
     if !closure_ptr.is_null() {
-      let closures = unsafe { Box::from_raw(closure_ptr) };
-      // Free the actual closure functions using the stored drop functions
-      if !closures.getter_closure.is_null() {
-        if let Some(drop_fn) = closures.getter_drop_fn {
-          unsafe { drop_fn(closures.getter_closure) };
-        }
-      }
-      if !closures.setter_closure.is_null() {
-        if let Some(drop_fn) = closures.setter_drop_fn {
-          unsafe { drop_fn(closures.setter_closure) };
-        }
-      }
+      drop(unsafe { Box::from_raw(closure_ptr) });
     }
   }
 }

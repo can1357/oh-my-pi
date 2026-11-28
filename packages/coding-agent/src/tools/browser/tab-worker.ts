@@ -2336,6 +2336,7 @@ export class WorkerCore {
 			if (payload.mode === "attach" && payload.page.kind === "create" && payload.page.reload) {
 				// A failed load leaves the new page where it got to; the supervisor reports that from the ready URL.
 				const { url, timeoutMs } = payload.page.reload;
+				await this.#consoleCapture.prepareNavigation(url);
 				await this.#page.goto(url, { waitUntil: "load", timeout: timeoutMs }).catch(() => undefined);
 			}
 			const hiddenFrames = this.#hiddenFrames.splice(0);
@@ -3148,6 +3149,7 @@ export class WorkerCore {
 			goto: (url, opts) =>
 				input(`tab.goto(${JSON.stringify(url)})`, INF, async sig => {
 					this.#clearElementCache();
+					await this.#consoleCapture.prepareNavigation(url);
 					try {
 						// Default to "load" because dev servers with HMR/WS never reach networkidle.
 						// budgetBound (not the full cell) so a hung navigation fails named and

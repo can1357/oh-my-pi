@@ -1,29 +1,32 @@
 import { cfgBinjaInstall } from "../binja/install";
-import { combine, type Derived } from "../config/registry";
+import { Derived } from "../config/registry";
+import type { Settings } from "../config/settings";
 import { ghidraHostSupported } from "../ghidra/platform";
 import { cfgIdaInstall } from "../ida/install";
 import type { DisasmBackendId } from "./backend";
 import { cfgDisassembler } from "./settings";
 
-/**
- * Order `auto` tries backends in; the first available one serves. Binary Ninja is opt-in: an
- * install does not show whether its licence allows headless use, so ahead of Ghidra it would turn
- * `auto` into an error for everyone whose licence does not.
- */
-const AUTO_ORDER: readonly DisasmBackendId[] = ["ida", "ghidra"];
+type BackendInputs = readonly [choice: DisasmBackendId | "auto" | "none", install: string | undefined];
+
+class ActiveBackend extends Derived<DisasmBackendId | undefined> {
+	readonly sources = [cfgDisassembler, ...cfgIdaInstall.sources, ...cfgBinjaInstall.sources];
+
+	inputs(settings: Settings): BackendInputs {
+		const choice = cfgDisassembler.get(settings);
+		// Install discovery probes the filesystem. Auto tries IDA, then provisionable Ghidra;
+		// Binary Ninja is strictly opt-in because its licence may not allow headless use.
+		if (choice === "auto" || choice === "ida") return [choice, cfgIdaInstall.get(settings)];
+		if (choice === "binja") return [choice, cfgBinjaInstall.get(settings)];
+		return [choice, undefined];
+	}
+
+	compute([choice, install]: BackendInputs): DisasmBackendId | undefined {
+		if (choice === "none") return undefined;
+		if (choice === "binja" || choice === "ida") return install !== undefined ? choice : undefined;
+		if (choice === "auto" && install !== undefined) return "ida";
+		return ghidraHostSupported() ? "ghidra" : undefined;
+	}
+}
 
 /** Backend serving explicit read analysis and eval's dsm namespace; undefined leaves metadata-only reads. */
-export const cfgDisasmBackend: Derived<DisasmBackendId | undefined> = combine(
-	{ choice: cfgDisassembler, ida: cfgIdaInstall, binja: cfgBinjaInstall },
-	({ choice, ida, binja }) => {
-		if (choice === "none") return undefined;
-		// Ghidra is provisioned on first analysis, so it is available wherever its platform is supported.
-		const available: Record<DisasmBackendId, boolean> = {
-			ida: ida !== undefined,
-			ghidra: ghidraHostSupported(),
-			binja: binja !== undefined,
-		};
-		// An explicit choice never falls back to another backend.
-		return choice === "auto" ? AUTO_ORDER.find(id => available[id]) : available[choice] ? choice : undefined;
-	},
-);
+export const cfgDisasmBackend: Derived<DisasmBackendId | undefined> = new ActiveBackend();

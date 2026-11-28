@@ -71,43 +71,61 @@ type Parsed = {
 };
 
 function parseWithPlugins(code: string, plugins: ParserPlugin[]): t.File {
-	return parse(code, {
+	const ast = parse(code, {
 		sourceType: "unambiguous",
 		allowReturnOutsideFunction: true,
 		errorRecovery: true,
 		plugins,
 	});
+	normalizeTypeCasts(ast);
+	return ast;
+}
+
+const AST_METADATA_KEYS = new Set([
+	"loc",
+	"extra",
+	"comments",
+	"tokens",
+	"errors",
+	"leadingComments",
+	"trailingComments",
+	"innerComments",
+]);
+
+function isAstObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+/**
+ * With `errorRecovery`, the TypeScript plugin leaves a parenthesized `(expr: T)` that never became
+ * arrow parameters as `TSTypeCastExpression`, which @babel/types and @babel/generator do not define.
+ * Rewrite each one in place to the equivalent `expr as T` so traversal and printing see a known node.
+ */
+function normalizeTypeCasts(root: t.File): void {
+	const stack: unknown[] = [root];
+	while (stack.length > 0) {
+		const value = stack.pop();
+		if (Array.isArray(value)) {
+			for (const item of value) stack.push(item);
+			continue;
+		}
+		if (!isAstObject(value)) continue;
+		if (value.type === "TSTypeCastExpression") {
+			const annotation = value.typeAnnotation;
+			value.type = "TSAsExpression";
+			value.typeAnnotation =
+				isAstObject(annotation) && annotation.type === "TSTypeAnnotation" ? annotation.typeAnnotation : annotation;
+		}
+		for (const key in value) {
+			if (!AST_METADATA_KEYS.has(key)) stack.push(value[key]);
+		}
+	}
 }
 
 function parseCode(code: string): Parsed | null {
 	const pluginSets: ParserPlugin[][] = [
-		[
-			"flow",
-			"flowComments",
-			"jsx",
-			"importAssertions",
-			"decorators-legacy",
-			"classPrivateMethods",
-			"classPrivateProperties",
-			"classProperties",
-			"privateIn",
-			"topLevelAwait",
-			"optionalChaining",
-			"nullishCoalescingOperator",
-		],
-		[
-			"typescript",
-			"jsx",
-			"importAssertions",
-			"decorators-legacy",
-			"classPrivateMethods",
-			"classPrivateProperties",
-			"classProperties",
-			"privateIn",
-			"topLevelAwait",
-			"optionalChaining",
-			"nullishCoalescingOperator",
-		],
+		["flow", "flowComments", "jsx", "decorators-legacy"],
+		["typescript", "jsx", "decorators-legacy"],
 	];
 
 	for (const plugins of pluginSets) {
@@ -117,41 +135,6 @@ function parseCode(code: string): Parsed | null {
 	}
 
 	return null;
-}
-
-/*
- * Babel parser 7.29 emits TSTypeCastExpression but generator/types don't define it.
- * Register it in VISITOR_KEYS (so the printer's isLastChild doesn't crash) and in
- * generatorInfosMap with a custom handler that unwraps the TSTypeAnnotation wrapper.
- */
-t.VISITOR_KEYS.TSTypeCastExpression = ["expression", "typeAnnotation"];
-{
-	const { generatorInfosMap } = require("@babel/generator/lib/nodes") as {
-		generatorInfosMap: Map<string, [any, number, unknown]>;
-	};
-	if (!generatorInfosMap.has("TSTypeCastExpression")) {
-		const tsAs = generatorInfosMap.get("TSAsExpression");
-		if (tsAs) {
-			// Custom handler: like TSAsExpression but unwraps TSTypeAnnotation → TSType
-			function TSTypeCastExpression(
-				this: {
-					print: (node: unknown, printComments?: boolean) => void;
-					space: () => void;
-					word: (word: string) => void;
-				},
-				node: Record<string, unknown>,
-			): void {
-				this.print(node.expression, true);
-				this.space();
-				this.word("as");
-				this.space();
-				const annot = node.typeAnnotation as Record<string, unknown> | undefined;
-				// TSTypeCastExpression.typeAnnotation is TSTypeAnnotation {typeAnnotation: TSType}
-				this.print(annot && "typeAnnotation" in annot ? annot.typeAnnotation : annot);
-			}
-			generatorInfosMap.set("TSTypeCastExpression", [TSTypeCastExpression, tsAs[1], tsAs[2]]);
-		}
-	}
 }
 
 type SourceRange = {

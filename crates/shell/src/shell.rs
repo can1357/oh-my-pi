@@ -2265,7 +2265,9 @@ async fn read_output_buffered(
 #[cfg(unix)]
 fn register_nonblocking_pipe(reader: fs::File) -> io::Result<tokio::io::unix::AsyncFd<fs::File>> {
 	set_nonblocking(&reader)?;
-	tokio::io::unix::AsyncFd::new(reader)
+	// SAFETY: the `File` keeps its descriptor open and unchanged for the
+	// `AsyncFd`'s lifetime.
+	Ok(unsafe { tokio::io::unix::AsyncFd::register(reader) }?)
 }
 
 #[cfg(unix)]

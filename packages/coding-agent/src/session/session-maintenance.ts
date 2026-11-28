@@ -94,9 +94,10 @@ import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown } from "./agent-session-types";
 import type { CacheBridgeEstimate, CacheBridgeOutcome } from "./cache-warmer";
 import { findCompactMode } from "./compact-modes";
-import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "./compaction-method-ids";
 import {
+	type CompactionMethod,
 	canUseRemoteCompaction,
+	DEFAULT_COMPACTION_METHOD_ORDER,
 	resolveCompactionMethodOrder,
 	resolveMethodSettings,
 	resolveSpeculationMethod,
@@ -1608,9 +1609,8 @@ export class SessionMaintenance {
 				);
 				snapcompactShape = renderScan.shape;
 				if (!renderScan.isSafe) {
-					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
 					throw snapcompactFailure(
-						`snapcompact cannot render this conversation: unsupported characters for selected snapcompact font (${percent}%)`,
+						"snapcompact cannot render this conversation: no installed font covers the whole transcript",
 					);
 				}
 				// The preflight and the render each block the loop for a long history; let it breathe between them.
@@ -4452,6 +4452,7 @@ export class SessionMaintenance {
 				text,
 				preparation.previousPreserveData,
 				preparation.previousSummary,
+				includeThinking,
 			);
 			return snapcompact.resolveShapeAndScan(probeText, this.#model, shapeSetting);
 		});
@@ -4478,7 +4479,7 @@ export class SessionMaintenance {
 	 * twice (the second pass absorbs per-frame variance):
 	 * - {@link snapcompact.frameDataBytesBudget} for the active model: the cap from
 	 *   {@link #computeSnapcompactMaxFrames} sizes bytes from a per-shape
-	 *   estimate, and denser frames (CJK prose drawn with fallback glyphs) run
+	 *   estimate, and denser frames (for example, CJK prose) run
 	 *   heavier, so the fit is `frames × budget / payload`;
 	 * - {@link SNAPCOMPACT_POST_COMPACTION_TARGET} of the threshold, counting
 	 *   `pendingTokens` (a pre-prompt pass's prompt, not yet in the session):
@@ -5150,14 +5151,13 @@ export class SessionMaintenance {
 		}
 		const archive = snapcompact.getPreservedArchive(staleEntry.preserveData);
 		if (!archive || archive.frames.length <= 1) return undefined;
-		const archiveText = snapcompact.archiveSourceText(archive);
-		if (!archiveText) return undefined;
+		if (!snapcompact.archiveSourceText(archive)) return undefined;
 		const maxFrames = this.#computeSnapcompactRescueMaxFrames(settings, keptTailTokens);
 		if (maxFrames < 1 || maxFrames >= archive.frames.length) return undefined;
 
 		let result: snapcompact.CompactionResult;
 		try {
-			result = await this.#rerenderSnapcompactArchive(staleEntry, archiveText, model, maxFrames);
+			result = await this.#rerenderSnapcompactArchive(staleEntry, model, maxFrames);
 		} catch (error) {
 			logger.warn("Dead-end snapcompact frame rescue failed", {
 				error: error instanceof Error ? error.message : String(error),
@@ -5167,6 +5167,20 @@ export class SessionMaintenance {
 		if (signal.aborted) return undefined;
 		const rebuilt = snapcompact.getPreservedArchive(result.preserveData);
 		if (!rebuilt || rebuilt.frames.length >= archive.frames.length) return undefined;
+		const tokensAfter = this.#projectCompactedContextTokens({
+			summary: result.summary,
+			shortSummary: result.shortSummary,
+			tokensBefore: result.tokensBefore,
+			firstKeptEntryId: result.firstKeptEntryId,
+			preserveData: result.preserveData,
+		});
+		// A text-only rebuild is safe only if the full source fits the recovery target; an unknown window cannot show that.
+		const ctxWindow = model.contextWindow;
+		if (
+			rebuilt.frames.length === 0 &&
+			(!ctxWindow || tokensAfter > COMPACTION_RECOVERY_BAND * resolveThresholdTokens(ctxWindow, settings))
+		)
+			return undefined;
 
 		const rebuiltEntryId = this.#host.sessionManager.appendCompaction(
 			result.summary,
@@ -5177,13 +5191,7 @@ export class SessionMaintenance {
 				details: result.details,
 				preserveData: result.preserveData,
 				method: "snapcompact",
-				tokensAfter: this.#projectCompactedContextTokens({
-					summary: result.summary,
-					shortSummary: result.shortSummary,
-					tokensBefore: result.tokensBefore,
-					firstKeptEntryId: result.firstKeptEntryId,
-					preserveData: result.preserveData,
-				}),
+				tokensAfter,
 			},
 		);
 		this.#host.persistEvalStateContext();
@@ -5226,7 +5234,6 @@ export class SessionMaintenance {
 	 */
 	async #rerenderSnapcompactArchive(
 		entry: CompactionEntry,
-		archiveText: string,
 		model: Model,
 		maxFrames: number,
 	): Promise<snapcompact.CompactionResult> {
@@ -5235,7 +5242,6 @@ export class SessionMaintenance {
 		for (const file of details?.readFiles ?? []) fileOps.read.add(file);
 		for (const file of details?.modifiedFiles ?? []) fileOps.edited.add(file);
 		const shapeSetting = cfgSnapcompactShape.get(this.#host.settings);
-		const shape = snapcompact.resolveShapeForText(archiveText, model, shapeSetting);
 		return await snapcompact.compact(
 			{
 				firstKeptEntryId: entry.firstKeptEntryId,
@@ -5249,7 +5255,7 @@ export class SessionMaintenance {
 			{
 				convertToLlm,
 				model,
-				...(shapeSetting === "auto" ? {} : { shape }),
+				...(shapeSetting === "auto" ? {} : { shape: snapcompact.resolveShape(model, shapeSetting) }),
 				maxFrames,
 				includeThinking: snapcompact.readerIncludesThinking(model),
 			},
@@ -5563,7 +5569,7 @@ export class SessionMaintenance {
 		}
 		let view: snapcompact.ArchiveView;
 		try {
-			const result = await this.#rerenderSnapcompactArchive(entry, archiveText, model, archive.frames.length);
+			const result = await this.#rerenderSnapcompactArchive(entry, model, archive.frames.length);
 			const rendered = snapcompact.getPreservedArchive(result.preserveData);
 			if (!rendered) throw new Error("The re-render produced no archive");
 			// A summary an extension wrote keeps its own words, without reasoning.
@@ -6100,8 +6106,8 @@ export class SessionMaintenance {
 			// + a summary message carrying the imaged archive at the reading model's
 			// frame price; #computeSnapcompactMaxFrames sizes the frame cap from the
 			// room under the trigger so the compaction leaves space for new turns
-			// instead of re-firing a few turns later. Any local blocker (unsupported
-			// snapcompact glyphs, kept-history too large, post-render overflow, no room
+			// instead of re-firing a few turns later. Any local blocker (missing
+			// font coverage, kept-history too large, post-render overflow, no room
 			// under the trigger on a threshold pass) advances automatic
 			// maintenance to the next
 			// configured preference instead of wedging the session (#3659). Manual
@@ -6118,12 +6124,11 @@ export class SessionMaintenance {
 				);
 				const shape = renderScan.shape;
 				if (!renderScan.isSafe) {
-					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
-					logger.warn("Snapcompact disabled: unsupported characters for selected snapcompact font", {
+					logger.warn("Snapcompact disabled: no installed font covers the whole transcript", {
 						model: this.#model?.id,
-						unrenderableRatio: renderScan.unrenderableRatio,
 					});
-					snapcompactBlocker = `snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%); trying the next preferred compaction method.`;
+					snapcompactBlocker =
+						"snapcompact disabled: no installed font covers the whole transcript; trying the next preferred compaction method.";
 				} else {
 					const pendingTokens = options.pendingContextTokens ?? 0;
 					const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings, pendingTokens);

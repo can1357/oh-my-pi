@@ -408,3 +408,47 @@ describe("ToolView web_search renderer", () => {
 		expect(html).toContain('<span class="tv-excerpt">first excerpt</span><span class="tv-excerpt">second</span>');
 	});
 });
+
+describe("ToolView edit checkoutNotice", () => {
+	it("renders checkoutNotice on single-file and multi-file edit cards", () => {
+		const single = renderToStaticMarkup(
+			<ToolView
+				name="edit"
+				defaultOpen
+				args={{ path: "/repo/linked/lesson.txt" }}
+				result={{
+					content: [],
+					details: {
+						path: "/repo/linked/lesson.txt",
+						checkoutNotice: "Edited worktree: preview (session: main)",
+						diff: "-before\n+after",
+					},
+				}}
+			/>,
+		);
+		expect(single).toContain("Edited worktree: preview (session: main)");
+
+		const multi = renderToStaticMarkup(
+			<ToolView
+				name="edit"
+				defaultOpen
+				args={{ input: "" }}
+				result={{
+					content: [],
+					details: {
+						diff: "-a\n+b",
+						perFileResults: [
+							{ path: "/repo/main/local.txt", diff: "-a\n+b" },
+							{
+								path: "/repo/linked/lesson.txt",
+								checkoutNotice: "Edited worktree: preview (session: main)",
+								diff: "-before\n+after",
+							},
+						],
+					},
+				}}
+			/>,
+		);
+		expect(multi).toContain("Edited worktree: preview (session: main)");
+	});
+});

@@ -1,7 +1,7 @@
 # grep-searcher (vendored)
 
 Vendored copy of [grep-searcher](https://github.com/BurntSushi/ripgrep/tree/master/crates/searcher)
-0.1.17, the crates.io release behind ripgrep's line-oriented search. The
+0.1.18, the crates.io release behind ripgrep's line-oriented search. The
 workspace `Cargo.toml` routes the registry dependency here through
 `[patch.crates-io]`. Dual-licensed under MIT (`LICENSE-MIT`) or the Unlicense
 (`UNLICENSE`).
@@ -42,7 +42,7 @@ can be fed bytes as they come.
   and VCS metadata are dropped; `BUILD.bazel` and `rustfmt.toml` are workspace
   wiring.
 
-Everything else is byte-identical to the 0.1.17 release.
+Everything else is byte-identical to the 0.1.18 release.
 
 Remove this directory and its `[patch.crates-io]` entry once grep-searcher
 ships an equivalent chunk-fed search API.

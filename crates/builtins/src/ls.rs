@@ -49,11 +49,176 @@ use std::{
 	path::Path,
 };
 
-use lscolors::{Indicator, LsColors, Style};
 use omp_vfs::{BlockingFs, FileType, Metadata};
 use rustc_hash::FxHashMap;
 
 use super::PathData;
+
+/// GNU `LS_COLORS` file-type indicators used by `ls`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Indicator {
+	/// `no`: text that is not a filename.
+	Normal,
+	/// `fi`: a regular file.
+	RegularFile,
+	/// `di`: a directory.
+	Directory,
+	/// `ln`: a symbolic link.
+	SymbolicLink,
+	/// `or`: a symbolic link whose target is missing.
+	OrphanedSymbolicLink,
+	/// `mi`: a path whose entry is missing.
+	MissingFile,
+	/// `pi`: a FIFO.
+	FIFO,
+	/// `so`: a socket.
+	Socket,
+	/// `bd`: a block device.
+	BlockDevice,
+	/// `cd`: a character device.
+	CharacterDevice,
+	/// `su`: a setuid file.
+	Setuid,
+	/// `sg`: a setgid file.
+	Setgid,
+	/// `ex`: an executable file.
+	ExecutableFile,
+	/// `mh`: a file with multiple hard links.
+	MultipleHardLinks,
+	/// `tw`: a sticky directory that is also other-writable.
+	StickyAndOtherWritable,
+	/// `ow`: an other-writable directory.
+	OtherWritable,
+	/// `st`: a sticky directory.
+	Sticky,
+	/// `ca`: a file with capabilities.
+	Capabilities,
+}
+
+impl Indicator {
+	/// Parses a two-letter `LS_COLORS` key, returning `None` for keys that do
+	/// not name a file-type indicator (e.g. `rs`, `lc`, `do`).
+	fn from(key: &str) -> Option<Self> {
+		Some(match key {
+			"no" => Self::Normal,
+			"fi" => Self::RegularFile,
+			"di" => Self::Directory,
+			"ln" => Self::SymbolicLink,
+			"or" => Self::OrphanedSymbolicLink,
+			"mi" => Self::MissingFile,
+			"pi" => Self::FIFO,
+			"so" => Self::Socket,
+			"bd" => Self::BlockDevice,
+			"cd" => Self::CharacterDevice,
+			"su" => Self::Setuid,
+			"sg" => Self::Setgid,
+			"ex" => Self::ExecutableFile,
+			"mh" => Self::MultipleHardLinks,
+			"tw" => Self::StickyAndOtherWritable,
+			"ow" => Self::OtherWritable,
+			"st" => Self::Sticky,
+			"ca" => Self::Capabilities,
+			_ => return None,
+		})
+	}
+}
+
+/// A parsed `LS_COLORS` style: the raw SGR parameter string to emit verbatim
+/// between `ESC[` and `m`.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct Style(std::rc::Rc<str>);
+
+impl Style {
+	/// Builds a style from a raw SGR parameter string such as `01;34`.
+	fn new(code: &str) -> Self {
+		Self(std::rc::Rc::from(code))
+	}
+
+	/// The raw SGR parameter string, without the `ESC[` prefix or `m` suffix.
+	fn code(&self) -> &str {
+		self.0.as_ref()
+	}
+}
+
+/// The GNU `ls` built-in colors, used when `LS_COLORS` is unset or empty.
+const DEFAULT_LS_COLORS: &str =
+	"di=01;34:ln=01;36:pi=33:so=01;35:do=01;35:bd=01;33:cd=01;33:ex=01;32:su=37;41:sg=30;43:st=37;44:ow=34;42:tw=30;42";
+
+/// Parsed `LS_COLORS` entries: indicator styles and `*suffix` patterns.
+pub(crate) struct LsColors {
+	indicators: FxHashMap<Indicator, Style>,
+	suffixes:   Vec<(String, Style)>,
+}
+
+impl LsColors {
+	/// An `LS_COLORS` with no styles at all.
+	pub(crate) fn empty() -> Self {
+		Self { indicators: FxHashMap::default(), suffixes: Vec::new() }
+	}
+
+	/// The GNU built-in colors used when `LS_COLORS` is unset or empty.
+	pub(crate) fn default() -> Self {
+		Self::from_string(DEFAULT_LS_COLORS)
+	}
+
+	/// Parses a `LS_COLORS` value into indicator styles and suffix patterns.
+	pub(crate) fn from_string(ls_colors: &str) -> Self {
+		let mut colors = Self::empty();
+		for entry in ls_colors.split(':') {
+			if entry.is_empty() {
+				continue;
+			}
+			let Some((key, value)) = entry.split_once('=') else {
+				continue;
+			};
+			if let Some(suffix) = key.strip_prefix('*') {
+				if !value.is_empty() && !is_all_zero(value) {
+					colors.suffixes.push((suffix.to_owned(), Style::new(&canonicalize_indicator_value(value))));
+				}
+				continue;
+			}
+			let Some(indicator) = Indicator::from(key) else {
+				continue;
+			};
+			if indicator == Indicator::SymbolicLink && value == "target" {
+				continue;
+			}
+			if indicator_value_is_disabled(indicator, value) {
+				continue;
+			}
+			colors
+				.indicators
+				.insert(indicator, Style::new(&canonicalize_indicator_value(value)));
+		}
+		colors
+	}
+
+	/// The style explicitly set for `indicator`, if any.
+	pub(crate) fn style_for_indicator(&self, indicator: Indicator) -> Option<&Style> {
+		self.indicators.get(&indicator)
+	}
+
+	/// Whether `indicator` was set explicitly in `LS_COLORS`.
+	pub(crate) fn has_explicit_style_for(&self, indicator: Indicator) -> bool {
+		self.indicators.contains_key(&indicator)
+	}
+
+	/// The style of the last `*suffix` pattern matching `name`.
+	pub(crate) fn style_for_str(&self, name: &str) -> Option<&Style> {
+		let mut matched = None;
+		for (suffix, style) in &self.suffixes {
+			if name.ends_with(suffix.as_str()) {
+				matched = Some(style);
+			}
+		}
+		matched
+	}
+}
+
+/// Whether a raw `LS_COLORS` value is a run of zeroes (a disabled style).
+fn is_all_zero(value: &str) -> bool {
+	!value.is_empty() && value.chars().all(|c| c == '0')
+}
 
 /// ANSI CSI (Control Sequence Introducer)
 const ANSI_CSI: &str = "\x1b[";
@@ -117,7 +282,7 @@ impl<'a> StyleManager<'a> {
 		let mut applied_raw_code = false;
 
 		if self.is_reset()
-			&& let Some(norm_sty) = self.get_normal_style().copied()
+			&& let Some(norm_sty) = self.get_normal_style().cloned()
 		{
 			style_code.push_str(&self.get_style_code(&norm_sty));
 		}
@@ -219,7 +384,7 @@ impl<'a> StyleManager<'a> {
 			}
 		}
 		// if new style is None and current style is Normal we should reset it
-		else if matches!(self.get_normal_style().copied(), Some(norm_style) if self.is_current_style(&norm_style))
+		else if matches!(self.get_normal_style().cloned(), Some(norm_style) if self.is_current_style(&norm_style))
 		{
 			style_code.push_str(self.reset(false));
 			// even though this is an unnecessary reset for gnu compatibility we allow it
@@ -246,12 +411,11 @@ impl<'a> StyleManager<'a> {
 	}
 
 	pub(crate) fn get_style_code(&mut self, new_style: &Style) -> String {
-		self.current_style = Some(*new_style);
-		let mut nu_a_style = new_style.to_nu_ansi_term_style();
-		nu_a_style.prefix_with_reset = false;
-		let mut ret = nu_a_style.paint("").to_string();
-		// remove the suffix reset
-		ret.truncate(ret.len() - 4);
+		self.current_style = Some(new_style.clone());
+		let mut ret = String::with_capacity(new_style.code().len() + 3);
+		ret.push_str(ANSI_CSI);
+		ret.push_str(new_style.code());
+		ret.push_str(ANSI_SGR_END);
 		ret
 	}
 
@@ -268,7 +432,7 @@ impl<'a> StyleManager<'a> {
 	}
 
 	pub(crate) fn apply_normal(&mut self) -> String {
-		if let Some(sty) = self.get_normal_style().copied() {
+		if let Some(sty) = self.get_normal_style().cloned() {
 			return self.get_style_code(&sty);
 		}
 		String::new()
@@ -312,7 +476,7 @@ impl<'a> StyleManager<'a> {
 		metadata: Option<&Metadata>,
 	) -> Option<&'a Style> {
 		// `Path::file_name` only works if the last component is Normal, but
-		// lscolors matches suffixes against every component type.
+		// suffix matching applies to every component type.
 		let file_name = path
 			.components()
 			.next_back()
@@ -658,8 +822,8 @@ fn has_security_cap_acl(path: &PathData) -> bool {
 	})
 }
 
-/// `LsColors::style_for` over provider metadata: lscolors only classifies
-/// `std::fs::Metadata`, which virtual files do not have. Mirrors its
+/// Picks a style from provider metadata: the underlying `std::fs::Metadata`
+/// classification is not available for virtual files, so this mirrors the
 /// indicator selection, suffix lookup for regular files, and fallbacks.
 pub(crate) fn style_for<'c, 'm>(
 	colors: &'c LsColors,
@@ -685,7 +849,7 @@ pub(crate) fn style_for<'c, 'm>(
 	};
 
 	if indicator == Indicator::RegularFile {
-		// Like lscolors, a regular file whose name is not UTF-8 gets no style.
+		// A regular file whose name is not UTF-8 gets no suffix style.
 		if let Some(style) = colors.style_for_str(file_name.to_str()?) {
 			return Some(style);
 		}
@@ -1066,9 +1230,7 @@ use std::{
 };
 
 use glob::Pattern;
-use lscolors::LsColors;
 use jiff::tz::TimeZone;
-use term_grid::SPACES_IN_TAB;
 use uucore::{
 	display::Quotable,
 	format::human::SizeFormat,
@@ -1081,11 +1243,14 @@ use uucore::{
 
 use super::{
 	Host, LsError, LsRuntime,
-	colors::{LsColorsParseError, validate_ls_colors},
+	colors::{LsColors, LsColorsParseError, validate_ls_colors},
 	display::{Format, IndicatorStyle, LocaleQuoting, LongFormat},
 	options::QUOTING_STYLE,
 };
 use crate::time_zone::shell_time_zone;
+
+/// Number of spaces a tab stands for when no tab size is configured.
+const SPACES_IN_TAB: usize = 8;
 
 pub mod options {
 	pub mod format {
@@ -2012,8 +2177,8 @@ impl Config {
 
 		let color = if needs_color {
 			Some(match host.var("LS_COLORS") {
-				Some(s) => LsColors::from_string(s),
-				None => LsColors::default(),
+				Some(s) if !s.is_empty() => LsColors::from_string(s),
+				_ => LsColors::default(),
 			})
 		} else {
 			None
@@ -2625,13 +2790,11 @@ use std::{
 	time::SystemTime,
 };
 
-use ansi_width::ansi_width;
 use glob::MatchOptions;
 
 use omp_vfs::{DirEntry, Metadata};
 #[cfg(unix)]
 use rustc_hash::FxHashMap;
-use term_grid::{DEFAULT_SEPARATOR_SIZE, Direction, Filling, Grid, GridOptions};
 #[cfg(unix)]
 use uucore::entries;
 #[cfg(any(
@@ -3005,7 +3168,7 @@ pub fn display_items(
 				display_grid(
 					names,
 					config.width,
-					Direction::TopToBottom,
+					GridDirection::TopToBottom,
 					&mut state.out,
 					quoted,
 					config.tab_size,
@@ -3015,7 +3178,7 @@ pub fn display_items(
 				display_grid(
 					names,
 					config.width,
-					Direction::LeftToRight,
+					GridDirection::LeftToRight,
 					&mut state.out,
 					quoted,
 					config.tab_size,
@@ -3025,10 +3188,10 @@ pub fn display_items(
 				let mut current_col = 0;
 				if let Some(name) = names.next() {
 					write_os_str(&mut state.out, &name)?;
-					current_col = ansi_width(&name.to_string_lossy()) as u16 + 2;
+					current_col = xutf::width_ansi_str(&name.to_string_lossy()) as u16 + 2;
 				}
 				for name in names {
-					let name_width = ansi_width(&name.to_string_lossy()) as u16;
+					let name_width = xutf::width_ansi_str(&name.to_string_lossy()) as u16;
 					// If the width is 0 we print one single line
 					if config.width != 0 && current_col + name_width + 1 > config.width {
 						current_col = name_width + 2;
@@ -3057,20 +3220,32 @@ pub fn display_items(
 	Ok(())
 }
 
+/// Column fill direction for [`display_grid`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GridDirection {
+	/// Fill columns top-to-bottom: `-C`, the default.
+	TopToBottom,
+	/// Fill rows left-to-right: `-x`.
+	LeftToRight,
+}
+
+/// Two spaces separate grid cells, always (tab filling is no longer used).
+const GRID_SEPARATOR: &str = "  ";
+
 fn display_grid<W: Write>(
 	names: impl Iterator<Item = OsString>,
 	width: u16,
-	direction: Direction,
+	direction: GridDirection,
 	out: &mut W,
 	quoted: bool,
-	tab_size: usize,
+	_tab_size: usize,
 ) -> std::io::Result<()> {
 	if width == 0 {
 		// If the width is 0 we print one single line
 		let mut printed_something = false;
 		for name in names {
 			if printed_something {
-				write!(out, "  ")?;
+				write!(out, "{GRID_SEPARATOR}")?;
 			}
 			printed_something = true;
 			write_os_str(out, &name)?;
@@ -3078,44 +3253,119 @@ fn display_grid<W: Write>(
 		if printed_something {
 			writeln!(out)?;
 		}
-	} else {
-		let names: Vec<String> = {
-			let mut buf = Vec::new();
-			names
-				.map(|n| {
-					// In case some names are quoted, GNU adds a space before each
-					// entry that does not start with a quote to make it prettier
-					// on multiline.
-					//
-					// Example:
-					// ```
-					// $ ls
-					// 'a\nb'   bar
-					//  foo     baz
-					// ^       ^
-					// These spaces is added
-					// ```
-					// FIXME: the Grid crate only supports &str, so can't display raw bytes
-					buf.clear();
-					if quoted && !os_str_starts_with(&n, b"'") && !os_str_starts_with(&n, b"\"") {
-						buf.push(b' ');
-					}
-					buf.extend(n.as_encoded_bytes());
-					String::from_utf8_lossy(&buf).into_owned()
-				})
-				.collect()
-		};
+		return Ok(());
+	}
 
-		// Since tab_size=0 means no \t, use Spaces separator for optimization.
-		let filling = match tab_size {
-			0 => Filling::Spaces(DEFAULT_SEPARATOR_SIZE),
-			_ => Filling::Tabs { spaces: DEFAULT_SEPARATOR_SIZE, tab_size },
-		};
+	let cells: Vec<String> = {
+		let mut buf = Vec::new();
+		names
+			.map(|n| {
+				// In case some names are quoted, GNU adds a space before each
+				// entry that does not start with a quote to make it prettier
+				// on multiline.
+				//
+				// Example:
+				// ```
+				// $ ls
+				// 'a\nb'   bar
+				//  foo     baz
+				// ^       ^
+				// These spaces is added
+				// ```
+				buf.clear();
+				if quoted && !os_str_starts_with(&n, b"'") && !os_str_starts_with(&n, b"\"") {
+					buf.push(b' ');
+				}
+				buf.extend(n.as_encoded_bytes());
+				String::from_utf8_lossy(&buf).into_owned()
+			})
+			.collect()
+	};
 
-		let grid = Grid::new(names, GridOptions { filling, direction, width: width as usize });
-		write!(out, "{grid}")?;
+	let widths: Vec<usize> = cells.iter().map(|cell| xutf::width_ansi_str(cell)).collect();
+	write_grid(out, &cells, &widths, width as usize, direction)
+}
+
+/// Writes `cells` as a grid using the largest column count that fits in
+/// `width` display columns.
+fn write_grid<W: Write>(
+	out: &mut W,
+	cells: &[String],
+	widths: &[usize],
+	width: usize,
+	direction: GridDirection,
+) -> std::io::Result<()> {
+	let count = cells.len();
+	if count == 0 {
+		return Ok(());
+	}
+
+	// Pick the largest column count whose widest cells still fit. A single
+	// column always fits, even when one cell is wider than the terminal.
+	let mut columns = 1;
+	for candidate in (2..=count).rev() {
+		if grid_fits(widths, candidate, width, direction) {
+			columns = candidate;
+			break;
+		}
+	}
+
+	let rows = count.div_ceil(columns);
+	let column_of = |index: usize| match direction {
+		GridDirection::TopToBottom => index / rows,
+		GridDirection::LeftToRight => index % columns,
+	};
+	let cell_of = |row: usize, column: usize| match direction {
+		GridDirection::TopToBottom => column * rows + row,
+		GridDirection::LeftToRight => row * columns + column,
+	};
+
+	// Each column is as wide as its widest cell.
+	let mut column_widths = vec![0usize; columns];
+	for (index, &cell_width) in widths.iter().enumerate() {
+		let column = column_of(index);
+		column_widths[column] = column_widths[column].max(cell_width);
+	}
+
+	for row in 0..rows {
+		let indices: Vec<usize> = (0..columns)
+			.map(|column| cell_of(row, column))
+			.filter(|&index| index < count)
+			.collect();
+		for (position, &index) in indices.iter().enumerate() {
+			if position > 0 {
+				write!(out, "{GRID_SEPARATOR}")?;
+			}
+			write_os_str(out, OsStr::new(&cells[index]))?;
+			// Pad to the column width so the next column lines up, but leave
+			// the last cell of a row unpadded to avoid trailing spaces.
+			if position + 1 < indices.len() {
+				let pad = column_widths[column_of(index)].saturating_sub(widths[index]);
+				for _ in 0..pad {
+					out.write_all(b" ")?;
+				}
+			}
+		}
+		writeln!(out)?;
 	}
 	Ok(())
+}
+
+/// Whether cells of the given widths, laid out in `columns` columns, fit
+/// within `width` display columns.
+fn grid_fits(widths: &[usize], columns: usize, width: usize, direction: GridDirection) -> bool {
+	let rows = widths.len().div_ceil(columns);
+	let mut column_widths = vec![0usize; columns];
+	for (index, &cell_width) in widths.iter().enumerate() {
+		let column = match direction {
+			GridDirection::TopToBottom => index / rows,
+			GridDirection::LeftToRight => index % columns,
+		};
+		column_widths[column] = column_widths[column].max(cell_width);
+	}
+	let total: usize =
+		column_widths.iter().sum::<usize>() + GRID_SEPARATOR.len() * (columns - 1);
+	total <= width
 }
 
 fn display_additional_leading_info(
@@ -3612,7 +3862,7 @@ fn display_item_long(
 			None,
 			None,
 			state.style_manager.as_mut(),
-			LazyCell::new(|| ansi_width(&String::from_utf8_lossy(&state.display_buf))),
+			LazyCell::new(|| xutf::width_ansi_str(&String::from_utf8_lossy(&state.display_buf))),
 		);
 
 		let needs_space = quoted && !os_str_starts_with(&item_display.displayed, b"'");
@@ -3716,7 +3966,7 @@ fn display_item_long(
 			None,
 			None,
 			state.style_manager.as_mut(),
-			LazyCell::new(|| ansi_width(&String::from_utf8_lossy(&state.display_buf))),
+			LazyCell::new(|| xutf::width_ansi_str(&String::from_utf8_lossy(&state.display_buf))),
 		);
 		let date_len = 12;
 

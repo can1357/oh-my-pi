@@ -18,17 +18,9 @@
  *   reported through `onError` (the mount point then shows its own default);
  *   rows that throw while painting draw one error row instead.
  */
-import {
-	type Accessor,
-	isUiNode,
-	type JSXNode,
-	type KeyEvent,
-	onCleanup,
-	type PasteEvent,
-	signal,
-	type UiNode,
-	untrack,
-} from "@oh-my-pi/pi-tui";
+import type { JSXNode, KeyEvent, PasteEvent } from "@oh-my-pi/pi-tui";
+import { isUiNode, type UiNode } from "@oh-my-pi/pi-tui/node";
+import { type Accessor, onCleanup, signal, untrack } from "@oh-my-pi/pi-tui/reactive";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";

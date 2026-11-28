@@ -12,7 +12,7 @@
  * Terminal look: `src/ui/styles/figures/figure.ts` (`omp.figures`).
  */
 import { computed, effect, For, type JSXNode, type Reactive, read, Show, untrack } from "@oh-my-pi/pi-tui";
-import { lexMarkdown } from "@oh-my-pi/pi-tui/text/markdown/lexer";
+import { lexMarkdown, linkDefinitions } from "@oh-my-pi/pi-tui/text/markdown/lexer";
 import { type EmbedHost, EmbedFigure, parseEmbed } from "./embed";
 import { fenced, type FigureOptions, RasterImage, SvgRaster } from "./svg-figure";
 import type { FigureTerm } from "./svg-figure";
@@ -70,10 +70,7 @@ export function figureSegments(
 	};
 	const tokens = lexMarkdown(text);
 	// Reference links can use definitions on either side of a figure.
-	const definitions = tokens
-		.filter(token => token.type === "def")
-		.map(token => token.raw.trimEnd())
-		.join("\n");
+	const definitions = linkDefinitions(tokens);
 	for (const token of tokens) {
 		if (
 			options.showImages &&

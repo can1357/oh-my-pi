@@ -4,15 +4,18 @@
 
 ### Breaking Changes
 
+- Removed the `KnownProvider` type and the generated `compat/auth-ids` and `compat/provider-ids` modules (`AuthProviderId`, `LoginProviderId`); provider ids are plain strings
 - Moonshot no longer accepts `KIMI_API_KEY` as a fallback alias; the Open Platform provider uses `MOONSHOT_API_KEY` only, since a Moonshot key does not authenticate the Kimi Code endpoints and the shared alias made `KIMI_API_KEY` expose Moonshot models instead of Kimi Code (removes the legacy #2883 alias; [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)). Migrate Moonshot Open Platform keys from `KIMI_API_KEY` to `MOONSHOT_API_KEY`.
 
 ### Added
 
+- Added the `neutralize-deepseek-special-tokens` compat axis (`neutralizeDeepseekSpecialTokens`), enabled for the DeepSeek class on chat-completions ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
 - Added `discoverGitHubCopilotAccount` (endpoint and `token_based_billing` mode from `copilot_internal/user`), `readCopilotTokenBilling`, `rememberCopilotTokenBilling`/`resolveCopilotTokenBilling` (billing mode learned per token for this process), and `ParsedGitHubCopilotApiKey.tokenBasedBilling` to `wire/github-copilot` ([#20807](https://github.com/can1357/oh-my-pi/pull/20807) by [@wapenshaw](https://github.com/wapenshaw))
 - Added ArkaneCloud provider: `/login arkanecloud` with `ARKANECLOUD_API_KEY`, models and prices discovered live per API key ([#20506](https://github.com/can1357/oh-my-pi/pull/20506) by [@Randyopo](https://github.com/Randyopo))
 - Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
 - Added `Model.voice` (default voice for speech models) and `Model.speechFormats` (the only audio containers a speech model returns), and moved `SPEECH_FORMATS`/`SpeechFormat` here from `@oh-my-pi/pi-ai` ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+- Added the `reasoning-summary-default` compat axis (`reasoningSummaryDefault`): the `reasoning.summary` level a Responses host gets when the caller names none; GitHub Copilot resolves it to `detailed` for `gpt-6.2-sol` ([#20804](https://github.com/can1357/oh-my-pi/pull/20804) by [@wapenshaw](https://github.com/wapenshaw))
 - Added the ArkaneCloud provider, including `/login arkanecloud`, `ARKANECLOUD_API_KEY` authentication, and live model and pricing discovery per API key.
 - Added xAI SuperGrok speech-to-text support through `xai-oauth/grok-voice-transcribe-2.0`.
 - Added the Refuseless provider with `/login refuseless`, `REFUSELESS_API_KEY` authentication, live model discovery, and support for abliterated and standard open-weight models.
@@ -33,6 +36,7 @@
 
 ### Changed
 
+- Large provider catalogs use less disk space and load faster after their next refresh; existing offline snapshots remain usable.
 - Seeded models now remain available even when their provider applies model exclusions.
 - Replaced the local `parakeet-tdt-0.6b-v3` dictation seed with `fluid-speech-pro`, now the default dictation model, and added `parakeet-tdt-0.6b-v2` (English).
 - Devin models now expose their fast lane through `/fast` instead of listing separate `-fast` model entries.

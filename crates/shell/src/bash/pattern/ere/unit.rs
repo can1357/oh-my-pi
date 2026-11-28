@@ -27,20 +27,11 @@ impl Mode {
 		if !self.utf8 || b < 0x80 {
 			return (u32::from(b), 1);
 		}
-		let len = match b {
-			0xc2..=0xdf => 2,
-			0xe0..=0xef => 3,
-			0xf0..=0xf4 => 4,
-			_ => 0,
-		};
-		if len > 0
-			&& let Some(chunk) = bytes.get(i..i + len)
-			&& let Ok(s) = core::str::from_utf8(chunk)
-			&& let Some(c) = s.chars().next()
-		{
-			return (u32::from(c), len);
-		}
-		(INVALID | u32::from(b), 1)
+		let rest = &bytes[i..];
+		xutf::valid_prefix(&rest[..rest.len().min(char::MAX_LEN_UTF8)])
+			.chars()
+			.next()
+			.map_or((INVALID | u32::from(b), 1), |c| (u32::from(c), c.len_utf8()))
 	}
 
 	/// The unit that ends at byte `end`, if any (word context before a

@@ -4,7 +4,7 @@
 //! them here drops `libm.so.6` and `libutil.so.1` from its `DT_NEEDED`,
 //! leaving only what 2.17 keeps out of reach: `libc.so.6`, `libpthread.so.0`,
 //! `libdl.so.2` and the dynamic loader. The link binds every caller in the
-//! addon to these (Rust, the C dependencies, portable-pty's `libc::openpty`),
+//! addon to these (Rust, the C dependencies, omp-shell's `libc::openpty`),
 //! and nothing in the host interposes on them at load time: `BUILD.bazel`'s
 //! `:exports_map` keeps them local, and `build.rs`'s `-Bsymbolic` binds them
 //! in cargo builds.

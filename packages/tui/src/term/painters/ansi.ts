@@ -10,6 +10,7 @@
  * Collapsed, `preview.lines` clamps the rows (the tail when `follow`), with a
  * dim count of the rows left out.
  */
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { TspAnsiProps } from "@oh-my-pi/pi-wire";
 import { escapeLength, SgrState, sgrParams } from "../../text/ansi";
 import { replaceTabs, visibleWidth, wrap } from "../../text/width";
@@ -26,7 +27,6 @@ interface ScreenCell {
 }
 
 const BLANK: ScreenCell = { ch: " ", style: "", link: "", width: 1 };
-const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /** Whether the text needs the line screen (anything beyond SGR, OSC 8 and newlines). */
 function needsScreen(text: string): boolean {
@@ -172,7 +172,7 @@ export function ansiLines(text: string): string[] {
 			if (at !== -1 && (end === -1 || at < end)) end = at;
 		}
 		const run = source.slice(i, end === -1 ? source.length : end);
-		for (const { segment } of segmenter.segment(run)) {
+		for (const { segment } of segmentGraphemes(run)) {
 			const c = segment.charCodeAt(0);
 			if (c < 0x20 || c === 0x7f) continue;
 			put(segment);

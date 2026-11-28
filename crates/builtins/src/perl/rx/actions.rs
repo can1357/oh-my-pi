@@ -171,7 +171,7 @@ pub(super) fn exec(interp: &mut Interp<'_>, regex: &Rc<Regex>, source: &Rc<PStr>
 	let depth = interp.rx.action_depth;
 	if depth >= 128 { return Err(interp.die_msg("Infinite recursion in regex")); }
 	interp.rx.action_depth = depth + 1;
-	let out = stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || exec_inner(interp, regex, source, cell, start, opts));
+	let out = crate::stack::guard(128 * 1024, || exec_inner(interp, regex, source, cell, start, opts));
 	interp.rx.action_depth = depth;
 	out
 }
@@ -244,7 +244,7 @@ fn exec_inner(interp: &mut Interp<'_>, regex: &Rc<Regex>, source: &Rc<PStr>, cel
 		if phase != ActionPhase::Test { undo.push((index, r.get(), dynamic[index].take())); }
 		interp.set_last_match(Some(Rc::new(MatchState::new(source.clone(), captures, regex.clone()))));
 		topic.pos.set(Some(at));
-		let found = stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+		let found = crate::stack::guard(128 * 1024, || {
 			interp.with_topic(topic.clone(), |interp| {
 				// `return` leaves the code block with its value (`perlre` "(?{ code })").
 				let value = match interp.run_regex_code(&action.code) {

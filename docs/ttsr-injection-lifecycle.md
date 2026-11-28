@@ -205,7 +205,7 @@ Within a matching batch, each rule is attached to exactly one sibling tool call:
 
 ### `repeatMode: "once"`
 
-A rule can trigger only once after it has an injection record.
+A rule with an injection record stays suppressed for the current session, including after `/clear` or compaction. `/new` and RPC `new_session` start a new transcript with no repeat history.
 
 ### `repeatMode: "after-gap"`
 

@@ -2,6 +2,8 @@
 //! content tests libmagic runs in C rather than through magic rules
 //! (`is_tar.c`, `is_json.c`, `is_csv.c`), ported from file 5.41.
 
+use xutf::DecodeError;
+
 /// A character class of `text_chars`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Class {
@@ -41,63 +43,22 @@ pub(super) struct Encoding {
 /// Decides whether `buf` looks like UTF-8: -1 invalid, 0 valid but with odd
 /// control characters, 1 seven-bit text, 2 UTF-8 with multi-byte sequences.
 /// Decoded characters are appended to `out`.
-pub(super) fn looks_utf8(buf: &[u8], mut out: Option<&mut Vec<u32>>) -> i32 {
-	let (mut got_one, mut ctrl) = (false, false);
-	let mut i = 0;
-	'scan: while i < buf.len() {
-		let c = buf[i];
-		if c & 0x80 == 0 {
-			// Valid UTF-8 that uses odd control characters is still not text.
-			if class(c) != Class::T {
-				ctrl = true;
-			}
-			if let Some(out) = out.as_deref_mut() {
-				out.push(u32::from(c));
-			}
-		} else if c & 0x40 == 0 {
-			return -1;
-		} else {
-			// The valid range of the second byte, by lead byte.
-			let (low, high) = match c {
-				0xc2..=0xdf | 0xe1..=0xec | 0xee | 0xef | 0xf1..=0xf3 => (0x80, 0xbf),
-				0xe0 => (0xa0, 0xbf),
-				0xed => (0x80, 0x9f),
-				0xf0 => (0x90, 0xbf),
-				0xf4 => (0x80, 0x8f),
-				_ => return -1,
-			};
-			let (mut value, following) = if c & 0x20 == 0 {
-				(u32::from(c & 0x1f), 1)
-			} else if c & 0x10 == 0 {
-				(u32::from(c & 0x0f), 2)
-			} else {
-				(u32::from(c & 0x07), 3)
-			};
-			for n in 0..following {
-				i += 1;
-				// A sequence cut off by the end of the buffer is not an error.
-				let Some(&next) = buf.get(i) else { break 'scan };
-				if n == 0 && !(low..=high).contains(&next) {
-					return -1;
-				}
-				if next & 0xc0 != 0x80 {
-					return -1;
-				}
-				value = (value << 6) + u32::from(next & 0x3f);
-			}
-			if let Some(out) = out.as_deref_mut() {
-				out.push(value);
-			}
-			got_one = true;
-		}
-		i += 1;
+pub(super) fn looks_utf8(buf: &[u8], out: Option<&mut Vec<u32>>) -> i32 {
+	let (valid, invalid) = match xutf::decode(buf) {
+		Ok(text) | Err(DecodeError::Incomplete { valid_prefix: text, .. }) => (text, false),
+		Err(DecodeError::Invalid { valid_prefix, .. }) => (valid_prefix, true),
+	};
+	if let Some(out) = out {
+		out.extend(valid.chars().map(u32::from));
 	}
-	if ctrl {
+	if invalid {
+		-1
+	} else if valid.bytes().any(|b| b.is_ascii() && class(b) != Class::T) {
 		0
-	} else if got_one {
-		2
-	} else {
+	} else if valid.is_ascii() {
 		1
+	} else {
+		2
 	}
 }
 

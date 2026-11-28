@@ -102,7 +102,7 @@ Each builtin runs inside the shell process (no `fork`/`exec`) against the `omp-b
 
 Builtin switches are read from `sessionEnv` first, then the process environment, during session creation. Values are truthy when present and not empty, `"0"`, or case-insensitive `"false"`; command-scoped `env` does not change registration.
 
-`omp zsh` on Windows (the process shell, `crates/shell/src/process`) offers the same utilities the other way round: only as a fallback when `PATH` has no program of that name (`Host::fallback`), so a program on `PATH` keeps running and the Unix tools Windows lacks are still there. A defined `command_not_found_handler` wins over the fallback. The same switches apply. `type`/`whence` still answer from `PATH`, and `exec` of a missing name stays not found. On Linux and macOS a missing command stays not found.
+`omp zsh` on Windows (the process shell, `crates/shell/src/process`) offers the same utilities the other way round: only as a fallback when `PATH` has no program of that name (`Host::fallback`), so a program on `PATH` keeps running and the Unix tools Windows lacks are still there. A defined `command_not_found_handler` wins over the fallback. The same switches apply. `type`/`whence` still answer from `PATH`, and `exec` of a missing name stays not found. On Linux and macOS a missing command stays not found. `obash` offers them as the session does, ahead of `PATH` (those that run command lines, such as `awk`, `perl`, `xargs` and `find`, included); `obash --no-extras` takes every command bash does not build in from `PATH`, which differential runs against bash and zsh need.
 
 On Windows, `omp zsh` takes zsh's function library (`fpath`, for `compinit`) from an MSYS2, Cygwin or Git for Windows zsh: the root of a `…\usr\bin` (or Cygwin `…\bin`) on `PATH`, then `C:\msys64`, `C:\cygwin64` and `C:\cygwin`. A console `read` that Ctrl-C ends is not end of input: when the shell traps or ignores `INT`, the read resumes after the trap, as a Unix read interrupted by `SIGINT` does. `read -k`/`-q` read the terminal in cbreak mode on every platform.
 
@@ -191,13 +191,14 @@ Concurrency guard:
 
 ### Spawn/attach/write/read/terminate patterns
 
-- PTY opened via `portable_pty::native_pty_system().openpty(...)`.
-- On Windows, `openpty()` is run on a helper thread with a 5s startup timeout; timeout rejects with `PTY creation timed out (5s). ConPTY may be unavailable on this system.`
+- PTY opened with `openpty` (Unix; the child leads its own session with the PTY as controlling terminal) or a ConPTY pseudoconsole (Windows; a sideloaded `conpty.dll` wins over the system's).
+- On Windows, the pseudoconsole is opened on a helper thread with a 5s startup timeout; timeout rejects with `PTY creation timed out (5s). ConPTY may be unavailable on this system.`
 - `start()` runs the command through the configured shell:
    - `cmd.exe`/`cmd` gets `/c`,
    - `powershell`/`pwsh` gets `-Command`,
    - other shells get `-lc`.
-- `startArgv()` passes each argument directly to `portable_pty::CommandBuilder`.
+- `startArgv()` passes each argument to the program unchanged (Windows quotes each for `CommandLineToArgvW`); the program is looked up on the child environment's `PATH` (plus `PATHEXT` on Windows).
+- A missing or non-directory `cwd` falls back to `HOME` (`USERPROFILE` on Windows).
 - PTY commands inherit the process environment after stripping Git repository-location overrides; explicit PTY `env` values can add them back.
 - Default size is `120x40`; dimensions are clamped (`cols 20..400`, `rows 5..200`) on start and resize.
 - `write(data: string)` sends the string's UTF-8 bytes to PTY stdin.

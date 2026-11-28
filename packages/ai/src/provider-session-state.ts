@@ -50,7 +50,7 @@ import type { ProviderSessionState } from "./types";
 export function resetAccountScopedProviderSessionState(states: Map<string, ProviderSessionState>): void {
 	if (states.size === 0) return;
 	// Fast mode is the account-scoped half of the Anthropic record; the helper
-	// the `/fast on` re-arm path already uses clears exactly that flag.
+	// the fast-mode re-arm path already uses clears exactly that flag.
 	clearAnthropicFastModeFallback(states);
 	resetAnthropicThreads(states);
 	resetOpenAIResponsesAccountScopedState(states);

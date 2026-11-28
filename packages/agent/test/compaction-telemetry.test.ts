@@ -29,12 +29,7 @@ import type { AssistantMessage, Model, Usage } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { SpanStatusCode } from "@opentelemetry/api";
-import {
-	BasicTracerProvider,
-	InMemorySpanExporter,
-	type ReadableSpan,
-	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+import { InMemorySpanExporter, type ReadableSpan, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 
 const MODEL: Model = buildModel({
 	id: "mock-model",
@@ -50,11 +45,11 @@ const MODEL: Model = buildModel({
 });
 
 let exporter: InMemorySpanExporter;
-let provider: BasicTracerProvider;
+let provider: TracerProvider;
 
 beforeEach(() => {
 	exporter = new InMemorySpanExporter();
-	provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+	provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
 });
 
 afterEach(async () => {

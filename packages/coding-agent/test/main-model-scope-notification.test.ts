@@ -14,7 +14,8 @@ import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { buildModelScopeNotification, runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { beginStartupComposer, stopPendingStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
+import { beginStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-composer";
+import { stopPendingStartupComposer } from "@oh-my-pi/pi-coding-agent/modes/startup-frame";
 import {
 	cfgMarketplaceAutoUpdate,
 	cfgStartupChangelogMode,
@@ -152,18 +153,19 @@ describe("startup model fallback notice after first-run setup", () => {
 			return showWarning.call(this, message, ...rest);
 		});
 		const renderInitialMessages = InteractiveMode.prototype.renderInitialMessages;
-		spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(
-			async function (this: InteractiveMode, options) {
-				// Stubbed setup step: runs before the startup notices are shown.
-				if (setupModelId) {
-					const model = scopedModel(setupModelId).model;
-					// Sign-in stores a credential for the provider before the model it selects.
-					this.session.modelRegistry.authStorage.keys.setRuntime(model.provider, "setup-test-key");
-					await this.session.setModel(model, "default", { persist: false });
-				}
-				await renderInitialMessages.call(this, options);
-			},
-		);
+		spyOn(InteractiveMode.prototype, "renderInitialMessages").mockImplementation(async function (
+			this: InteractiveMode,
+			options,
+		) {
+			// Stubbed setup step: runs before the startup notices are shown.
+			if (setupModelId) {
+				const model = scopedModel(setupModelId).model;
+				// Sign-in stores a credential for the provider before the model it selects.
+				this.session.modelRegistry.authStorage.keys.setRuntime(model.provider, "setup-test-key");
+				await this.session.setModel(model, "default", { persist: false });
+			}
+			await renderInitialMessages.call(this, options);
+		});
 		spyOn(InteractiveMode.prototype, "getUserInput").mockImplementation(async function (this: InteractiveMode) {
 			mode = this;
 			throw interrupted;
