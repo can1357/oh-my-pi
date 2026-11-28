@@ -310,7 +310,8 @@ impl Plane<'_> {
 		}
 		let fd = c_int::try_from(data.fd).ok()?;
 		let mut stat = MaybeUninit::uninit();
-		// SAFETY: fstat initializes `stat` on success without taking ownership of the fd.
+		// SAFETY: fstat initializes `stat` on success without taking ownership of
+		// the fd.
 		let stat = unsafe {
 			if libc::fstat(fd, stat.as_mut_ptr()) != 0 {
 				return None;

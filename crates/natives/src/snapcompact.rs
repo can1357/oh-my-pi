@@ -199,7 +199,7 @@ fn resolve_font(chars: &str) -> Option<u32> {
 		.and_then(|index| u32::try_from(index).ok())
 }
 
-fn needs_glyph(ch: char) -> bool {
+const fn needs_glyph(ch: char) -> bool {
 	ch as u32 != FULL_BLOCK && !ch.is_whitespace() && !ch.is_control()
 }
 
@@ -496,7 +496,7 @@ fn rasterize_glyph(
 		.max(glyph.unit.bounds.width);
 	let height = line_height.max(glyph.unit.bounds.height);
 	let px = (cell_w as f32 / width).min(cell_h as f32 / height);
-	let baseline = (cell_h as f32 - line_height * px) * 0.5 + line_ascent * px;
+	let baseline = line_ascent.mul_add(px, line_height.mul_add(-px, cell_h as f32) * 0.5);
 	let (metrics, bitmap) = font.rasterize_indexed(glyph.index, px);
 	RasterizedGlyph { metrics, bitmap, baseline }
 }

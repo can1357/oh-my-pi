@@ -330,8 +330,8 @@ fn line_carries(body_line: &str, evidence: &str) -> bool {
 /// after lines shift up, its last line holds content from below it. Either
 /// way that end's content is absent from the payload. A payload that also
 /// carries the line just below the full authored replacement (not the unseen
-/// span, which may end before already-seen rows) defeats this when the head is an
-/// echoed context row (lines shifted down, body restates the line above), so
+/// span, which may end before already-seen rows) defeats this when the head is
+/// an echoed context row (lines shifted down, body restates the line above), so
 /// such payloads never count as evidence.
 fn body_targets(
 	body: &[String],
@@ -1239,7 +1239,8 @@ mod lifecycle {
 			ctx.read(file, &[18]);
 			let shifted = format!("// inserted\n{}", ctx.text(file));
 			ctx.write_text(file, &shifted);
-			// Current line 19 was seen only at its old number; line 20 is seen now.
+			// Current line 19 was seen only at its old number; line 20 is seen
+			// now.
 			let tag = ctx.read(file, &[20]);
 			let result = ctx
 				.edit(&format!("[{file}#{tag}]\nPUT 19.=20:\n+let v0018 = 18; // edited\n+{tail}\n"))

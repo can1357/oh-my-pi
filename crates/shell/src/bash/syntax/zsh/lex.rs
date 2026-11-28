@@ -15,6 +15,7 @@
 //! Falstad and the zsh development group).
 
 use alloc::{borrow::Cow, vec, vec::Vec};
+
 use xutf::{Utf8Decoder, Utf8Step};
 
 use super::tok::{

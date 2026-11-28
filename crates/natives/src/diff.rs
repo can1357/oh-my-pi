@@ -184,15 +184,15 @@ fn diff_runs(runs: Vec<omp_diff::Run>) -> Vec<DiffRun> {
 
 #[derive(Default)]
 struct StreamSide {
-	text:         Vec<u16>,
-	line_ends:    Vec<usize>,
+	text:      Vec<u16>,
+	line_ends: Vec<usize>,
 	/// A UTF-8 character the last chunk cut off, for the next to complete.
-	held_utf8:    Option<Incomplete>,
-	started:      bool,
-	reading:      bool,
-	done:         bool,
-	binary:       bool,
-	too_large:    bool,
+	held_utf8: Option<Incomplete>,
+	started:   bool,
+	reading:   bool,
+	done:      bool,
+	binary:    bool,
+	too_large: bool,
 }
 
 impl StreamSide {

@@ -158,7 +158,8 @@ fn rasterize_svg_sync(
 		)));
 	}
 
-	let mut options = usvg::Options { fontdb: Arc::clone(system_font_db()), ..usvg::Options::default() };
+	let mut options =
+		usvg::Options { fontdb: Arc::clone(system_font_db()), ..usvg::Options::default() };
 	// Repository-controlled SVGs must not read arbitrary host files through an
 	// <image href="…"> reference. Embedded data URLs retain the default
 	// resolver.
