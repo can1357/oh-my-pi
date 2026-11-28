@@ -9,8 +9,10 @@
 import { describe, expect, it } from "bun:test";
 import { For, type Signal, signal } from "@oh-my-pi/pi-tui";
 import type { FramePlan, TerminalCapabilities, TerminalDriver } from "@oh-my-pi/pi-tui/driver/contract";
+import { anchoredRows } from "@oh-my-pi/pi-tui/driver/images/anchor";
 import { createSurface, isSettled, settle } from "@oh-my-pi/pi-tui/surface";
 import { TermBackend } from "@oh-my-pi/pi-tui/term/backend";
+import { defineRolePainter } from "@oh-my-pi/pi-tui/term/paint";
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { type MarkdownOptions, renderMarkdownFrame } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { PLAIN_THEME } from "@oh-my-pi/pi-tui/theme/plain";
@@ -1045,5 +1047,35 @@ describe("final look", () => {
 		const tokens = driver.vt.transcript().flatMap(row => row.trim().split(/\s+/));
 		expect(tokens.filter(token => /^p\d$/.test(token))).toEqual(["p1", "p2", "p3", "p4", "p5", "p6"]);
 		expect(tokens.filter(token => token === "word").length).toBe(42);
+	});
+
+	it("preserve: skips an image draw row a height shrink pushed when the cut image retires", async () => {
+		defineRolePainter("rows", "test.resize-cut-image", node => {
+			const props = node.props() as { lines: readonly string[] };
+			return { rows: props.lines, stable: 3 };
+		});
+		const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
+		const driver = new VtDriver({ rows: 8, columns: 20, resizeScrollback: "preserve" });
+		const { surface, backend } = mount(
+			driver,
+			() => <rows key="reply" role="test.resize-cut-image" lines={["h0", "h1", ...image, "t0", "t1", "t2", "t3"]} />,
+			{ dock: () => <rows key="dock" lines={["dock"]} /> },
+		);
+		try {
+			// The image's first row is in history but still on screen, so its live draw row is intact.
+			expect(driver.vt.transcript()).toEqual(["h0", "h1", "", "", "", "t0", "t1", "t2", "t3", "dock"]);
+			// The shrink pushes the live reserved row and draw row into native scrollback.
+			driver.resize(20, 5);
+			backend.renderNow();
+			await driver.vt.settle();
+			backend.renderNow();
+			// Their retirement now cuts the image, but must not write the pushed rows again.
+			settle(surface.main()[0]!);
+			backend.renderNow();
+			expect(driver.vt.transcript()).toEqual(["h0", "h1", "", "", "", "t0", "t1", "t2", "t3", "dock"]);
+		} finally {
+			backend.stop();
+			await driver.stop();
+		}
 	});
 });

@@ -1136,6 +1136,7 @@ export class TermBackend {
 			// earlier rows went out with an earlier batch, so an anchored image spanning that seam
 			// has its first rows only where the screen still holds them (dropped below).
 			let carriedEnd = 0;
+			let originalRows: (string | undefined)[] | undefined;
 			const appendRows = (block: Block, from: number, to: number): void => {
 				const mark = block.historyMark;
 				if (mark && mark.row >= from && mark.row < to && !this.#marked.has(mark.key) && !marked?.has(mark.key)) {
@@ -1207,13 +1208,16 @@ export class TermBackend {
 			// they reach that far down — past the top row its cursor-up clamps there and the image
 			// lands over rows that are not its own. A pin of another size leaves nothing to reach.
 			if (carriedEnd > 0) {
-				dropCutImages(rows, 0, carriedEnd, screenAbove(this.#pin, width, height));
+				dropCutImages(rows, 0, carriedEnd, screenAbove(this.#pin, width, height), (row, original) => {
+					(originalRows ??= [])[row] = original;
+				});
 			}
 			if (rows.length > 0 || ledger) {
 				history = {
 					id: this.#nextHistoryId++,
 					rows,
 					...(ledger ? { kind: "replay" } : {}),
+					...(originalRows ? { originalRows } : {}),
 					...(marked ? { marks: [...marked.values()] } : {}),
 				};
 				this.#pending = {
