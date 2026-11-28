@@ -5367,6 +5367,69 @@ export interface VcsDiffOptions {
   maxBytes?: number
 }
 
+/**
+ * What [`vcs_git_discards_work`] checks: uncommitted changes to tracked
+ * files, or with `clean` the untracked files a `git clean` with these options
+ * would delete.
+ *
+ * `git_dir` and `work_tree` name the repository and work tree to check; git
+ * discovers them from the checked directory when they are unset.
+ */
+export interface VcsDiscardCheck {
+  /** Preview `git clean` instead of tracked changes. */
+  clean?: boolean
+  /**
+   * Tracked changes: count only those the work tree holds beyond the index,
+   * for a command that leaves the index alone (`git checkout .`, `git
+   * restore .`).
+   */
+  worktreeOnly?: boolean
+  /** `-d`: untracked directories too. */
+  directories?: boolean
+  /** `-x`: ignored files too. */
+  includeIgnored?: boolean
+  /** `-X`: only ignored files. */
+  ignoredOnly?: boolean
+  /** `-ff`: untracked nested repositories too. */
+  nestedRepositories?: boolean
+  /** `-e` patterns. */
+  excludes?: Array<string>
+  /**
+   * Pathspecs, relative to the checked directory: what `git clean`
+   * previews (the directory when empty), or where tracked changes count
+   * (the whole work tree when empty).
+   */
+  pathspecs?: Array<string>
+  /**
+   * `git reset --merge`: count the staged changes it reverts (see
+   * `TrackedCheck`), not the work tree's.
+   */
+  merge?: boolean
+  /**
+   * Tracked changes: the tree-ish the command checks the files out of
+   * when it is neither the index nor `HEAD` (`git reset --hard <commit>`,
+   * `git checkout -f <branch>`): also count the untracked, not ignored
+   * files it overwrites. A name that resolves to nothing is looked up
+   * among the remote-tracking branches, as `git switch` guesses a new
+   * branch.
+   */
+  source?: string
+  /**
+   * Tracked changes: a `git stash` ran before the command, so count only
+   * the untracked files `source` overwrites.
+   */
+  trackedStashed?: boolean
+  /**
+   * A `git stash -u` ran before the command: count only the ignored files
+   * the untracked preview leaves, as the stash keeps the untracked ones.
+   */
+  untrackedStashed?: boolean
+  /** `--git-dir`: the repository, as an absolute path. */
+  gitDir?: string
+  /** `--work-tree`: the work tree, as an absolute path. */
+  workTree?: string
+}
+
 /** Discover the repository owning a directory. */
 export declare function vcsDiscover(dir: string): VcsRepo | null
 
@@ -5378,6 +5441,15 @@ export declare function vcsDiscoverForDisplay(dir: string): VcsRepo | null
 
 /** Clone a Git repository. */
 export declare function vcsGitClone(url: string, target: string, options: VcsCloneOptions, signal?: unknown | undefined | null): Promise<void>
+
+/**
+ * Whether a work-discarding command run in `dir` would destroy anything.
+ *
+ * Synchronous, for approval checks; runs no program the repository
+ * configures. `timeout_ms` bounds the whole check (three seconds when
+ * unset).
+ */
+export declare function vcsGitDiscardsWork(dir: string, check?: VcsDiscardCheck | undefined | null, timeoutMs?: number | undefined | null): boolean
 
 /** Discover the Git checkout containing a directory. */
 export declare function vcsGitDiscover(dir: string): VcsGitRepo | null

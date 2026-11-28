@@ -265,6 +265,56 @@ pub struct VcsCleanOptions {
 	pub include_ignored: Option<bool>,
 	pub paths:           Option<Vec<String>>,
 }
+/// What [`vcs_git_discards_work`] checks: uncommitted changes to tracked
+/// files, or with `clean` the untracked files a `git clean` with these options
+/// would delete.
+///
+/// `git_dir` and `work_tree` name the repository and work tree to check; git
+/// discovers them from the checked directory when they are unset.
+#[napi(object)]
+#[derive(Default)]
+pub struct VcsDiscardCheck {
+	/// Preview `git clean` instead of tracked changes.
+	pub clean:               Option<bool>,
+	/// Tracked changes: count only those the work tree holds beyond the index,
+	/// for a command that leaves the index alone (`git checkout .`, `git
+	/// restore .`).
+	pub worktree_only:       Option<bool>,
+	/// `-d`: untracked directories too.
+	pub directories:         Option<bool>,
+	/// `-x`: ignored files too.
+	pub include_ignored:     Option<bool>,
+	/// `-X`: only ignored files.
+	pub ignored_only:        Option<bool>,
+	/// `-ff`: untracked nested repositories too.
+	pub nested_repositories: Option<bool>,
+	/// `-e` patterns.
+	pub excludes:            Option<Vec<String>>,
+	/// Pathspecs, relative to the checked directory: what `git clean`
+	/// previews (the directory when empty), or where tracked changes count
+	/// (the whole work tree when empty).
+	pub pathspecs:           Option<Vec<String>>,
+	/// `git reset --merge`: count the staged changes it reverts (see
+	/// `TrackedCheck`), not the work tree's.
+	pub merge:               Option<bool>,
+	/// Tracked changes: the tree-ish the command checks the files out of
+	/// when it is neither the index nor `HEAD` (`git reset --hard <commit>`,
+	/// `git checkout -f <branch>`): also count the untracked, not ignored
+	/// files it overwrites. A name that resolves to nothing is looked up
+	/// among the remote-tracking branches, as `git switch` guesses a new
+	/// branch.
+	pub source:              Option<String>,
+	/// Tracked changes: a `git stash` ran before the command, so count only
+	/// the untracked files `source` overwrites.
+	pub tracked_stashed:     Option<bool>,
+	/// A `git stash -u` ran before the command: count only the ignored files
+	/// the untracked preview leaves, as the stash keeps the untracked ones.
+	pub untracked_stashed:   Option<bool>,
+	/// `--git-dir`: the repository, as an absolute path.
+	pub git_dir:             Option<String>,
+	/// `--work-tree`: the work tree, as an absolute path.
+	pub work_tree:           Option<String>,
+}
 /// Push options.
 #[napi(object)]
 #[derive(Default)]
@@ -443,6 +493,28 @@ impl From<VcsRestoreOptions> for core::RestoreOptions {
 			worktree: v.worktree.unwrap_or(false),
 			files:    v.files.unwrap_or_default(),
 		}
+	}
+}
+impl From<VcsDiscardCheck> for core::DiscardCheck {
+	fn from(v: VcsDiscardCheck) -> Self {
+		if !v.clean.unwrap_or(false) {
+			return Self::Tracked(core::TrackedCheck {
+				worktree_only:   v.worktree_only.unwrap_or(false),
+				pathspecs:       v.pathspecs.unwrap_or_default(),
+				merge:           v.merge.unwrap_or(false),
+				source:          v.source,
+				tracked_stashed: v.tracked_stashed.unwrap_or(false),
+			});
+		}
+		Self::Clean(core::CleanCheck {
+			directories:         v.directories.unwrap_or(false),
+			include_ignored:     v.include_ignored.unwrap_or(false),
+			ignored_only:        v.ignored_only.unwrap_or(false),
+			nested_repositories: v.nested_repositories.unwrap_or(false),
+			excludes:            v.excludes.unwrap_or_default(),
+			pathspecs:           v.pathspecs.unwrap_or_default(),
+			untracked_stashed:   v.untracked_stashed.unwrap_or(false),
+		})
 	}
 }
 impl From<VcsCleanOptions> for core::CleanOptions {
@@ -776,6 +848,30 @@ pub fn vcs_git_repo_info(env: Env, dir: String) -> Result<Option<VcsGitRepoInfo>
 	omp_vcs::git::discover_info(Path::new(&dir))
 		.map(|v| v.map(Into::into))
 		.map_err(|err| rich_error(env, err))
+}
+/// Whether a work-discarding command run in `dir` would destroy anything.
+///
+/// Synchronous, for approval checks; runs no program the repository
+/// configures. `timeout_ms` bounds the whole check (three seconds when
+/// unset).
+#[napi]
+pub fn vcs_git_discards_work(
+	env: Env,
+	dir: String,
+	check: Option<VcsDiscardCheck>,
+	timeout_ms: Option<u32>,
+) -> Result<bool> {
+	let mut check = check.unwrap_or_default();
+	let repository = core::RepositoryPaths {
+		git_dir:   check.git_dir.take().map(PathBuf::from),
+		work_tree: check.work_tree.take().map(PathBuf::from),
+	};
+	let check = check.into();
+	let timeout = Duration::from_millis(u64::from(timeout_ms.unwrap_or(3_000)));
+	catch_panic("vcs.discardsWork", || {
+		omp_vcs::git::discards_work(Path::new(&dir), &repository, &check, timeout)
+	})
+	.map_err(|err| rich_error(env, err))
 }
 
 #[napi]

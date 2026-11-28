@@ -3,7 +3,13 @@ import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ToolApprovalDecision,
+} from "@oh-my-pi/pi-agent-core";
 import {
 	type EditStore,
 	type GrepMatch,
@@ -34,6 +40,7 @@ import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
+import { fileToolApproval } from "./guard-rules";
 import { type FileMatchSection, formatFileMatches } from "./grouped-file-output";
 import { formatMatchLine } from "./match-line-format";
 import { findHintVisible } from "./jfind";
@@ -69,7 +76,7 @@ import { formatCodeFrameLine } from "../utils/render-utils";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
-import { cfgGrepContextAfter, cfgGrepContextBefore } from "./settings";
+import { cfgGrepContextAfter, cfgGrepContextBefore, cfgToolsGuardRules } from "./settings";
 import { cfgTaskDisabledAgents } from "../task/settings";
 
 const searchSchema = type({
@@ -555,7 +562,16 @@ export interface GrepToolOptions {
 
 export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails> {
 	readonly name = "grep";
-	readonly approval = searchPathTier;
+	readonly approval = (args: unknown): ToolApprovalDecision => {
+		if (!cfgToolsGuardRules.get(this.session.settings)) return searchPathTier(args);
+		const a = args as { path?: string | string[]; paths?: string | string[] } | null | undefined;
+		// Execution trims each root and strips its outer double quotes before searching it or its parts.
+		const roots = toPathList(a?.path ?? a?.paths)
+			.flatMap(root => approvalRootCandidates(normalizePathLikeInput(root)).map(normalizePathLikeInput))
+			.filter(root => root.length > 0);
+		// With no path, execution searches the session cwd.
+		return fileToolApproval(searchPathTier(args), roots.length > 0 ? roots : ["."], this.session.cwd);
+	};
 	/**
 	 * `always-ask-cached` keys: every file and folder this grep searches, so a
 	 * folder grant recorded by a `read` covers a search of it and a search of one

@@ -3,6 +3,7 @@ import type { CustomToolContext } from "../extensibility/custom-tools/types";
 import type { ExtensionUIContext } from "../extensibility/extensions/types";
 import { trackUserWaits, type UserWaitTracker } from "../extensibility/extensions/user-wait";
 import type { CalledToolShaper } from "../spotlight";
+import type { ResolvedExecuteTimeApproval } from "./approval";
 
 declare module "@oh-my-pi/pi-agent-core" {
 	interface AgentToolContext extends CustomToolContext {
@@ -33,6 +34,12 @@ declare module "@oh-my-pi/pi-agent-core" {
 		/** Set while the session runs the Spotlight experiment: the tool wrapper passes the final result of each of
 		 *  the agent's own calls (`toolCall` lists it under the tool's name) through it. */
 		spotlightShape?: CalledToolShaper;
+		/** Set by `resolveApproval` on the context a function-valued `approval` receives: the mode and
+		 *  `tools.approval` policies the call is resolved under. A caller may resolve under another mode
+		 *  than `settings` configures (the ACP permission gate asks under `always-ask` when `yolo` is
+		 *  only the schema default), so an approval that skips work whose answer the mode would ignore
+		 *  reads this rather than `settings`. */
+		approvalResolution?: ResolvedExecuteTimeApproval;
 	}
 }
 
