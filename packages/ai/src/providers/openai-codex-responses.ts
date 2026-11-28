@@ -354,6 +354,10 @@ interface CodexResponseUsage {
 		orchestration_input_tokens?: number;
 		orchestration_input_cached_tokens?: number;
 	};
+	cache_write_tokens_details?: {
+		ttl_30m_tokens?: number;
+		ttl_12h_tokens?: number;
+	};
 	output_tokens_details?: {
 		reasoning_tokens?: number;
 		orchestration_output_tokens?: number;
