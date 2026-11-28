@@ -12,6 +12,7 @@ import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wi
 import { requestBodyText } from "@oh-my-pi/pi-ai/utils/request-body";
 import type { ImageContent, TextContent, TSchema } from "@oh-my-pi/pi-ai";
 import {
+	getContextHistoryIndex,
 	isPerCallContextMessage,
 	kCursorExecResolved,
 	kStreamingBlockIndex,
@@ -22,7 +23,11 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeVmContextsByOwner } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { disposeKernelSessionsByOwner } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
-import { ExtensionRuntime, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import {
+	ExtensionRuntime,
+	loadExtensionFromFactory,
+	loadExtensions,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	ExtensionRunner,
@@ -41,6 +46,7 @@ import type {
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { createEvalCustomTools, describeEvalTools } from "@oh-my-pi/pi-coding-agent/task/eval-tools";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
@@ -5669,6 +5675,163 @@ export default function (pi) {
 				const transformed = await runner.emitContext(messages);
 				expect(transformed.some(message => isPerCallContextMessage(message))).toBe(false);
 			}
+		});
+	});
+
+	describe("context history stamp", () => {
+		/** `value` with every object and array inside it frozen. */
+		const deepFreeze = <T>(value: T): T => {
+			if (value !== null && typeof value === "object") {
+				for (const child of Object.values(value)) deepFreeze(child);
+				Object.freeze(value);
+			}
+			return value;
+		};
+
+		const contextRunner = async (extensionCode: string) => {
+			fs.writeFileSync(path.join(extensionsDir, "context-stamp.ts"), extensionCode);
+			const result = await loadTestExtensions();
+			return new ExtensionRunner(result.extensions, result.runtime, tempDir.path(), sessionManager, modelRegistry);
+		};
+
+		// A frozen history makes any write on it throw. The runner writes only on its own copies, on the clone path
+		// and on the fallback a message `structuredClone` refuses sends it to. A copy a handler leaves unchanged keeps
+		// its place in the cached prefix, the one it rewrites is this call's own, and the next call's unchanged copy
+		// of that message is back in the prefix.
+		it("never writes on a frozen history, through the copy and through the fallback, and keeps its per-call marks", async () => {
+			const rewriteOnThirdCall = `export default pi => {
+				let calls = 0;
+				pi.on("context", event => {
+					calls++;
+					return {
+						messages: event.messages.map(message =>
+							calls === 3 && message.role === "user" ? { ...message, content: "read b.ts" } : { ...message },
+						),
+					};
+				});
+			};`;
+			const expectFrozenHistoryKept = async (details: Record<string, unknown>) => {
+				const runner = await contextRunner(rewriteOnThirdCall);
+				const history = deepFreeze<AgentMessage[]>([
+					{ role: "user", content: "read a.ts", timestamp: 1 },
+					createAssistantMessage("reading a.ts"),
+					{
+						role: "toolResult",
+						toolCallId: "call-1",
+						toolName: "read",
+						content: [{ type: "text", text: "a.ts has 12 lines" }],
+						details,
+						isError: false,
+						timestamp: 3,
+					},
+				]);
+
+				const marks: boolean[][] = [];
+				for (let call = 1; call <= 4; call++) {
+					const projected = await runner.emitContext(history);
+					marks.push(projected.map(message => isPerCallContextMessage(message)));
+				}
+
+				expect(marks).toEqual([
+					[false, false, false],
+					[false, false, false],
+					[true, false, false],
+					[false, false, false],
+				]);
+			};
+
+			// Every message is data `structuredClone` copies: the handler gets the runner's clone.
+			await expectFrozenHistoryKept({ lines: 12 });
+			// `structuredClone` refuses a function: the runner copies the history on its fallback.
+			await expectFrozenHistoryKept({ lines: 12, format: () => "12 lines" });
+		});
+
+		// A handler can hand back a session message it holds from outside the event, and the runner then lends that
+		// message the history position of the copy at its place; a later handler can drop it. A position left on the
+		// session's message would be read at a later request as that message's place in the history.
+		it("leaves no history position on a session message that a handler hands back", async () => {
+			const history: AgentMessage[] = [
+				{ role: "user", content: "read a.ts", timestamp: 1 },
+				createAssistantMessage("reading a.ts"),
+				{ role: "user", content: "and b.ts", timestamp: 3 },
+			];
+			const runtime = new ExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				pi => {
+					pi.on("context", () => ({ messages: history }));
+					pi.on("context", event => ({ messages: event.messages.map(message => ({ ...message })) }));
+				},
+				tempDir.path(),
+				new EventBus(),
+				runtime,
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+
+			await runner.emitContext(history);
+
+			expect(history.map(message => getContextHistoryIndex(message))).toEqual([undefined, undefined, undefined]);
+		});
+
+		// A session message a handler hands back must not make the next handler's unchanged copy of it read as
+		// rewritten: that copy keeps its place in the cached prefix, on the call after a rewrite as on any other.
+		it("keeps an unchanged copy in the cached prefix after a rewrite when an earlier handler hands back the session's messages", async () => {
+			const history: AgentMessage[] = [
+				{ role: "user", content: "read a.ts", timestamp: 1 },
+				createAssistantMessage("reading a.ts"),
+				{ role: "user", content: "and b.ts", timestamp: 3 },
+			];
+			let calls = 0;
+			const runtime = new ExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				pi => {
+					pi.on("context", () => ({ messages: history }));
+					pi.on("context", event => {
+						calls++;
+						return {
+							messages: event.messages.map((message, index) =>
+								calls === 3 && index === 0 && message.role === "user"
+									? { ...message, content: "read b.ts" }
+									: { ...message },
+							),
+						};
+					});
+				},
+				tempDir.path(),
+				new EventBus(),
+				runtime,
+			);
+			const runner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+
+			const marks: boolean[][] = [];
+			for (let call = 1; call <= 4; call++) {
+				const projected = await runner.emitContext(history);
+				marks.push(projected.map(message => isPerCallContextMessage(message)));
+			}
+
+			expect(marks).toEqual([
+				[false, false, false],
+				[false, false, false],
+				[true, false, false],
+				[false, false, false],
+			]);
+		});
+
+		// A spread copy carries its history position past a message the handler puts in front of it. Were it to lose
+		// that position, each message behind the insertion would read as rewritten and fall out of the cached prefix.
+		it("recognizes a handler's unchanged spread copies behind a message the handler inserts", async () => {
+			const runner = await contextRunner(
+				`export default pi => pi.on("context", event => ({
+					messages: [{ role: "user", content: "a.ts is generated", timestamp: 0 }, ...event.messages.map(message => ({ ...message }))],
+				}));`,
+			);
+
+			const projected = await runner.emitContext([
+				{ role: "user", content: "read a.ts", timestamp: 1 },
+				createAssistantMessage("reading a.ts"),
+				{ role: "user", content: "and b.ts", timestamp: 3 },
+			]);
+
+			expect(projected.map(message => isPerCallContextMessage(message))).toEqual([true, false, false, false]);
 		});
 	});
 });

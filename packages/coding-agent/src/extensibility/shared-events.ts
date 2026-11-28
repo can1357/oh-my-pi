@@ -205,7 +205,12 @@ export type SessionEvent =
  */
 export interface ContextEvent {
 	type: "context";
-	/** Messages about to be sent to the LLM (deep copy, safe to modify) */
+	/**
+	 * Messages about to be sent to the LLM: a copy, safe to modify. The copy is deep, except
+	 * that an extension's handler gets a shallow copy of each message when one of them holds
+	 * a value `structuredClone` refuses (a function, for example); there, replace a nested
+	 * value rather than edit it in place.
+	 */
 	messages: AgentMessage[];
 }
 
