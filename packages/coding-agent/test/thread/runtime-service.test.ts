@@ -2,105 +2,85 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { MessageChannel } from "node:worker_threads";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../../src/async/job-manager";
+import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, type AsyncJobManager } from "../../src/async/job-manager";
 import { Settings } from "../../src/config/settings";
+import type { JobWidgetInputs } from "../../src/job-widgets/types";
 import { AgentStorage } from "../../src/session/agent-storage";
 import { ArtifactManager } from "../../src/session/artifacts";
 import { CostGate } from "../../src/session/cost-gate";
 import { cfgSessionMaxCost } from "../../src/session/settings";
-import type { MainThreadLink, SubagentMainApi, SubagentWorkerApi } from "../../src/thread/protocol";
-import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
-import type { ThreadService, WorkerPeer } from "../../src/thread/services";
-import { asyncJobsThreadService } from "../../src/thread/services/async-jobs";
-import { runtimeThreadService } from "../../src/thread/services/runtime";
-import { settingsThreadService } from "../../src/thread/services/settings";
 import { EventBus } from "../../src/utils/event-bus";
+import { runEach } from "../helpers/cleanup";
+import { collectGarbage } from "../helpers/heap-snapshot";
+import { type Probe, RuntimeWorkers } from "../helpers/runtime-service-workers";
 
-/** Main-side view of the fixture's probe: every call is async across the link. */
-type Probe = (op: string, ...args: unknown[]) => Promise<unknown>;
+/** The timeout of each case's teardown: far past what stopping its workers takes. */
+const TEARDOWN_TIMEOUT_MS = 30_000;
 
-const SERVICES: readonly ThreadService[] = [settingsThreadService, runtimeThreadService, asyncJobsThreadService];
-
-interface Started {
-	worker: Worker;
-	peer: WorkerPeer;
-	probe: Probe;
-}
-
-const started: Started[] = [];
-const managers: AsyncJobManager[] = [];
+const workers = new RuntimeWorkers();
 let tmp = "";
-let nextWorker = 1;
 
 beforeEach(() => {
 	tmp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-runtime-service-"));
 });
 
-afterEach(async () => {
-	for (const manager of managers.splice(0)) await manager.dispose({ timeoutMs: 100 });
-	for (const { worker, peer } of started.splice(0)) {
-		for (const service of SERVICES) service.onWorkerExit?.(peer, "test end");
-		peer.link.close("test end");
-		worker.terminate();
-	}
-	AgentStorage.close();
-	fs.rmSync(tmp, { recursive: true, force: true });
-});
+afterEach(
+	() =>
+		runEach([
+			() => workers.stop(),
+			() => AgentStorage.close(),
+			() => fs.rmSync(tmp, { recursive: true, force: true }),
+		]),
+	TEARDOWN_TIMEOUT_MS,
+);
 
 function newManager(): AsyncJobManager {
-	const manager = new AsyncJobManager({});
-	managers.push(manager);
-	return manager;
+	return workers.newManager();
 }
 
-async function startWorker(): Promise<Probe> {
-	const spawned = new Worker(new URL("../fixtures/runtime-service-worker.ts", import.meta.url).href, {
-		type: "module",
-	});
-	const channel = new MessageChannel();
-	const counter = new SharedArrayBuffer(4);
-	const { promise: ready, resolve } = Promise.withResolvers<void>();
-	const onReady = (event: MessageEvent): void => {
-		if (event.data?.ready) {
-			spawned.removeEventListener("message", onReady);
-			resolve();
-		}
-	};
-	spawned.addEventListener("message", onReady);
-	spawned.postMessage({ sync: channel.port2, counter }, [channel.port2]);
-	await ready;
-	const threadId = `w${nextWorker++}` as const;
-	const link: MainThreadLink = new RpcLink<SubagentMainApi, SubagentWorkerApi>(
-		{
-			send: frame => spawned.postMessage(frame),
-			listen: handler => {
-				const listener = (event: MessageEvent<RpcFrame>): void => handler(event.data);
-				spawned.addEventListener("message", listener);
-				return () => spawned.removeEventListener("message", listener);
-			},
-		},
-		{ name: `main↔${threadId}`, syncReplies: { port: channel.port1, counter: new Int32Array(counter) } },
-	);
-	link.handle("ping", nonce => nonce);
-	const peer: WorkerPeer = { threadId, link };
-	for (const service of SERVICES) service.installMain?.(peer);
-	let probe: Probe | undefined;
-	await link.call("boot", {
-		settings: settingsThreadService.globals?.(peer),
-		probe: (registered: Probe) => {
-			probe = registered;
-		},
-	});
-	if (!probe) throw new Error("fixture did not register its probe");
-	started.push({ worker: spawned, peer, probe });
-	return probe;
+/** A worker of the fixture, recorded at its spawn; its case's 30 s timeout is past the fixture's 20 s readiness cap. */
+function startWorker(): Promise<Probe> {
+	return workers.start();
 }
 
 async function jobId(probe: Probe, manager: AsyncJobManager, ownerId: string, withInputs = false): Promise<string> {
 	const id = await probe("register", manager, ownerId, withInputs);
 	if (typeof id !== "string") throw new Error("register returned no id");
 	return id;
+}
+
+/** A job the fixture registers with `options` (see its `registerJob` probe), keeping its tap only weakly. */
+async function heldContextJob(
+	probe: Probe,
+	manager: AsyncJobManager,
+	options: { id?: string; foreground?: boolean; inputs?: boolean },
+): Promise<string> {
+	const id = await probe("registerJob", manager, "Worker", options);
+	if (typeof id !== "string") throw new Error("registerJob returned no id");
+	return id;
+}
+
+/** Run the body of `id` to its end and wait until main's row settled. */
+async function settle(probe: Probe, manager: AsyncJobManager, id: string): Promise<void> {
+	const settled = manager.getJob(id)?.promise;
+	if (!settled) throw new Error(`no row ${id} on main`);
+	await probe("finish", id, "done");
+	await settled;
+}
+
+/** Weak references to main's row of `id` and to its mirrored widget inputs; nothing else here holds them. */
+function mainRefs(manager: AsyncJobManager, id: string): { row: WeakRef<AsyncJob>; feed: WeakRef<JobWidgetInputs> } {
+	const row = manager.getJob(id);
+	if (!row?.widgetInputs) throw new Error(`no mirrored widget inputs for ${id}`);
+	return { row: new WeakRef(row), feed: new WeakRef(row.widgetInputs) };
+}
+
+/** Full collections in both threads; the second round lets the release frames of the first one land. */
+async function collectBothThreads(probe: Probe): Promise<void> {
+	for (let round = 0; round < 2; round++) {
+		await probe("gc");
+		await collectGarbage();
+	}
 }
 
 describe("runtime thread services: async jobs", () => {
@@ -134,7 +114,7 @@ describe("runtime thread services: async jobs", () => {
 
 		expect(await manager.drainDeliveries({ timeoutMs: 5_000 })).toBe(true);
 		expect(await probe("deliveries")).toEqual([{ jobId: id, text: "all done", status: "completed", isRow: true }]);
-	});
+	}, 30_000);
 
 	it("returns and consumes a job settled during a worker-homed eval wait", async () => {
 		const manager = newManager();
@@ -147,7 +127,7 @@ describe("runtime thread services: async jobs", () => {
 
 		expect(await waited).toEqual({ items: [{ kind: "agent", id, status: "completed", text: "all done" }] });
 		expect(manager.isJobResultConsumed(id)).toBe(true);
-	});
+	}, 30_000);
 
 	it("emits progress published while a worker-homed eval wait is open", async () => {
 		const manager = newManager();
@@ -163,7 +143,7 @@ describe("runtime thread services: async jobs", () => {
 			result: { items: [{ kind: "agent", id, status: "completed", text: "all done" }] },
 			progress: [{ op: "agent", id, taskPreview: "investigate" }],
 		});
-	});
+	}, 30_000);
 
 	it("retains a settled result after eviction while another handle remains running", async () => {
 		const manager = newManager();
@@ -185,7 +165,7 @@ describe("runtime thread services: async jobs", () => {
 				{ kind: "agent", id: second, status: "completed", text: "second done" },
 			],
 		});
-	});
+	}, 30_000);
 
 	it("cancels the worker body from main and keeps the shutdown reason a symbol", async () => {
 		const manager = newManager();
@@ -212,7 +192,7 @@ describe("runtime thread services: async jobs", () => {
 		});
 		await probe("cancelAllShutdown", manager);
 		expect(await mainSide.promise).toBe(ASYNC_JOB_MANAGER_SHUTDOWN_REASON);
-	});
+	}, 30_000);
 
 	it("mirrors a worker job's process and widget inputs on main, ending with the body's last output", async () => {
 		const manager = newManager();
@@ -239,19 +219,120 @@ describe("runtime thread services: async jobs", () => {
 		const [final] = inputs.sources();
 		expect(final?.read(0)).toMatchObject({ text: "line one\nlast line\n", open: false });
 		expect(job.process?.pids()).toEqual([]);
-	});
+	}, 30_000);
+
+	it("lets a released foreground job's row on main and its tap on the worker be collected once its run settles, and keeps a background job's local inputs readable after it settles", async () => {
+		// If this regresses, each foreground bash call of a worker subagent keeps its output twice after it
+		// returned: on main in its job row and mirrored feed, on the worker in its tap, for as long as the
+		// body keeps its run context. Every body here keeps it, as `entry.report` in the fixture.
+		const manager = newManager();
+		const probe = await startWorker();
+
+		const releasedFirst = await heldContextJob(probe, manager, {
+			id: "released-first",
+			foreground: true,
+			inputs: true,
+		});
+		const releasedFirstRefs = mainRefs(manager, releasedFirst);
+		await probe("appendHeld", releasedFirst, "released, then settled\n");
+		await probe("releaseForeground", manager, releasedFirst);
+		await settle(probe, manager, releasedFirst);
+
+		const settledFirst = await heldContextJob(probe, manager, {
+			id: "settled-first",
+			foreground: true,
+			inputs: true,
+		});
+		const settledFirstRefs = mainRefs(manager, settledFirst);
+		await probe("appendHeld", settledFirst, "settled, then released\n");
+		await settle(probe, manager, settledFirst);
+		expect(manager.getJob(settledFirst)?.status).toBe("completed");
+		await probe("releaseForeground", manager, settledFirst);
+		await probe("noop");
+		expect(manager.getJob(releasedFirst)).toBeUndefined();
+		expect(manager.getJob(settledFirst)).toBeUndefined();
+
+		const background = await heldContextJob(probe, manager, { id: "background", inputs: true });
+		await probe("appendHeld", background, "kept output\n");
+		await settle(probe, manager, background);
+
+		await collectBothThreads(probe);
+		const alive = (refs: { row: WeakRef<AsyncJob>; feed: WeakRef<JobWidgetInputs> }) => ({
+			mainRow: refs.row.deref() !== undefined,
+			mainFeed: refs.feed.deref() !== undefined,
+		});
+		expect({
+			releasedThenSettled: { ...alive(releasedFirstRefs), workerTap: await probe("tapAlive", releasedFirst) },
+			settledThenReleased: { ...alive(settledFirstRefs), workerTap: await probe("tapAlive", settledFirst) },
+			background: {
+				mainStatus: manager.getJob(background)?.status,
+				workerTap: await probe("tapAlive", background),
+				workerSources: await probe("localSources", manager, background),
+			},
+		}).toEqual({
+			releasedThenSettled: { mainRow: false, mainFeed: false, workerTap: false },
+			settledThenReleased: { mainRow: false, mainFeed: false, workerTap: false },
+			background: {
+				mainStatus: "completed",
+				workerTap: true,
+				workerSources: [{ text: "kept output\n", open: false }],
+			},
+		});
+	}, 30_000);
+
+	it("ignores a worker job's progress call made after its result arrived", async () => {
+		// If this regresses, a body that reports after its result reached main rewrites the ended job's
+		// progress line, and job views show progress for a job that has already settled.
+		const manager = newManager();
+		const probe = await startWorker();
+		const id = await jobId(probe, manager, "Worker");
+		await probe("progress", id, "halfway");
+		await settle(probe, manager, id);
+
+		expect(await probe("progress", id, "after the result")).toBe(true);
+		const row = manager.getJob(id);
+		expect({ status: row?.status, progressText: row?.progressText }).toEqual({
+			status: "completed",
+			progressText: "halfway",
+		});
+	}, 30_000);
+
+	it("clears a reused job id's leftover state on the worker", async () => {
+		// If this regresses, a job registered under an id main reuses shows, on the worker (where
+		// `proc://<id>` reads it), the process and output of the earlier job that had that id.
+		const manager = newManager();
+		const probe = await startWorker();
+
+		// A released foreground job gives its auto id back to the next job.
+		const released = await heldContextJob(probe, manager, { foreground: true, inputs: true });
+		await probe("appendHeld", released, "the earlier job's output\n");
+		await settle(probe, manager, released);
+		await probe("releaseForeground", manager, released);
+		const reusedAuto = await jobId(probe, manager, "Worker");
+		expect(reusedAuto).toBe(released);
+
+		// An evicted background job's id, named again.
+		const named = await heldContextJob(probe, manager, { id: "named", inputs: true });
+		await probe("appendHeld", named, "the earlier job's output\n");
+		await settle(probe, manager, named);
+		expect(manager.evictCompletedJobs({ ownerId: "Worker" })).toBe(1);
+		expect(await heldContextJob(probe, manager, { id: "named" })).toBe(named);
+
+		const none = { hasWidgetInputs: false, pids: null };
+		expect({
+			reusedAuto: await probe("localInputs", manager, reusedAuto),
+			reusedNamed: await probe("localInputs", manager, named),
+		}).toEqual({ reusedAuto: none, reusedNamed: none });
+	}, 30_000);
 
 	it("dead-letters a dead worker's owned deliveries instead of calling its closed sink", async () => {
 		const manager = newManager();
 		const probe = await startWorker();
 		await probe("sink", manager, "Worker");
-		const entry = started[0];
-		if (!entry) throw new Error("no worker");
-		for (const service of SERVICES) service.onWorkerExit?.(entry.peer, "crash");
-		entry.peer.link.close("crash");
+		workers.exitLatest("crash");
 		manager.publishCompleted("task", "after exit", { text: "late" }, { ownerId: "Worker" });
 		expect(await manager.drainDeliveries({ timeoutMs: 1_000 })).toBe(true);
-	});
+	}, 30_000);
 });
 
 describe("runtime thread services: cost gate, event bus, artifacts, storage", () => {
@@ -262,7 +343,7 @@ describe("runtime thread services: cost gate, event bus, artifacts, storage", ()
 		expect(await probe("cost", gate, 2)).toEqual({ spent: 2, capped: true, capError: true });
 		expect(gate.spent).toBe(2);
 		expect(gate.check()?.cap).toBe(1);
-	});
+	}, 30_000);
 
 	it("enforces a cap set on main after a worker saw the tree uncapped", async () => {
 		const settings = Settings.isolated();
@@ -275,7 +356,7 @@ describe("runtime thread services: cost gate, event bus, artifacts, storage", ()
 		cfgSessionMaxCost.override(settings, 1);
 		await Promise.resolve();
 		expect(await probe("cost", gate, 0)).toEqual({ spent: 2, capped: true, capError: true });
-	});
+	}, 30_000);
 
 	it("delivers worker frames to main listeners once and worker listeners receive main frames", async () => {
 		const bus = new EventBus();
@@ -315,7 +396,7 @@ describe("runtime thread services: cost gate, event bus, artifacts, storage", ()
 		bus.emit("to-worker", 7);
 		await probe("noop");
 		expect(await probe("events")).toEqual([7]);
-	});
+	}, 30_000);
 
 	it("allocates artifact ids on main so two workers never collide", async () => {
 		const sessionDir = path.join(tmp, "session");
@@ -334,7 +415,7 @@ describe("runtime thread services: cost gate, event bus, artifacts, storage", ()
 		const file = await artifacts.getPath(id);
 		if (!file) throw new Error("saved artifact not found on main");
 		expect(fs.readFileSync(file, "utf8")).toBe("worker content");
-	});
+	}, 30_000);
 
 	it("gives worker settings mirrors main's storage", async () => {
 		const storage = await AgentStorage.open(path.join(tmp, "agent.db"));
@@ -348,5 +429,5 @@ describe("runtime thread services: cost gate, event bus, artifacts, storage", ()
 		expect(storage.getCache("fixture:key")).toBe("fixture-value");
 		expect(storage.getModelUsageOrder()[0]).toBe("fixture/model");
 		expect(await probe("storage", Settings.isolated())).toEqual({ isNull: true });
-	});
+	}, 30_000);
 });

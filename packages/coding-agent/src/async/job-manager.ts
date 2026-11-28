@@ -489,6 +489,8 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #evicted = new Map<string, EvictedJob>();
 	readonly #releasedForegroundJobs = new Set<string>();
+	/** Who hears that a released foreground job's row was discarded; dropped with the row or its promotion. */
+	readonly #discardListeners = new WeakMap<AsyncJob, () => void>();
 	#nextAutoId = 1;
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
@@ -831,6 +833,9 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		if (!job) return false;
 		if (!job.foreground) return true;
 		job.foreground = undefined;
+		// A release that came first no longer discards the row once its run settles.
+		this.#releasedForegroundJobs.delete(jobId);
+		this.#discardListeners.delete(job);
 		this.#suppressedDeliveries.delete(jobId);
 		if (job.status === "completed" || job.status === "failed") {
 			this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));
@@ -842,13 +847,22 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	/**
 	 * Drop a foreground-backed job whose result the foreground call already
 	 * returned (or whose call aborted). The row is discarded as soon as its run
-	 * settles and never surfaces as a background job.
+	 * settles and never surfaces as a background job, unless
+	 * {@link backgroundJob} promotes it first.
 	 */
 	releaseForegroundJob(jobId: string): void {
 		const job = this.#jobs.get(jobId);
 		if (!job?.foreground) return;
 		if (job.endTime !== undefined) this.#discardForegroundJob(jobId);
 		else this.#releasedForegroundJobs.add(jobId);
+	}
+
+	/**
+	 * Call `listener` once the row of `job`, a foreground job, is discarded after
+	 * {@link releaseForegroundJob}. A promotion or any other end of the row drops it unheard.
+	 */
+	onForegroundDiscard(job: AsyncJob, listener: () => void): void {
+		if (job.foreground && this.#jobs.get(job.id) === job) this.#discardListeners.set(job, listener);
 	}
 
 	getDeliveryState(filter?: AsyncJobFilter): AsyncJobDeliveryState {
@@ -1205,9 +1219,19 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 	 * next background job reuses it without gaps or ambiguity.
 	 */
 	#discardForegroundJob(jobId: string): void {
+		const job = this.#jobs.get(jobId);
+		const listener = job ? this.#discardListeners.get(job) : undefined;
 		this.#releasedForegroundJobs.delete(jobId);
 		this.#evictJob(jobId);
 		if (jobId === `bg_${this.#nextAutoId - 1}`) this.#nextAutoId -= 1;
+		try {
+			listener?.();
+		} catch (error) {
+			logger.warn("Async job discard listener failed", {
+				jobId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	#claimJobId(preferredId?: string): string {
@@ -1352,7 +1376,10 @@ export class AsyncJobManager implements AsyncJobManagerApi {
 		this.#watchedJobs.delete(jobId);
 		const delivered = this.#consumedJobResults.delete(jobId);
 		const job = this.#jobs.get(jobId);
-		if (job) this.#runRetainedArtifactsCleanup(job);
+		if (job) {
+			this.#runRetainedArtifactsCleanup(job);
+			this.#discardListeners.delete(job);
+		}
 		if (job && reason && !job.foreground) {
 			this.#evicted.delete(jobId);
 			this.#evicted.set(jobId, {

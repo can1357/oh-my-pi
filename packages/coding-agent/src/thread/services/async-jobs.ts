@@ -15,6 +15,16 @@
  * pulled (each synchronous read starts one background pull) or the body pushed
  * as it settled, so the widget registry's final read sees the job's last output.
  *
+ * Every row a worker registers carries a `registrationId` no other row has, so
+ * the worker attaches its live inputs only to the row of its own registration,
+ * never to a later job main gives the same id.
+ *
+ * The run context's `reportProgress`, `markRunning` and `pushFeed` reach main's
+ * job row and its mirror only until the run settles ({@link workerRunContext}):
+ * the worker keeps those callbacks for as long as its body keeps the context,
+ * so they must not keep a released row and its mirror alive, and a call made
+ * after the result arrived does nothing.
+ *
  * Worker side: see `./async-jobs-remote`.
  */
 import {
@@ -23,6 +33,7 @@ import {
 	AsyncJobManager,
 	type AsyncJobProcess,
 	type AsyncJobRegisterOptions,
+	type AsyncJobRunContext,
 } from "../../async/job-manager";
 import { TextTap } from "../../job-widgets/text-tap";
 import type { JobTextSource, JobWidgetBrief, JobWidgetInputs } from "../../job-widgets/types";
@@ -132,6 +143,10 @@ class JobFeedMirror implements JobWidgetInputs {
 	}
 }
 
+/** The registration id of each row registered from a worker (see {@link AsyncJobWire.registrationId}). */
+const registrationIds = new WeakMap<AsyncJob, number>();
+let nextRegistrationId = 1;
+
 /** Cloneable projection of a main job row. */
 export function toJobWire(job: AsyncJob): AsyncJobWire {
 	const process = job.process;
@@ -167,6 +182,7 @@ export function toJobWire(job: AsyncJob): AsyncJobWire {
 				}
 			: undefined,
 		hasWidgetInputs: job.widgetInputs !== undefined,
+		registrationId: registrationIds.get(job),
 	};
 }
 
@@ -188,6 +204,41 @@ function mainRegisterOptions(options: WireRegisterOptions | undefined, feed: Job
 		widgetInputs: feed?.widgetInputs,
 	};
 	return result;
+}
+
+/** A worker job's run context as it crosses, and the cut that ends it. */
+interface WorkerRunContext {
+	readonly wire: WireRunContext;
+	/** Cut the callbacks off main's run context and mirror; later calls do nothing. */
+	readonly revoke: () => void;
+}
+
+/**
+ * The run context main hands a worker job body. Its callbacks stay exported to the worker for as
+ * long as the body keeps them, so they reach main's `reportProgress`, `markRunning` (both close
+ * over the job row) and `feed` only through a slot that {@link WorkerRunContext.revoke} empties
+ * when the run settles. Module-level, so no callback's scope holds `register`'s `feed` or `run`.
+ */
+function workerRunContext(ctx: AsyncJobRunContext, feed: JobFeedMirror | undefined): WorkerRunContext {
+	let live: { readonly ctx: AsyncJobRunContext; readonly feed: JobFeedMirror | undefined } | undefined = {
+		ctx,
+		feed,
+	};
+	const wire: WireRunContext = {
+		jobId: ctx.jobId,
+		signal: toWireSignal(ctx.signal),
+		reportProgress: async (text, details) => {
+			await live?.ctx.reportProgress(text, details);
+		},
+		markRunning: () => live?.ctx.markRunning(),
+		pushFeed: feed ? delta => live?.feed?.apply(delta, true) : undefined,
+	};
+	return {
+		wire,
+		revoke: () => {
+			live = undefined;
+		},
+	};
 }
 
 /** Everything workers registered on main managers (sinks, listeners, subscriptions). */
@@ -212,21 +263,27 @@ function serveManager(
 			),
 		register: (manager, type, label, run, options) => {
 			const feed = options?.feed ? new JobFeedMirror(options.feed) : undefined;
-			return manager.register(
+			const id = manager.register(
 				type,
 				label,
-				ctx => {
-					const wire: WireRunContext = {
-						jobId: ctx.jobId,
-						signal: toWireSignal(ctx.signal),
-						reportProgress: ctx.reportProgress,
-						markRunning: ctx.markRunning,
-						pushFeed: feed ? delta => feed.apply(delta, true) : undefined,
-					};
-					return run(wire);
+				async ctx => {
+					const context = workerRunContext(ctx, feed);
+					try {
+						return await run(context.wire);
+					} finally {
+						context.revoke();
+					}
 				},
 				mainRegisterOptions(options, feed),
 			);
+			const registrationId = nextRegistrationId++;
+			const job = manager.getJob(id);
+			if (job) {
+				registrationIds.set(job, registrationId);
+				const onDiscard = options?.onDiscard;
+				if (onDiscard) manager.onForegroundDiscard(job, () => ignoreSettle(onDiscard(id, registrationId)));
+			}
+			return { id, registrationId };
 		},
 		publishCompleted: (manager, type, label, result, options) =>
 			manager.publishCompleted(type, label, result, options),
