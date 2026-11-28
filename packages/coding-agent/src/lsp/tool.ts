@@ -22,6 +22,7 @@ import {
 	applyWorkspaceEditWithLsp,
 	clearInitializationFailure,
 	ensureWorkspaceFolders,
+	executeCommandWithLsp,
 	getActiveClients,
 	getOrCreateClient,
 	isRustAnalyzerClient,
@@ -64,6 +65,7 @@ import {
 	type RenameReferenceEdit,
 	rangesOverlap,
 	sortAndValidateTextEdits,
+	type WorkspaceFileChange,
 } from "./edits";
 import { detectLspmux } from "./lspmux";
 import {
@@ -658,6 +660,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		}
 
+		const recordFileChange = this.session.recordFileChange
+			? (change: WorkspaceFileChange) => this.session.recordFileChange?.({ ...change, tool: "lsp" })
+			: undefined;
+
 		if (action === "rename_file") {
 			if (!file || !new_name) {
 				return {
@@ -1013,7 +1019,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// Apply the reference edits and move as one unit: a failed move rolls
 			// the reference edits back so the source, destination, and every
 			// reference file are left unchanged.
-			await applyEditsThenRename(referenceEdits, source, dest);
+			await applyEditsThenRename(
+				referenceEdits,
+				source,
+				dest,
+				pairs.map(pair => ({ from: uriToFile(pair.oldUri), to: uriToFile(pair.newUri) })),
+				recordFileChange,
+			);
 			summary.push(`  Renamed ${sourceLabel} → ${destLabel}`);
 
 			for (const [serverName, serverConfig] of servers) {
@@ -1745,17 +1757,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const appliedAction = await applyCodeAction(selectedAction, {
 							resolveCodeAction: async actionItem =>
 								(await sendRequest(client, "codeAction/resolve", actionItem, signal)) as CodeAction,
-							applyWorkspaceEdit: async edit => applyWorkspaceEditWithLsp(edit, this.session.cwd, signal),
+							applyWorkspaceEdit: async edit =>
+								applyWorkspaceEditWithLsp(edit, this.session.cwd, signal, recordFileChange),
 							executeCommand: async commandItem => {
-								await sendRequest(
-									client,
-									"workspace/executeCommand",
-									{
-										command: commandItem.command,
-										arguments: commandItem.arguments ?? [],
-									},
-									signal,
-								);
+								await executeCommandWithLsp(client, commandItem, signal, recordFileChange);
 							},
 						});
 
@@ -1858,7 +1863,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					} else {
 						const shouldApply = apply !== false;
 						if (shouldApply) {
-							const applied = await applyWorkspaceEditWithLsp(result, this.session.cwd, signal);
+							const applied = await applyWorkspaceEditWithLsp(
+								result,
+								this.session.cwd,
+								signal,
+								recordFileChange,
+							);
 							output = `Applied rename:\n${applied.map(a => `  ${a}`).join("\n")}`;
 							// Whatever still names the old symbol was not renamed.
 							const leftover = symbolName

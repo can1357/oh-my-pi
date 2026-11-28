@@ -27,7 +27,7 @@ const JOURNAL_FILE = "changes.jsonl";
 /** Blob directory name inside the artifacts directory. */
 const BLOB_DIR = "blobs";
 /** Larger snapshots are not stored; their record leaves the path without replayable history. */
-const MAX_SNAPSHOT_CHARS = 8 * 1024 * 1024;
+export const MAX_SNAPSHOT_CHARS = 8 * 1024 * 1024;
 /** Deltas whose JSON is longer go to the blob store instead of the journal line. */
 const INLINE_DELTA_CHARS = 4096;
 /** Added or removed lines up to which a write is diffed exactly; a larger rewrite is one replaced block. */
@@ -115,10 +115,15 @@ export interface FileSnapshot {
 	text: string | null;
 }
 
+/** `bytes` as a snapshot's text: UTF-8 with any BOM kept, as {@link readSnapshot} reads a file. */
+export function snapshotText(bytes: Uint8Array): string {
+	return UTF8.decode(bytes);
+}
+
 /** Read `file` before writing it; `undefined` when it cannot be read (the write then goes unjournaled). */
 export async function readSnapshot(file: string): Promise<FileSnapshot | undefined> {
 	try {
-		return { text: UTF8.decode(await Bun.file(file).bytes()) };
+		return { text: snapshotText(await Bun.file(file).bytes()) };
 	} catch (error) {
 		return isEnoent(error) ? { text: null } : undefined;
 	}

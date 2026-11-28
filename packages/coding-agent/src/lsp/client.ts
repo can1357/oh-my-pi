@@ -16,7 +16,7 @@ import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors"
 import { resolveSyscallTarget } from "../tools/path-utils";
 import { findRepoRoot } from "../capability/fs";
 import { getConfig } from "./config";
-import { applyWorkspaceEdit, type ExecutedWorkspaceChange } from "./edits";
+import { applyWorkspaceEdit, type ExecutedWorkspaceChange, type WorkspaceFileChange } from "./edits";
 import { getLspmuxCommand, isLspmuxSupported } from "./lspmux";
 import { daemonClient } from "../daemon/client";
 import type { DaemonTunnel } from "../daemon/protocol";
@@ -36,6 +36,7 @@ import {
 	parseMuxServerExit,
 } from "./mux/protocol";
 import {
+	type Command,
 	type DocumentBuildStatus,
 	FileChangeType,
 	type LspClient,
@@ -1050,6 +1051,50 @@ async function handleConfigurationRequest(client: LspClient, message: LspJsonRpc
 	await sendResponse(client, message.id, result, "workspace/configuration");
 }
 
+/** `workspace/executeCommand` calls in flight per client, each with the recorder of its caller (if any). */
+const commandsInFlight = new WeakMap<LspClient, Set<{ onFileChange?: (change: WorkspaceFileChange) => void }>>();
+/** `workspace/executeCommand` requests in flight per client, however they were sent (raw `lsp` requests too). */
+const executeCommandRequests = new WeakMap<LspClient, number>();
+
+/**
+ * Run `workspace/executeCommand`. A server applies a command's edits with `workspace/applyEdit`
+ * before answering it, so an edit arriving while exactly one command is in flight on the client
+ * belongs to that command and is reported to its `onFileChange`. With several in flight, a
+ * command sent as a raw request included, the owner is unknown and the edit stays unrecorded.
+ */
+export async function executeCommandWithLsp(
+	client: LspClient,
+	command: Pick<Command, "command" | "arguments">,
+	signal?: AbortSignal,
+	onFileChange?: (change: WorkspaceFileChange) => void,
+): Promise<unknown> {
+	let inFlight = commandsInFlight.get(client);
+	if (!inFlight) {
+		inFlight = new Set();
+		commandsInFlight.set(client, inFlight);
+	}
+	const entry = { onFileChange };
+	inFlight.add(entry);
+	try {
+		return await sendRequest(
+			client,
+			"workspace/executeCommand",
+			{ command: command.command, arguments: command.arguments ?? [] },
+			signal,
+		);
+	} finally {
+		inFlight.delete(entry);
+	}
+}
+
+/** The recorder of the only command in flight on `client`, if any. */
+function soleCommandRecorder(client: LspClient): ((change: WorkspaceFileChange) => void) | undefined {
+	const inFlight = commandsInFlight.get(client);
+	if (inFlight?.size !== 1 || executeCommandRequests.get(client) !== 1) return undefined;
+	const [entry] = inFlight;
+	return entry.onFileChange;
+}
+
 /**
  * Handle workspace/applyEdit requests from the server.
  */
@@ -1066,7 +1111,7 @@ async function handleApplyEditRequest(client: LspClient, message: LspJsonRpcRequ
 	}
 
 	try {
-		await applyWorkspaceEditWithLsp(params.edit, client.cwd);
+		await applyWorkspaceEditWithLsp(params.edit, client.cwd, undefined, soleCommandRecorder(client));
 		await sendResponse(client, message.id, { applied: true }, "workspace/applyEdit");
 	} catch (err) {
 		await sendResponse(client, message.id, { applied: false, failureReason: String(err) }, "workspace/applyEdit");
@@ -1155,11 +1200,12 @@ export async function applyWorkspaceEditWithLsp(
 	edit: WorkspaceEdit,
 	cwd: string,
 	signal?: AbortSignal,
+	onFileChange?: (change: WorkspaceFileChange) => void,
 ): Promise<string[]> {
 	const executed: ExecutedWorkspaceChange[] = [];
 	let applied: string[];
 	try {
-		({ applied } = await applyWorkspaceEdit(edit, cwd, change => executed.push(change)));
+		({ applied } = await applyWorkspaceEdit(edit, cwd, change => executed.push(change), onFileChange));
 	} catch (err) {
 		// Best-effort: overlays for the mutated prefix must not stay stale, but
 		// reconciliation problems must not mask the original apply failure.
@@ -2677,6 +2723,8 @@ export async function sendRequest(
 	timeoutMs?: number,
 ): Promise<unknown> {
 	const started = Date.now();
+	const command = method === "workspace/executeCommand";
+	if (command) executeCommandRequests.set(client, (executeCommandRequests.get(client) ?? 0) + 1);
 	try {
 		return await sendRequestOnce(client, method, params, signal, timeoutMs);
 	} catch (err) {
@@ -2684,7 +2732,7 @@ export async function sendRequest(
 		// requests with ContentModified (-32801); LSP asks clients to retry them. A
 		// command is never re-run: the server may have acted on it before cancelling.
 		const contentModified = err instanceof Error && err.message.startsWith("LSP error -32801");
-		if (!contentModified || method === "workspace/executeCommand" || !workspaceFolderStates.get(client)?.added.size) {
+		if (!contentModified || command || !workspaceFolderStates.get(client)?.added.size) {
 			throw err;
 		}
 		// The retry spends what is left of the first attempt's budget, the default included.
@@ -2706,6 +2754,8 @@ export async function sendRequest(
 			signal,
 			deadline === undefined ? undefined : deadline - Date.now(),
 		);
+	} finally {
+		if (command) executeCommandRequests.set(client, (executeCommandRequests.get(client) ?? 1) - 1);
 	}
 }
 

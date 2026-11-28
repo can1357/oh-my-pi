@@ -161,7 +161,7 @@ export interface DeferredDiagnosticsEntry {
 export interface FileChangeReport {
 	/** Absolute path. */
 	path: string;
-	/** Reporting tool (`edit`, `write`, `ast_edit`, `task`, `bash`, `eval`). */
+	/** Reporting tool (`edit`, `write`, `ast_edit`, `lsp`, `task`, `bash`, `eval`). */
 	tool: string;
 	before: string | null;
 	after: string | null;
