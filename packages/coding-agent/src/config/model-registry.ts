@@ -3372,11 +3372,14 @@ export class ModelRegistry {
 			// context-v7 invalidates rows cached before a row's OpenRouter-style
 			// `pricing` was read; warm v6 rows reported $0 cost (issue #15655).
 			// context-v8 respects explicit price units and embedding input rates.
+			// context-v9 invalidates rows cached before the OpenRouter-style
+			// `reasoning: { supported_efforts, default_effort, mandatory }` object
+			// was read; warm v8 rows kept the guessed ladder and no `none` off-switch.
 			// `injectV1: false` additionally splits off its own namespace: rows
 			// cached from the `/v1`-injected URL can hold a different (smaller)
 			// model set and must never satisfy a bare provider's cache read.
 			const bare = providerConfig.discovery.injectV1 === false ? "bare-" : "";
-			return `${providerConfig.provider}:openai-models-list-${bare}${reasoning}context-v8`;
+			return `${providerConfig.provider}:openai-models-list-${bare}${reasoning}context-v9`;
 		}
 		if (providerConfig.discovery.type === "proxy") {
 			// proxy-v2 invalidates rows cached before a proxy row's advertised
@@ -3384,15 +3387,26 @@ export class ModelRegistry {
 			// provider id) pinned gateway ids at `reasoning: false`. The opt-out
 			// gets its own namespace for the same reason it does above: under the
 			// `offline` strategy nothing else would refetch the other mode's rows.
-			return `${providerConfig.provider}:proxy-v2-${reasoning}context-v6`;
+			// context-v7 invalidates rows cached before the `reasoning` object
+			// ladder was read, as context-v9 does for openai-models-list above.
+			return `${providerConfig.provider}:proxy-v2-${reasoning}context-v7`;
+		}
+		if (providerConfig.discovery.type === "lm-studio") {
+			// LM Studio rows go through the openai-models-list parser. context-v1
+			// leaves the bare provider id, where pre-fix builds cached rows without
+			// the `reasoning` object ladder; the opt-out splits off as above.
+			return `${providerConfig.provider}:lm-studio-${reasoning}context-v1`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
+			// rich-v8 invalidates rosters the `/v1/models` fallback cached before the
+			// `reasoning` object ladder was read. The namespace follows the config,
+			// not the path that answered, so rich rosters refetch once as well.
 			// rich-v7 invalidates incomplete /v2/model/info rosters cached before
 			// pagination. rich-v6 moved decisions-mode groups to the Decisions
 			// runner; rich-v5 filtered known non-conversational modes. Bump this
 			// namespace alongside the catalog package's `litellm:rich-vN` when
 			// discovery behavior changes.
-			return `${providerConfig.provider}:litellm-rich-v7`;
+			return `${providerConfig.provider}:litellm-rich-v8`;
 		}
 		return providerConfig.provider;
 	}

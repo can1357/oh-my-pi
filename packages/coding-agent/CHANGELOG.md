@@ -344,6 +344,7 @@
 - Skipped prompt-cache writes for one-off memory extraction and consolidation in the local memory backend ([#20783](https://github.com/can1357/oh-my-pi/pull/20783) by [@farnoy](https://github.com/farnoy))
 - Starting or resuming a session no longer prints a `Tool commands: added mcp__…` line listing every MCP tool; MCP tools mounted later are still shown ([#20643](https://github.com/can1357/oh-my-pi/pull/20643) by [@Petyok](https://github.com/Petyok)).
 - Ask form option notes wrap as you type in the terminal, with a visible caret on pasted carriage returns and title arrows when a very long draft is only partly shown ([#20880](https://github.com/can1357/oh-my-pi/pull/20880) by [@brianzilla](https://github.com/brianzilla)).
+- Model discovery reads the reasoning effort ladder, default level and mandatory flag from `/v1/models` rows that publish them as a `reasoning: { supported_efforts, default_effort, mandatory }` object (the OpenRouter shape), not only from flat `supported_reasoning_levels` ([#20879](https://github.com/can1357/oh-my-pi/pull/20879) by [@Xytronix](https://github.com/Xytronix))
 
 ### Removed
 
