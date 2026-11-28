@@ -14,6 +14,7 @@ Magics like %pip, %load, %time and `!cmd` are rewritten to Python.
 Top-level `await` works; `asyncio.run(…)` fails.
 {{/if}}
 {{#if js}}JS: Bun (Bun.file, Bun.write, Bun.$); top-level `await`/`return` work.{{/if}}
+{{#if v8}}V8 Sandbox (`language: "v8"`): isolated V8 process with persistent top-level state and top-level `await`/`return`; NO snippet approval prompt, NO host filesystem/network/env/packages/subagents. Inside `v8`, only `print`/`console`/`log`/`phase`, isolate-local `env()`, `await tool.<name>(args)` (normal tool approval), and `await read(...)`/`await write(...)` (direct for safe internal URLs like `local://`; delegates host paths and privileged URLs to `tool.read`/`tool.write`) exist; `%load` accepts safe internal URLs only.{{/if}}
 On error, retry only the failed step; earlier steps may have taken effect.
 Printing an image{{#if py}} or figure{{/if}} attaches it.
 

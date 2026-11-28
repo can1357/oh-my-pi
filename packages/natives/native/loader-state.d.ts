@@ -14,6 +14,7 @@ export interface EmbeddedAddon {
 	platformTag: string;
 	version: string;
 	files: EmbeddedAddonFile[];
+	v8EvalBinary?: EmbeddedAddonFile;
 }
 
 export interface DetectCompiledBinaryInput {
@@ -194,3 +195,8 @@ export function missingNativeExportMessage(symbolName: string, addon?: NativeAdd
 export function openNativeAddon(candidate: string): Record<string, unknown>;
 
 export function loadNative(): Record<string, unknown>;
+
+export function getV8EvalBinaryFilename(platform?: string, arch?: string): string;
+
+/** Resolve the shipped or local omp_v8_eval binary path, or null when unavailable on this target. */
+export function resolveV8EvalBinary(): string | null;

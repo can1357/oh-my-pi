@@ -1,0 +1,45 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+_DARWIN_RUSTC_ENV_FILES = select({
+    "@platforms//os:macos": ["//bazel/toolchains/darwin:rustc_sdk_env"],
+    "//conditions:default": [],
+})
+
+rust_binary(
+    name = "omp_v8_eval",
+    lint_config = "//bazel/lints:workspace_lints",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    compile_data = ["src/prelude.js"],
+    crate_root = "src/main.rs",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
+    rustc_flags = select({
+        "//bazel/variants:baseline": ["-Ctarget-cpu=x86-64-v2"],
+        "//bazel/variants:modern": ["-Ctarget-cpu=x86-64-v3"],
+        "//conditions:default": [],
+    }) + select({
+        "@platforms//os:macos": ["-Clink-arg=-Wl,-adhoc_codesign"],
+        "//conditions:default": [],
+    }) + select({
+        "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+        "//bazel/triples:aarch64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+        "//conditions:default": [],
+    }),
+    deps = all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "omp_v8_eval_test",
+    crate = ":omp_v8_eval",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env_files = _DARWIN_RUSTC_ENV_FILES,
+    deps = all_crate_deps(normal_dev = True),
+)

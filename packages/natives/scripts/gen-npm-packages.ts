@@ -66,9 +66,16 @@ function expectedAddonFilenames(tag: string): string[] {
 		: [`pi_natives.${tag}.node`];
 }
 
+function expectedCompanionBinaries(tag: string): string[] {
+	if (tag === "win32-arm64") return [];
+	return [`omp_v8_eval.${tag}${tag.startsWith("win32-") ? ".exe" : ""}`];
+}
+
+const COMPANION_BINARY_RE = /^omp_v8_eval\.[a-z0-9-]+(?:\.exe)?$/;
+
 function discoverAddonFiles(nativeDir: string, tag: string): Promise<string[]> {
 	return Promise.all(
-		expectedAddonFilenames(tag).map(async filename =>
+		[...expectedAddonFilenames(tag), ...expectedCompanionBinaries(tag)].map(async filename =>
 			(await Bun.file(path.join(nativeDir, filename)).exists()) ? filename : null,
 		),
 	).then(files => files.filter(file => file !== null));
@@ -83,12 +90,22 @@ function selectPrimaryAddonFile(tag: string, files: readonly string[]): string {
 }
 
 export function buildLeafManifest({ tag, os, cpu, files, version }: BuildLeafManifestInput): LeafManifest {
-	const addonFiles = [...new Set(files.map(file => path.basename(file)))];
+	const uniqueFiles = [...new Set(files.map(file => path.basename(file)))];
+	const addonFiles = uniqueFiles.filter(file => file.endsWith(".node"));
+	const companionFiles = uniqueFiles.filter(file => COMPANION_BINARY_RE.test(file));
 	if (addonFiles.length === 0) throw new Error(`No native addon files found for ${tag}`);
-	for (const file of addonFiles) {
-		if (!file.endsWith(".node")) throw new Error(`Leaf ${tag} includes non-addon file: ${file}`);
+	for (const file of uniqueFiles) {
+		if (!file.endsWith(".node") && !COMPANION_BINARY_RE.test(file)) {
+			throw new Error(`Leaf ${tag} includes non-addon file: ${file}`);
+		}
 	}
 	const main = selectPrimaryAddonFile(tag, addonFiles);
+	const manifestFiles = [
+		"*.node",
+		...(companionFiles.length > 0 ? ["omp_v8_eval.*"] : []),
+		"README.md",
+		...NATIVE_LEAF_LEGAL_FILES,
+	];
 	return {
 		name: `@oh-my-pi/pi-natives-${tag}`,
 		version,
@@ -96,7 +113,7 @@ export function buildLeafManifest({ tag, os, cpu, files, version }: BuildLeafMan
 		os: [os],
 		cpu: [cpu],
 		main: `./${main}`,
-		files: ["*.node", "README.md", ...NATIVE_LEAF_LEGAL_FILES],
+		files: manifestFiles,
 		license: "MIT",
 		repository: {
 			type: "git",

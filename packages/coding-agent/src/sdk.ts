@@ -103,6 +103,7 @@ import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
 import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
+import { disposeV8IsolatesByOwner } from "./eval/v8/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
 import { defaultEvalSessionId } from "./eval/session-id";
@@ -1798,6 +1799,7 @@ const CAPTURE_DROPPED_KEYS = [
 	"approvalCacheTargets",
 	"bindApprovalTargets",
 	"approvalRestrictionPaths",
+	"approvalTouchesFilesystem",
 	"renderCall",
 	"renderResult",
 ] as const satisfies readonly (keyof AgentTool)[];
@@ -2100,7 +2102,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? [options.modelPattern.trim()]
 			: [];
 	const hasExplicitModel = options.model !== undefined || deferredModelPatterns.length > 0;
-	const hydrateStartupModelCaches = options.hydrateStartupModelCaches ?? modelRegistry.createStartupModelCacheHydrator();
+	const hydrateStartupModelCaches =
+		options.hydrateStartupModelCaches ?? modelRegistry.createStartupModelCacheHydrator();
 	const startStartupModelCacheHydration = (providers?: ReadonlySet<string>) => {
 		const hydration = hydrateStartupModelCaches(providers);
 		// A worker's owner call may reject before we reach the first reader.
@@ -2395,7 +2398,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			await hydrateFullStartupModelCaches();
 		} else {
 			if (startupProvider) providers.delete(startupProvider);
-			await Promise.all([startupProviderHydration, providers.size > 0 ? hydrateStartupModelCaches(providers) : undefined]);
+			await Promise.all([
+				startupProviderHydration,
+				providers.size > 0 ? hydrateStartupModelCaches(providers) : undefined,
+			]);
 		}
 	}
 
@@ -6615,6 +6621,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				await releaseComputerSessionsForOwner(evalKernelOwnerId);
 				await disposeKernelSessionsByOwner(evalKernelOwnerId);
 				await disposeVmContextsByOwner(evalKernelOwnerId);
+				await disposeV8IsolatesByOwner(evalKernelOwnerId);
 				if (ownsAuthStorage) authStorage.close();
 			}
 		} catch (cleanupError) {

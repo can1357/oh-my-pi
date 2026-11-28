@@ -31,6 +31,31 @@ export const cfgEvalJs = register({
 	},
 });
 
+export const cfgEvalV8 = register({
+	id: "eval.v8",
+	type: "boolean",
+	default: true,
+	env: "PI_V8",
+	ui: {
+		tab: "shell",
+		group: "Eval & Runtimes",
+		label: "V8 Sandbox Eval Backend",
+		description: "Allow the eval tool to dispatch sandboxed JavaScript cells to an isolated V8 process",
+	},
+});
+
+export const cfgEvalV8MaxHeapMb = register({
+	id: "eval.v8.maxHeapMb",
+	type: "number",
+	default: 256,
+	ui: {
+		tab: "shell",
+		group: "Eval & Runtimes",
+		label: "V8 Isolate Heap Limit (MiB)",
+		description: "Maximum V8 heap size in MiB for each sandboxed V8 eval isolate",
+	},
+});
+
 export const cfgEvalAutoProvision = register({
 	id: "eval.autoProvision",
 	type: "boolean",

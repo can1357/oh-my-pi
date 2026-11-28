@@ -98,6 +98,32 @@ describe("generated native npm leaf packages", () => {
 		}
 	});
 
+	it("includes omp_v8_eval companion binaries when present while keeping the .node addon as main", async () => {
+		const packageDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-npm-v8-"));
+		try {
+			await fs.mkdir(path.join(packageDir, "native"));
+			await Bun.write(path.join(packageDir, "package.json"), JSON.stringify({ version: "15.5.15" }));
+			await Promise.all([
+				Bun.write(path.join(packageDir, "LICENSE"), "MIT payload\n"),
+				Bun.write(path.join(packageDir, "THIRD-PARTY-NOTICES.txt"), "Notice payload\n"),
+				Bun.write(path.join(packageDir, "native/pi_natives.darwin-arm64.node"), "addon-bytes"),
+				Bun.write(path.join(packageDir, "native/omp_v8_eval.darwin-arm64"), "v8-eval-bytes"),
+			]);
+
+			const leaves = await generateNpmPackages({ packageDir, tags: ["darwin-arm64"] });
+			expect(leaves).toHaveLength(1);
+			expect(leaves[0]?.files).toEqual(["pi_natives.darwin-arm64.node", "omp_v8_eval.darwin-arm64"]);
+			expect(await Bun.file(path.join(packageDir, "npm/darwin-arm64/omp_v8_eval.darwin-arm64")).text()).toBe(
+				"v8-eval-bytes",
+			);
+			const manifest = await Bun.file(path.join(packageDir, "npm/darwin-arm64/package.json")).json();
+			expect(manifest.main).toBe("./pi_natives.darwin-arm64.node");
+			expect(manifest.files).toEqual(["*.node", "omp_v8_eval.*", "README.md", "LICENSE", "THIRD-PARTY-NOTICES.txt"]);
+		} finally {
+			await fs.rm(packageDir, { recursive: true, force: true });
+		}
+	});
+
 	it("refuses to stand in another notice for the natives package's own", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-npm-notice-"));
 		const packageDir = path.join(root, "packages/natives");

@@ -75,6 +75,7 @@
 		"claude:trace": "bun scripts/claude-trace.ts",
 		"build": "bun run --workspaces --if-present build",
 		"build:native": "bun --cwd=packages/natives run build",
+		"build:v8": "bun scripts/bazel-natives.ts host --v8-only --dest packages/natives/native",
 		"test": "bun scripts/ci-test-ts.ts local",
 		"test:ts": "bun scripts/ci-test-ts.ts local-ts",
 		"test:tern": "OMP_REQUIRE_TERN=1 bun test packages/coding-agent/test/tern-interactions.test.ts",

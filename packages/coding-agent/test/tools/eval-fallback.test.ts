@@ -10,13 +10,14 @@ import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { resolveEvalBackends } from "@oh-my-pi/pi-coding-agent/tools/eval-backends";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
-import { cfgEvalJs, cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
+import { cfgEvalJs, cfgEvalPy, cfgEvalV8 } from "@oh-my-pi/pi-coding-agent/eval/settings";
 import { cfgToolsMaxTimeout } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 let originalPiPy: string | undefined;
 let originalPiJs: string | undefined;
+let originalPiV8: string | undefined;
 
-function restoreEnv(name: "PI_PY" | "PI_JS", value: string | undefined): void {
+function restoreEnv(name: "PI_PY" | "PI_JS" | "PI_V8", value: string | undefined): void {
 	if (value === undefined) {
 		delete Bun.env[name];
 		return;
@@ -50,14 +51,17 @@ describe("EvalTool language dispatch", () => {
 	beforeEach(() => {
 		originalPiPy = Bun.env.PI_PY;
 		originalPiJs = Bun.env.PI_JS;
+		originalPiV8 = Bun.env.PI_V8;
 		delete Bun.env.PI_PY;
 		delete Bun.env.PI_JS;
+		delete Bun.env.PI_V8;
 	});
 
 	afterEach(() => {
-		vi.restoreAllMocks();
 		restoreEnv("PI_PY", originalPiPy);
 		restoreEnv("PI_JS", originalPiJs);
+		restoreEnv("PI_V8", originalPiV8);
+		vi.restoreAllMocks();
 	});
 
 	it('dispatches to the JS backend when cell.language === "js"', async () => {
@@ -185,6 +189,7 @@ describe("EvalTool language dispatch", () => {
 		expect(resolveEvalBackends(makeSession(settings))).toEqual({
 			python: true,
 			js: false,
+			v8: true,
 		});
 	});
 
@@ -200,5 +205,17 @@ describe("EvalTool language dispatch", () => {
 				code: "const x = 1;",
 			}),
 		).rejects.toThrow(/PI_JS=0/);
+	});
+
+	it("rejects v8 cells when eval.v8 is disabled or PI_V8=0", async () => {
+		const settings = Settings.isolated();
+		cfgEvalV8.set(settings, false);
+		const tool = new EvalTool(makeSession(settings));
+		await expect(tool.execute("call-v8-disabled", { language: "v8", code: "1 + 1" })).rejects.toThrow(
+			/eval\.v8 = false/,
+		);
+		cfgEvalV8.set(settings, true);
+		Bun.env.PI_V8 = "0";
+		await expect(tool.execute("call-v8-env-disabled", { language: "v8", code: "1 + 1" })).rejects.toThrow(/PI_V8=0/);
 	});
 });

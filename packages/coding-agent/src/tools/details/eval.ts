@@ -3,7 +3,7 @@ import type { OutputMeta } from "../output-meta-format";
 import { type ConfiguredThinkingLevel } from "../../utils/render-utils";
 
 /** Runtime backend that an eval cell dispatches to. */
-export type EvalLanguage = "python" | "js";
+export type EvalLanguage = "python" | "js" | "v8";
 
 /** Status event emitted by eval prelude helpers for TUI rendering. */
 export interface EvalStatusEvent {

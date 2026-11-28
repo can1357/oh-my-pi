@@ -2,6 +2,7 @@ import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } 
 import type { ToolConversationState } from "./tool-state";
 import type { FetchImpl, ImageContent, Message, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
+import { resolveV8EvalBinary } from "@oh-my-pi/pi-natives";
 import type { AsyncJobManagerApi } from "../async/job-manager";
 import type { NotifyBatch } from "../async/notify";
 import type { Rule } from "../capability/rule";
@@ -712,13 +713,14 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 	const backends = resolveEvalBackends(session);
 	const allowPython = backends.python;
 	const allowJs = backends.js;
+	const v8Available = backends.v8 && resolveV8EvalBinary() !== null;
 	const skipEvalPreflight = session.skipPythonPreflight === true;
-	// Eval tool is enabled if ANY backend is reachable. JS needs no preflight, so
-	// we only probe Python when JS is disabled — otherwise allowEval is
+	// Eval tool is enabled if ANY backend is reachable. JS/V8 need no async preflight, so
+	// we only probe Python when both JS and V8 are unavailable — otherwise allowEval is
 	// already true and per-backend availability is checked at first invocation.
 	let pythonAvailable = true;
 	const evalRequested = requestedTools === undefined || requestedTools.includes("eval");
-	if (!skipEvalPreflight && !allowJs && evalRequested) {
+	if (!skipEvalPreflight && !allowJs && !v8Available && evalRequested) {
 		if (allowPython) {
 			const availability = await logger.time(
 				"createTools:pythonCheck",
@@ -736,7 +738,7 @@ export async function resolveBuiltinToolPlan(session: ToolSession, toolNames?: s
 	const effectivePythonAllowed = allowPython && pythonAvailable;
 	// Eval is exposed whenever any backend is reachable. A backend may be
 	// unreachable, in which case eval dispatches exclusively to the others.
-	const allowEval = effectivePythonAllowed || allowJs;
+	const allowEval = effectivePythonAllowed || allowJs || v8Available;
 
 	// Checkpoint and rewind are a pair: listing one without the other strands
 	// the agent (it can checkpoint but not rewind, or vice versa). Auto-include

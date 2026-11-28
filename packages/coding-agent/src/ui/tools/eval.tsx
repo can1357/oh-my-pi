@@ -99,12 +99,13 @@ const STATUS_PREVIEW_LINES = 10;
 const STATUS_PREVIEW_FOLDED = 3;
 
 function cellLanguage(value: string | undefined): EvalLanguage {
+	if (value === "v8") return "v8";
 	return value === "js" ? "js" : "python";
 }
 
 /** The highlighter's name of a cell language. */
 export function highlightLanguage(language: EvalLanguage | undefined): "python" | "javascript" {
-	return language === "js" ? "javascript" : "python";
+	return language === "js" || language === "v8" ? "javascript" : "python";
 }
 
 /** The call's cells, source reflowed for display. */

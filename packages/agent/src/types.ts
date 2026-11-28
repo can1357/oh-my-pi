@@ -1338,6 +1338,12 @@ export interface AgentTool<
 	 */
 	approvalRestrictionPaths?: (args: unknown) => readonly string[] | undefined;
 
+	/**
+	 * Whether this invocation can touch host filesystem paths (including `session.cwd`).
+	 * When `false`, restricted-folder checks skip the implicit `cwd` fallback while still
+	 * running on any inner tool calls this tool delegates to.
+	 */
+	approvalTouchesFilesystem?: (args: unknown) => boolean;
 	/** The main execution callback for this tool. */
 	execute: AgentToolExecFn<TParameters, TDetails, TTheme>;
 

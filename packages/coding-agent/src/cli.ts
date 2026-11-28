@@ -190,6 +190,7 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestStatsActivityWorker } = await import("./stats/activity-client");
 	const { smokeTestTranscriptIndexWorker } = await import("./session/transcript-index-client");
 	const { smokeTestJsEvalWorker } = await import("./eval/js/context-manager");
+	const { smokeTestV8EvalProcess } = await import("./eval/v8/context-manager");
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { isolateDaemonForSmokeTest, smokeTestDaemon } = await import("./daemon/client");
 	const { smokeTestSubagentWorker } = await import("./thread/subagent-worker");
@@ -216,6 +217,7 @@ async function runSmokeTest(): Promise<void> {
 		await smokeTestTinyTitleWorker();
 		await smokeTestSttWorker();
 		await smokeTestJsEvalWorker();
+		await smokeTestV8EvalProcess();
 		const { smokeTestComputerWorker } = await import("./tools/computer/supervisor");
 		await smokeTestComputerWorker();
 		await smokeTestTtsWorker();

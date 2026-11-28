@@ -2,6 +2,8 @@ import type { Agent } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { disposeVmContextsByOwner } from "../eval/js/context-manager";
+import { disposeV8IsolatesByOwner } from "../eval/v8/context-manager";
+import { namespaceSessionId as namespaceV8SessionId } from "../eval/v8";
 import { namespaceSessionId as namespaceJsSessionId } from "../eval/js";
 import { namespaceSessionId as namespacePythonSessionId } from "../eval/py";
 import {
@@ -208,6 +210,7 @@ export class EvalRunner {
 					keepSessionId: namespacePythonSessionId(sessionId),
 				}),
 				disposeVmContextsByOwner(this.#kernelOwnerId, { keepSessionId: namespaceJsSessionId(sessionId) }),
+				disposeV8IsolatesByOwner(this.#kernelOwnerId, { keepSessionId: namespaceV8SessionId(sessionId) }),
 			]);
 			for (const result of results) {
 				if (result.status === "rejected") {
@@ -231,6 +234,7 @@ export class EvalRunner {
 		const results = await Promise.allSettled([
 			disposeKernelSessionsByOwner(this.#kernelOwnerId),
 			disposeVmContextsByOwner(this.#kernelOwnerId),
+			disposeV8IsolatesByOwner(this.#kernelOwnerId),
 		]);
 		const errors: unknown[] = [];
 		for (const result of results) if (result.status === "rejected") errors.push(result.reason);

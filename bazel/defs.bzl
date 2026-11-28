@@ -94,3 +94,35 @@ native_addon = rule(
         ),
     },
 )
+
+def _native_binary_impl(ctx):
+    exe = ctx.attr.bin[0][DefaultInfo].files_to_run.executable
+    if not exe:
+        fail("expected executable from {}".format(ctx.attr.bin[0].label))
+    out = ctx.actions.declare_file(ctx.label.name + "/" + ctx.attr.out)
+    ctx.actions.symlink(output = out, target_file = exe)
+    return [DefaultInfo(files = depset([out]))]
+
+native_binary = rule(
+    implementation = _native_binary_impl,
+    doc = "Release build of a native companion executable for one shipping platform, " +
+          "renamed to its canonical filename.",
+    attrs = {
+        "bin": attr.label(
+            cfg = _addon_transition,
+            mandatory = True,
+            doc = "The rust_binary target (//crates/v8-eval:omp_v8_eval).",
+        ),
+        "platform": attr.label(
+            mandatory = True,
+            doc = "//bazel/platforms platform to build for.",
+        ),
+        "out": attr.string(
+            mandatory = True,
+            doc = "Canonical binary filename, e.g. omp_v8_eval.linux-x64.",
+        ),
+        "_allowlist_function_transition": attr.label(
+            default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
+        ),
+    },
+)

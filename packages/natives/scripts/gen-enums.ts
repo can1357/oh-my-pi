@@ -154,11 +154,14 @@ export async function generateEnumExports(): Promise<void> {
 	// Also fix the .d.ts: replace `const enum` with `enum` so TS allows
 	// assigning string literals to enum types without casts.
 	const constEnumCount = (dts.match(/export (?:declare )?const enum/g) ?? []).length;
-	const dtsContent = dts
+	let dtsContent = dts
 		.replaceAll("export const enum", "export declare enum")
 		.replaceAll("export declare const enum", "export declare enum");
+	const companionDecl = "export declare function resolveV8EvalBinary(): string | null";
+	if (!dtsContent.includes("resolveV8EvalBinary")) {
+		dtsContent = `${dtsContent.trimEnd()}\n\n/** Resolve the shipped or local omp_v8_eval binary path, or null when unavailable on this target. */\n${companionDecl}\n`;
+	}
 	await Bun.write(dtsPath, dtsContent);
-
 	const symbolCount = (generatedBlock.match(/^export const /gm) ?? []).length;
 	console.log(
 		`Generated ${symbolCount} explicit ESM exports in index.js, fixed ${constEnumCount} const enums in index.d.ts`,

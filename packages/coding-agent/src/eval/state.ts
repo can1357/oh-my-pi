@@ -25,7 +25,7 @@ const MAX_LOADED_PATHS = 12;
 const MAX_FIELD_CHARS = 512;
 
 /** Language identifiers used by retained-kernel lifecycle notifications. */
-export type EvalStateLanguage = "python" | "js";
+export type EvalStateLanguage = "python" | "js" | "v8";
 
 /** A backend's observed kernel lifecycle or successful script-load event. */
 export interface EvalStateUpdate {
@@ -94,7 +94,7 @@ function normalizeOptional(value: string | null | undefined): string | undefined
 }
 
 function runtimeConfigKey(language: EvalStateLanguage, cwd: string, interpreter: string | undefined): string {
-	if (language === "js") return language;
+	if (language === "js" || language === "v8") return language;
 	return `${language}\0${cwd}\0${interpreter ?? ""}`;
 }
 
@@ -286,7 +286,7 @@ export function getEvalState(session: ToolSession): EvalStateSnapshot | undefine
 	const bucket = registry.get(sessionId);
 	if (!bucket) return undefined;
 	const relevant = Array.from(bucket.runtimes.values()).filter(
-		runtime => runtime.language === "js" || runtime.cwd === cwd,
+		runtime => runtime.language === "js" || runtime.language === "v8" || runtime.cwd === cwd,
 	);
 	const byConfig = new Map<string, MutableEvalRuntimeState[]>();
 	for (const runtime of relevant) {
@@ -316,7 +316,7 @@ function safeField(value: string): string {
 }
 
 function formatRuntime(runtime: EvalRuntimeState, index: number, languageCount: number): string[] {
-	const language = runtime.language === "python" ? "Python" : "JavaScript";
+	const language = runtime.language === "python" ? "Python" : runtime.language === "v8" ? "V8 Sandbox" : "JavaScript";
 	const label = languageCount > 1 ? `${language} ${index + 1}` : language;
 	const status = runtime.alive ? "alive" : "dead; state is unavailable";
 	const metadata = [
@@ -348,9 +348,9 @@ export function formatEvalStateContext(
 	if (!snapshot && options?.historyHasEval !== true) return undefined;
 	let stateSummary: string | undefined;
 	if (snapshot) {
-		const languageCounts: Record<EvalStateLanguage, number> = { python: 0, js: 0 };
+		const languageCounts: Record<EvalStateLanguage, number> = { python: 0, js: 0, v8: 0 };
 		for (const runtime of snapshot.runtimes) languageCounts[runtime.language]++;
-		const languageIndexes: Record<EvalStateLanguage, number> = { python: 0, js: 0 };
+		const languageIndexes: Record<EvalStateLanguage, number> = { python: 0, js: 0, v8: 0 };
 		const lines: string[] = [];
 		for (const runtime of snapshot.runtimes) {
 			const index = languageIndexes[runtime.language];

@@ -1,0 +1,25 @@
+--- a/build.rs
++++ b/build.rs
+@@ -962,7 +962,7 @@
+ }
+ 
+ fn static_lib_dir() -> PathBuf {
+-  build_dir().join("gn_out").join("obj")
++  PathBuf::from(env::var_os("OUT_DIR").unwrap())
+ }
+ 
+ fn build_dir() -> PathBuf {
+--- a/build.rs
++++ b/build.rs
+@@ -1816,8 +1816,10 @@
+     }
+   }
+ 
++  let out_binding = PathBuf::from(env::var("OUT_DIR").unwrap()).join("src_binding.rs");
++  fs::copy(&src_binding_path, &out_binding).unwrap();
+   println!(
+     "cargo:rustc-env=RUSTY_V8_SRC_BINDING_PATH={}",
+-    src_binding_path.display()
++    out_binding.display()
+   );
+ }

@@ -62,6 +62,16 @@ export const ADDON_OUTPUTS: Record<string, string> = {
 	"win32-arm64": "pi_natives.win32-arm64.node",
 };
 
+/** //:v8-eval-<target> → canonical omp_v8_eval filename (mirrors _V8_EVAL_BINARIES in BUILD.bazel). */
+export const V8_EVAL_OUTPUTS: Record<string, { target: string; filename: string }> = {
+	"linux-x64-baseline": { target: "linux-x64", filename: "omp_v8_eval.linux-x64" },
+	"linux-x64-modern": { target: "linux-x64", filename: "omp_v8_eval.linux-x64" },
+	"linux-arm64": { target: "linux-arm64", filename: "omp_v8_eval.linux-arm64" },
+	"darwin-x64-baseline": { target: "darwin-x64", filename: "omp_v8_eval.darwin-x64" },
+	"darwin-arm64": { target: "darwin-arm64", filename: "omp_v8_eval.darwin-arm64" },
+	"win32-x64-baseline": { target: "win32-x64", filename: "omp_v8_eval.win32-x64.exe" },
+};
+
 /** Aggregate filegroups → their member addon targets (mirrors BUILD.bazel). */
 export const AGGREGATE_TARGETS: Record<string, string[]> = {
 	all: [
@@ -119,8 +129,15 @@ export function resolveTargetLabels(names: string[], host: HostInfo): string[] {
 			const known = [...Object.keys(ADDON_OUTPUTS), ...Object.keys(AGGREGATE_TARGETS), "host"].join(", ");
 			throw new Error(`Unknown native target "${name}". Known targets: ${known}`);
 		}
-		const label = `//:natives-${resolved}`;
-		if (!labels.includes(label)) labels.push(label);
+		const labelsForTarget = [`//:natives-${resolved}`];
+		const membersForTarget = AGGREGATE_TARGETS[resolved] ?? [resolved];
+		for (const member of membersForTarget) {
+			const v8 = V8_EVAL_OUTPUTS[member];
+			if (v8) labelsForTarget.push(`//:v8-eval-${v8.target}`);
+		}
+		for (const label of labelsForTarget) {
+			if (!labels.includes(label)) labels.push(label);
+		}
 	}
 	return labels;
 }
@@ -168,12 +185,12 @@ export function hostProbeFilename(names: string[], host: HostInfo): string | nul
 	return ADDON_OUTPUTS[hostTarget] ?? null;
 }
 
-/** Parse `bazel cquery --output=files` stdout into deduplicated .node paths. */
+/** Parse `bazel cquery --output=files` stdout into deduplicated native artifact paths. */
 export function parseBazelFilesOutput(output: string): string[] {
 	const files: string[] = [];
 	for (const line of output.split("\n")) {
 		const trimmed = line.trim();
-		if (!trimmed.endsWith(".node")) continue;
+		if (!trimmed.endsWith(".node") && !path.basename(trimmed).startsWith("omp_v8_eval.")) continue;
 		if (!files.includes(trimmed)) files.push(trimmed);
 	}
 	return files;
@@ -184,6 +201,7 @@ export interface CliOptions {
 	targets: string[];
 	dest: string | null;
 	source: string | null;
+	v8Only: boolean;
 	bazelArgs: string[];
 }
 
@@ -192,6 +210,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
 	const targets: string[] = [];
 	let dest: string | null = null;
 	let source: string | null = null;
+	let v8Only = false;
 	const bazelArgs: string[] = [];
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i];
@@ -209,6 +228,10 @@ export function parseCliArgs(argv: string[]): CliOptions {
 			}
 			continue;
 		}
+		if (arg === "--v8-only") {
+			v8Only = true;
+			continue;
+		}
 		if (arg.startsWith("-")) {
 			throw new Error(`Unknown flag ${arg} (extra bazel args go after \`--\`)`);
 		}
@@ -222,7 +245,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
 	if (source && bazelArgs.length > 0) {
 		throw new Error("--source cannot be combined with extra bazel arguments");
 	}
-	return { targets, dest, source, bazelArgs };
+	return { targets, dest, source, v8Only, bazelArgs };
 }
 
 function resolveBazelBinary(): string | null {
@@ -463,6 +486,38 @@ export async function verifyLinuxAddon(file: string): Promise<void> {
 }
 
 /** Build and install the host addon through the local Cargo/N-API path. */
+async function buildLocalHostV8Eval(host: HostInfo, destDir: string): Promise<void> {
+	let hostTarget: string;
+	try {
+		hostTarget = hostTargetName(host);
+	} catch {
+		return;
+	}
+	const v8Entry = V8_EVAL_OUTPUTS[hostTarget];
+	if (!v8Entry) {
+		console.log(`skipping omp-v8-eval: no prebuilt V8 binary target for ${hostTarget}`);
+		return;
+	}
+	const cargo = Bun.which("cargo") ?? "cargo";
+	console.log(`local host build: building omp-v8-eval via ${cargo}`);
+	const proc = Bun.spawn([cargo, "build", "--profile", "local", "--bin", "omp-v8-eval"], {
+		cwd: repoRoot,
+		stdout: "inherit",
+		stderr: "inherit",
+	});
+	const exitCode = await proc.exited;
+	if (exitCode !== 0) process.exit(exitCode || 1);
+
+	const cargoBin = path.join(repoRoot, "target/local", host.platform === "win32" ? "omp-v8-eval.exe" : "omp-v8-eval");
+	const destPath = path.join(destDir, v8Entry.filename);
+	await fs.mkdir(destDir, { recursive: true });
+	const tempPath = `${destPath}.tmp-${process.pid}-${Date.now()}`;
+	await fs.copyFile(cargoBin, tempPath);
+	if (host.platform !== "win32") await fs.chmod(tempPath, 0o755);
+	await fs.rename(tempPath, destPath);
+	console.log(`installed ${v8Entry.filename} → ${destPath}`);
+}
+
 async function buildLocalHostAddon(host: HostInfo, destDir: string): Promise<void> {
 	const script = path.join(repoRoot, "packages/natives/scripts/build-bindings.ts");
 	console.log(`local host build: using ${path.relative(repoRoot, script)}`);
@@ -482,6 +537,7 @@ async function buildLocalHostAddon(host: HostInfo, destDir: string): Promise<voi
 	}
 	console.log(`installed ${filename} → ${path.join(destDir, filename)}`);
 	await verifyHostAddonLoads(path.join(destDir, filename), undefined, await nativesPackageVersion());
+	await buildLocalHostV8Eval(host, destDir);
 }
 
 async function main(): Promise<void> {
@@ -519,6 +575,10 @@ async function main(): Promise<void> {
 			}
 			throw new Error("OMP_NATIVE_BUILD_BACKEND=cargo supports only the host target");
 		}
+		if (options.v8Only) {
+			await buildLocalHostV8Eval(host, destDir);
+			return;
+		}
 		await buildLocalHostAddon(host, destDir);
 		return;
 	}
@@ -530,7 +590,12 @@ async function main(): Promise<void> {
 			path.join(sourceDir, path.relative("bazel-bin", output)),
 		);
 	} else {
-		const labels = resolveTargetLabels(options.targets, host);
+		const rawLabels = resolveTargetLabels(options.targets, host);
+		const labels = options.v8Only ? rawLabels.filter(label => label.startsWith("//:v8-eval-")) : rawLabels;
+		if (options.v8Only && labels.length === 0) {
+			console.log("no v8-eval bazel target for requested target(s); skipping");
+			return;
+		}
 		const bazel = resolveBazelBinary();
 		if (!bazel) {
 			if (options.targets.length !== 1 || options.targets[0] !== "host") {
@@ -540,7 +605,11 @@ async function main(): Promise<void> {
 				);
 			}
 			console.log("bazelisk/bazel not found; falling back to the local Cargo/N-API host build");
-			await buildLocalHostAddon(host, destDir);
+			if (options.v8Only) {
+				await buildLocalHostV8Eval(host, destDir);
+			} else {
+				await buildLocalHostAddon(host, destDir);
+			}
 			return;
 		}
 		// CI hands cache wiring (remote or disk) through a bazelrc fragment so
@@ -595,16 +664,23 @@ async function main(): Promise<void> {
 	const probeFilename = hostProbeFilename(options.targets, host);
 	const version = await nativesPackageVersion();
 	for (const output of outputs) {
+		const base = path.basename(output);
 		const absolute = path.isAbsolute(output) ? output : path.join(repoRoot, output);
-		const destPath = path.join(destDir, path.basename(output));
+		const destPath = path.join(destDir, base);
+		if (base.startsWith("omp_v8_eval.")) {
+			await fs.copyFile(absolute, destPath);
+			if (!base.endsWith(".exe")) await fs.chmod(destPath, 0o755);
+			console.log(`installed ${base} → ${destPath}`);
+			continue;
+		}
 		const stamped = await installAddon(absolute, destPath, version, options.source !== undefined);
 		console.log(
 			stamped
-				? `installed ${path.basename(output)} (stamped ${version}) → ${destPath}`
-				: `installed ${path.basename(output)} (prebuilt without a version stamp slot; left unstamped) → ${destPath}`,
+				? `installed ${base} (stamped ${version}) → ${destPath}`
+				: `installed ${base} (prebuilt without a version stamp slot; left unstamped) → ${destPath}`,
 		);
 		if (!options.source) await verifyLinuxAddon(destPath);
-		if (probeFilename && path.basename(output) === probeFilename) {
+		if (probeFilename && base === probeFilename) {
 			await verifyHostAddonLoads(destPath, undefined, stamped ? version : undefined);
 		}
 	}

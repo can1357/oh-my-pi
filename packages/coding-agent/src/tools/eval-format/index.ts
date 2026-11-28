@@ -28,6 +28,7 @@ export function formatEvalCodeForDisplay(source: string, language: EvalLanguage)
 	if (/^\s*%/.test(source)) return source;
 	switch (language) {
 		case "js":
+		case "v8":
 			return memoizedFormat(jsDisplayMemo, source, formatJavaScriptForDisplay);
 		case "python":
 			return memoizedFormat(pythonDisplayMemo, source, formatPythonForDisplay);

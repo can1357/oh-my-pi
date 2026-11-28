@@ -4,7 +4,7 @@
 # Note: musl addons intentionally reuse the plain linux-<arch> filenames — the
 # loader never sees gnu and musl side by side; release jobs keep them apart.
 
-load("//bazel:defs.bzl", "native_addon")
+load("//bazel:defs.bzl", "native_addon", "native_binary")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -58,4 +58,27 @@ filegroup(
         ":natives-darwin-arm64",
         ":natives-darwin-x64-baseline",
     ],
+)
+
+_V8_EVAL_BINARIES = {
+    "linux-x64": ("//bazel/platforms:linux-x64-baseline", "omp_v8_eval.linux-x64"),
+    "linux-arm64": ("//bazel/platforms:linux-arm64", "omp_v8_eval.linux-arm64"),
+    "darwin-x64": ("//bazel/platforms:darwin-x64-baseline", "omp_v8_eval.darwin-x64"),
+    "darwin-arm64": ("//bazel/platforms:darwin-arm64", "omp_v8_eval.darwin-arm64"),
+    "win32-x64": ("//bazel/platforms:win32-x64-baseline", "omp_v8_eval.win32-x64.exe"),
+}
+
+[
+    native_binary(
+        name = "v8-eval-" + target,
+        bin = "//crates/v8-eval:omp_v8_eval",
+        out = out,
+        platform = platform,
+    )
+    for target, (platform, out) in _V8_EVAL_BINARIES.items()
+]
+
+filegroup(
+    name = "v8-eval-all",
+    srcs = [":v8-eval-" + target for target in _V8_EVAL_BINARIES],
 )

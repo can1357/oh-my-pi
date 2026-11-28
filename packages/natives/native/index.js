@@ -360,3 +360,4 @@ export const TranscriptStatsKey = {
 	PerTranscript: "none",
 };
 // --- end generated native exports ---
+export { resolveV8EvalBinary } from "./loader-state.js";

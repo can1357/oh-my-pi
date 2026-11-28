@@ -1,5 +1,11 @@
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	ToolApprovalDecision,
+} from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, ToolExample } from "@oh-my-pi/pi-ai";
 import { formatBackgroundNotice, formatExitCodeNotice, formatTimeoutClampNotice } from "./details/bash";
 import { replaceTabs, truncateToWidth } from "../utils/text-width";
@@ -7,7 +13,7 @@ import { shortenEmbeddedPaths, TRUNCATE_LENGTHS } from "../utils/render-utils";
 import { parseConfiguredThinkingLevel } from "../thinking/levels";
 import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import { raceJobSettlement, resolveAutoBackgroundWaitMs } from "../async";
-import { jsBackend, pythonBackend } from "../eval";
+import { jsBackend, pythonBackend, v8Backend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
@@ -53,15 +59,17 @@ import { shapeToolResult } from "../spotlight";
 import { cfgToolsMaxTimeout } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
-export type EvalLanguageToken = "py" | "js";
-const EVAL_LANGUAGE_ORDER: readonly EvalLanguageToken[] = ["py", "js"];
+export type EvalLanguageToken = "py" | "js" | "v8";
+const EVAL_LANGUAGE_ORDER: readonly EvalLanguageToken[] = ["py", "js", "v8"];
 const EVAL_LANGUAGE_RUNTIME: Record<EvalLanguageToken, string> = {
 	py: '"py": Python',
 	js: '"js": Bun',
+	v8: '"v8": V8 Sandbox',
 };
 const EVAL_LANGUAGE_NAME: Record<EvalLanguageToken, string> = {
 	py: "Python",
 	js: "JavaScript",
+	v8: "V8 Sandbox",
 };
 
 /** Join names as an English "or" list: ["A"]→"A", ["A","B"]→"A or B", 3+→"A, B, or C". */
@@ -88,6 +96,7 @@ function enabledEvalLanguages(backends: EvalBackendsAllowance): EvalLanguageToke
 	const allowed: Record<EvalLanguageToken, boolean> = {
 		py: backends.python,
 		js: backends.js,
+		v8: backends.v8,
 	};
 	return EVAL_LANGUAGE_ORDER.filter(lang => allowed[lang]);
 }
@@ -120,7 +129,7 @@ function evalTimeoutSchema(maxTimeout?: number) {
  * copy per session so disabled backends are never advertised to the model.
  */
 export const evalSchema = type({
-	language: type("'py' | 'js'").describe(describeLanguageField(EVAL_LANGUAGE_ORDER)),
+	language: type("'py' | 'js' | 'v8'").describe(describeLanguageField(EVAL_LANGUAGE_ORDER)),
 	...evalCellCommonFields,
 });
 export type EvalToolParams = typeof evalSchema.infer;
@@ -252,6 +261,15 @@ async function resolveBackend(
 		}
 		return { backend: pythonBackend };
 	}
+	if (language === "v8") {
+		if (!backends.v8) throw new ToolError("V8 sandbox backend is disabled (PI_V8=0 or eval.v8 = false).");
+		const availability = await v8Backend.checkAvailability(session, probeOpts);
+		throwIfAborted(probeOpts?.signal);
+		if (!availability.ok) {
+			throw new ToolError(availability.reason ?? "Sandboxed V8 eval backend is unavailable.");
+		}
+		return { backend: v8Backend };
+	}
 	if (language !== "js") throw new ToolError(`Unsupported eval language: ${String(language)}`);
 	if (!allowJs) throw new ToolError("JavaScript backend is disabled (PI_JS=0 or eval.js = false).");
 	return { backend: jsBackend };
@@ -259,12 +277,15 @@ async function resolveBackend(
 function formatEvalInputLanguage(value: string): string {
 	if (value === "py" || value === "python") return "python";
 	if (value === "js" || value === "javascript") return "javascript";
+	if (value === "v8") return "v8 (sandbox)";
 	return value;
 }
 
 export class EvalTool implements AgentTool<typeof evalSchema> {
 	readonly name = "eval";
-	readonly approval = "exec" as const;
+	readonly approval = (args: unknown): ToolApprovalDecision =>
+		isRecord(args) && args.language === "v8" ? "read" : "exec";
+	readonly approvalTouchesFilesystem = (args: unknown): boolean => !(isRecord(args) && args.language === "v8");
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = isRecord(args) ? args : {};
 		const language =
@@ -314,6 +335,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		return {
 			py: backends.python,
 			js: backends.js,
+			v8: backends.v8,
 			spawns: depthAllowsSpawning ? (session.getSessionSpawns?.() ?? "*") : false,
 			autoBackgroundEnabled: cfgEvalAutoBackgroundEnabled.get(session.settings),
 			evalTools: cfgEvalToolsEnabled.get(session.settings),
@@ -377,7 +399,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	 * only definitive memoized probes, never blocking runtime discovery.
 	 */
 	#enabledLanguages(): EvalLanguageToken[] {
-		return this.session ? enabledEvalLanguages(resolveAdvertisedEvalBackends(this.session)) : ["py", "js"];
+		return this.session ? enabledEvalLanguages(resolveAdvertisedEvalBackends(this.session)) : ["py", "js", "v8"];
 	}
 
 	constructor(
@@ -428,7 +450,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			throw new ToolError("Eval tool requires a session when not using proxy executor");
 		}
 		const session = this.session;
-		noteEvalPreludesNamed(params.code, params.language, session);
+		if (params.language !== "v8") noteEvalPreludesNamed(params.code, params.language, session);
 		const excludeWebP = webpExclusionForModel(session.getActiveModel?.());
 
 		const cellLanguage: EvalLanguage = params.language === "py" ? "python" : params.language;

@@ -12,6 +12,7 @@ members = [
    "crates/natives",
    "crates/predict",
    "crates/shell",
+   "crates/v8-eval",
    "crates/vcs",
    "crates/vfs",
    "crates/voice",
@@ -515,6 +516,11 @@ candle-nn = "0.9.2"
 # stay in TypeScript, so no `hub`.
 ptts = { version = "0.7.1", default-features = false, features = ["hf"] }
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# V8 JavaScript Engine (crates/v8-eval)
+# ──────────────────────────────────────────────────────────────────────────────
+v8 = "152.2.0"
 # ──────────────────────────────────────────────────────────────────────────────
 # Unsorted (added by `cargo add` - move into a section above)
 # ──────────────────────────────────────────────────────────────────────────────

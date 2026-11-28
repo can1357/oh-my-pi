@@ -14,6 +14,7 @@ import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 export interface EvalToolDescriptionOptions {
 	py?: boolean;
 	js?: boolean;
+	v8?: boolean;
 	/**
 	 * Parent spawn policy (`getSessionSpawns`). `true`/omitted means unrestricted,
 	 * `false`/`""` hides `agent()`, and a comma list drives the advertised default.
@@ -56,6 +57,7 @@ export function evalTemplateContext(options: EvalToolDescriptionOptions) {
 	return {
 		py: options.py ?? true,
 		js: options.js ?? true,
+		v8: options.v8 ?? false,
 		evalTools: options.evalTools ?? true,
 		eagerDelegation: options.eagerDelegation ?? false,
 		waitTool: options.waitTool ?? true,

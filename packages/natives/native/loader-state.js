@@ -142,6 +142,99 @@ export function getAddonFilenames({ tag, arch, variant }) {
 }
 
 /**
+ * @param {string} [platform]
+ * @param {string} [arch]
+ * @returns {string}
+ */
+export function getV8EvalBinaryFilename(platform = process.platform, arch = process.arch) {
+	return `omp_v8_eval.${platform}-${arch}${platform === "win32" ? ".exe" : ""}`;
+}
+
+/** @type {string | null} */
+let cachedV8EvalBinaryPath = null;
+
+/**
+ * Resolve the `omp_v8_eval` sandbox subprocess binary for the current platform.
+ * Checks `PI_V8_EVAL_BIN`, embedded compiled-binary payloads, the platform leaf
+ * package / `native/` directory, and local Cargo target outputs.
+ * @returns {string | null}
+ */
+export function resolveV8EvalBinary() {
+	const envOverride = process.env.PI_V8_EVAL_BIN?.trim();
+	if (envOverride) {
+		try {
+			if (fs.existsSync(envOverride)) return envOverride;
+		} catch {
+			return null;
+		}
+	}
+	if (cachedV8EvalBinaryPath !== null) {
+		try {
+			if (fs.existsSync(cachedV8EvalBinaryPath)) return cachedV8EvalBinaryPath;
+		} catch {
+			// Re-resolve if cached path vanished.
+		}
+		cachedV8EvalBinaryPath = null;
+	}
+
+	const platformTag = `${process.platform}-${process.arch}`;
+	const filename = getV8EvalBinaryFilename(process.platform, process.arch);
+	const isCompiled = detectCompiledBinary({
+		embeddedAddon,
+		env: process.env,
+		importMetaUrl: import.meta.url,
+	});
+	const nativesDir = getNativesDir();
+	const versionedDir = path.join(nativesDir, packageJson.version);
+
+	if (
+		isCompiled &&
+		embeddedAddon?.v8EvalBinary &&
+		embeddedAddon.platformTag === platformTag &&
+		embeddedAddon.version === packageJson.version
+	) {
+		try {
+			extractEmbeddedAddons({ files: [embeddedAddon.v8EvalBinary], targetDir: versionedDir });
+			const extracted = embeddedAddonPath(versionedDir, embeddedAddon.v8EvalBinary);
+			if (fs.existsSync(extracted)) {
+				cachedV8EvalBinaryPath = extracted;
+				return extracted;
+			}
+		} catch {
+			// Fall through to disk candidates.
+		}
+	}
+
+	const leafDir = resolveLeafPackageDir(platformTag, [filename]);
+	const candidates = [
+		...(leafDir ? [path.join(leafDir, filename)] : []),
+		path.join(import.meta.dir, filename),
+		path.join(versionedDir, filename),
+	];
+	if (!isCompiled) {
+		const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
+		const cargoName = process.platform === "win32" ? "omp-v8-eval.exe" : "omp-v8-eval";
+		candidates.push(
+			path.join(repoRoot, "target", "local", cargoName),
+			path.join(repoRoot, "target", "release", cargoName),
+			path.join(repoRoot, "target", "debug", cargoName),
+		);
+	}
+
+	for (const candidate of candidates) {
+		try {
+			if (fs.existsSync(candidate)) {
+				cachedV8EvalBinaryPath = candidate;
+				return candidate;
+			}
+		} catch {
+			// Ignore inaccessible paths.
+		}
+	}
+	return null;
+}
+
+/**
  * Decide whether the loader should mirror the package's `native/<filename>.node`
  * into the per-version cache directory (`~/.omp/natives/<version>/`) before loading.
  *
@@ -1088,7 +1181,9 @@ export function loadNative() {
 			if (hasEmbedded) {
 				pruneStaleEmbeddedAddons({
 					targetDir: ctx.versionedDir,
-					keepHashes: [primaryEmbeddedFile, fallbackEmbeddedFile].filter(Boolean).map(file => file.hash),
+					keepHashes: [primaryEmbeddedFile, fallbackEmbeddedFile, embeddedAddon?.v8EvalBinary]
+						.filter(Boolean)
+						.map(file => file.hash),
 				});
 			}
 			startupMarker("native:loadNative:done");

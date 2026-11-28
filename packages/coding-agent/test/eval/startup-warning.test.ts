@@ -7,14 +7,16 @@ import {
 	resolveFirstLaunchPythonEvalWarning,
 	resolvePythonEvalWarning,
 } from "@oh-my-pi/pi-coding-agent/eval/startup-warning";
+import { resolveV8EvalBinary } from "@oh-my-pi/pi-natives";
 
 const FIX_HINT = "Install Python 3.8+ or set python.interpreter, then verify with `omp setup python --check`.";
 const CWD = "/tmp/eval-startup-warning";
 
 let savedPiPy: string | undefined;
 let savedPiJs: string | undefined;
+let savedPiV8: string | undefined;
 
-function restoreEnv(name: "PI_PY" | "PI_JS", value: string | undefined): void {
+function restoreEnv(name: "PI_PY" | "PI_JS" | "PI_V8", value: string | undefined): void {
 	if (value === undefined) delete Bun.env[name];
 	else Bun.env[name] = value;
 }
@@ -26,14 +28,17 @@ function mockProbe(reason = "Python executable not found on PATH") {
 beforeEach(() => {
 	savedPiPy = Bun.env.PI_PY;
 	savedPiJs = Bun.env.PI_JS;
+	savedPiV8 = Bun.env.PI_V8;
 	delete Bun.env.PI_PY;
 	delete Bun.env.PI_JS;
+	delete Bun.env.PI_V8;
 });
 
 afterEach(() => {
 	vi.restoreAllMocks();
 	restoreEnv("PI_PY", savedPiPy);
 	restoreEnv("PI_JS", savedPiJs);
+	restoreEnv("PI_V8", savedPiV8);
 });
 
 describe("resolvePythonEvalWarning", () => {
@@ -44,10 +49,25 @@ describe("resolvePythonEvalWarning", () => {
 		);
 	});
 
-	it("reports no eval backend when Python is missing and JS eval is off", async () => {
+	it("falls back to V8 Sandbox when Python is missing, JS eval is off, and V8 binary is present", async () => {
 		mockProbe();
+		const hasV8 = resolveV8EvalBinary() !== null;
 		expect(await resolvePythonEvalWarning({ cwd: CWD, settings: Settings.isolated({ "eval.js": false }) })).toBe(
-			`Eval tool unavailable: Python executable not found on PATH, and JavaScript eval is disabled. ${FIX_HINT}`,
+			hasV8
+				? `Python eval unavailable (Python executable not found on PATH); eval will run V8 Sandbox only. ${FIX_HINT}`
+				: `Eval tool unavailable: Python executable not found on PATH, and JavaScript/V8 eval are disabled. ${FIX_HINT}`,
+		);
+	});
+
+	it("reports no eval backend when Python is missing and JS/V8 eval are off", async () => {
+		mockProbe();
+		expect(
+			await resolvePythonEvalWarning({
+				cwd: CWD,
+				settings: Settings.isolated({ "eval.js": false, "eval.v8": false }),
+			}),
+		).toBe(
+			`Eval tool unavailable: Python executable not found on PATH, and JavaScript/V8 eval are disabled. ${FIX_HINT}`,
 		);
 	});
 

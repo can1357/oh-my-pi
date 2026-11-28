@@ -6,10 +6,11 @@ import { resolveReadPathAsync } from "../tools/path-utils";
 import { throwIfAborted } from "../tools/tool-errors";
 import { parseCommandArgs } from "../utils/command-args";
 import { normalizePackageRequirements } from "./package-requirements";
+import { isDirectReadableV8Url } from "./v8/url-policy";
 
 /** Code-only eval input; standalone percent commands prepare files or dependencies. */
 export interface EvalSourceInput {
-	language: "py" | "js";
+	language: "py" | "js" | "v8";
 	code: string;
 }
 
@@ -47,6 +48,9 @@ export async function prepareEvalSource(
 	} catch (error) {
 		throw new ToolError(error instanceof Error ? error.message : String(error));
 	}
+	if (input.language === "v8" && command[1] !== "load") {
+		throw new ToolError("Package and environment commands are not supported in V8 sandbox mode.");
+	}
 	if (command[1] === "environment") {
 		const [environment] = args;
 		if (args.length !== 1 || (environment !== "managed" && environment !== "project")) {
@@ -67,7 +71,15 @@ export async function prepareEvalSource(
 	if (args.length !== 1 || !file) throw new ToolError("Usage: %load <script path>. Quote paths containing spaces.");
 	let filename: string;
 	const router = InternalUrlRouter.instance();
-	if (router.canHandle(file)) {
+	if (input.language === "v8") {
+		const policy = isDirectReadableV8Url(file);
+		if (!policy.allowed) {
+			throw new ToolError(
+				"V8 sandbox %load only supports safe internal URLs (e.g. local://...). Use await tool.read(...) for host files.",
+			);
+		}
+		filename = await router.requireLocal(policy.normalized, "load", sessionResolveContext(session, { signal }));
+	} else if (router.canHandle(file)) {
 		filename = await router.requireLocal(file, "load", sessionResolveContext(session, { signal }));
 	} else {
 		if (/^[a-z][a-z0-9+.-]*:\/\//i.test(file) && !file.startsWith("file://")) {

@@ -244,6 +244,21 @@ crate.annotation(
     build_script_env = {"PCRE2_SYS_STATIC": "1"},
     crate = "pcre2-sys",
 )
+
+rusty_v8_prebuilt = use_repo_rule("//bazel:rusty_v8.bzl", "rusty_v8_prebuilt_repository")
+
+rusty_v8_prebuilt(name = "rusty_v8_prebuilts")
+
+crate.annotation(
+    build_script_data = ["@@+rusty_v8_prebuilt_repository+rusty_v8_prebuilts//:all"],
+    build_script_env = {
+        "RUSTY_V8_ARCHIVE": "$${pwd}/external/+rusty_v8_prebuilt_repository+rusty_v8_prebuilts",
+    },
+    crate = "v8",
+    patch_args = ["-p1"],
+    patches = ["//bazel/patches:v8-out-dir-binding.patch"],
+    version = "152.2.0",
+)
 use_repo(crate, "crates")
 
 # --- msvc cross toolchain (owned by bazel/toolchains/msvc) ---------------------

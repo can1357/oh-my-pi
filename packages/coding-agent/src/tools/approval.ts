@@ -62,7 +62,12 @@ export interface ResolvedExecuteTimeApproval {
 
 type ApprovalSubject = Pick<
 	AgentTool,
-	"name" | "approval" | "formatApprovalDetails" | "approvalCacheTargets" | "approvalRestrictionPaths"
+	| "name"
+	| "approval"
+	| "formatApprovalDetails"
+	| "approvalCacheTargets"
+	| "approvalRestrictionPaths"
+	| "approvalTouchesFilesystem"
 > & {
 	/**
 	 * Previous public name of this tool, when a rename changed how it mints.
@@ -560,6 +565,7 @@ function restrictionSubjects(
 		}
 		return subjects;
 	}
+	if (tool.approvalTouchesFilesystem?.(args) === false) return [];
 	const subjects = (tool.approvalRestrictionPaths?.(args) ?? [])
 		.filter(target => path.isAbsolute(target))
 		.map(target => ({ path: approvalCacheKeyForPath(target), recursive: false }));

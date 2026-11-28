@@ -5638,3 +5638,6 @@ export interface WorkspaceDirectoryError {
  * Returns UTF-16 lines with active SGR codes carried across line boundaries.
  */
 export declare function wrapTextWithAnsi(text: string, width: number, tabWidth: number): Array<string>
+
+/** Resolve the shipped or local omp_v8_eval binary path, or null when unavailable on this target. */
+export declare function resolveV8EvalBinary(): string | null

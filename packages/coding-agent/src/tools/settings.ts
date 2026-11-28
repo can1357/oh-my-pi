@@ -3,7 +3,7 @@ import { cfgAutolearnEnabled } from "../autolearn/settings";
 import { cfgBashEnabled } from "../exec/settings";
 import { cfgEditMode } from "../edit/settings";
 import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
-import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
+import { cfgEvalJs, cfgEvalPy, cfgEvalV8 } from "../eval/settings";
 import { cfgLspEnabled } from "../lsp/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
@@ -1345,6 +1345,7 @@ export const cfgBuiltinToolGates = combine({
 	editMode: cfgEditMode,
 	evalJs: cfgEvalJs,
 	evalPy: cfgEvalPy,
+	evalV8: cfgEvalV8,
 	find: cfgFindEnabled,
 	github: cfgGithubEnabled,
 	gitlab: cfgGitlabEnabled,

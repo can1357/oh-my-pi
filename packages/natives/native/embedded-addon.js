@@ -17,7 +17,7 @@
  * @property {string} platformTag
  * @property {string} version
  * @property {EmbeddedAddonFile[]} files
+ * @property {EmbeddedAddonFile} [v8EvalBinary]
  */
-
 /** @type {EmbeddedAddon|null} */
 export const embeddedAddon = null;

@@ -86,9 +86,12 @@ export async function embeddedAddonFiles({
 	}
 
 	// Variants compress concurrently on Bun's thread pool.
+	const v8EvalFilename = `omp_v8_eval.${platformTag}${platform === "win32" ? ".exe" : ""}`;
+	const v8EvalBytes = present.has(v8EvalFilename) ? await fs.readFile(path.join(dir, v8EvalFilename)) : null;
 	const frames = await Promise.all(
 		available.map(({ bytes }) => Bun.zstdCompress(bytes, { level: EMBEDDED_ADDON_ZSTD_LEVEL })),
 	);
+	const v8EvalFrame = v8EvalBytes ? await Bun.zstdCompress(v8EvalBytes, { level: EMBEDDED_ADDON_ZSTD_LEVEL }) : null;
 	const imports = available.map(
 		({ filename }, index) =>
 			`import zstdPath${index} from ${JSON.stringify(`./${filename}.zst`)} with { type: "file" };`,
@@ -97,14 +100,21 @@ export async function embeddedAddonFiles({
 		({ variant, filename, bytes }, index) =>
 			`{ variant: ${JSON.stringify(variant)}, filename: ${JSON.stringify(filename)}, size: ${bytes.length}, hash: ${JSON.stringify(Bun.hash.xxHash64(bytes).toString(16).padStart(16, "0"))}, zstdPath: zstdPath${index} }`,
 	);
-	const manifest = `${imports.join("\n")}
+	const v8EvalImport = v8EvalFrame
+		? `\nimport v8EvalZstdPath from ${JSON.stringify(`./${v8EvalFilename}.zst`)} with { type: "file" };`
+		: "";
+	const v8EvalField =
+		v8EvalBytes && v8EvalFrame
+			? `\n\tv8EvalBinary: { variant: "default", filename: ${JSON.stringify(v8EvalFilename)}, size: ${v8EvalBytes.length}, hash: ${JSON.stringify(Bun.hash.xxHash64(v8EvalBytes).toString(16).padStart(16, "0"))}, zstdPath: v8EvalZstdPath },`
+			: "";
+	const manifest = `${imports.join("\n")}${v8EvalImport}
 
 export const embeddedAddon = {
 	platformTag: ${JSON.stringify(platformTag)},
 	version: ${JSON.stringify(version)},
 	files: [
 		${files.join(",\n\t\t")},
-	],
+	],${v8EvalField}
 };
 `;
 
@@ -112,6 +122,9 @@ export const embeddedAddon = {
 	available.forEach(({ filename }, index) => {
 		overrides[path.join(dir, `${filename}.zst`)] = frames[index];
 	});
+	if (v8EvalFrame) {
+		overrides[path.join(dir, `${v8EvalFilename}.zst`)] = v8EvalFrame;
+	}
 	overrides[path.join(dir, "embedded-addon.js")] = manifest;
 	return overrides;
 }

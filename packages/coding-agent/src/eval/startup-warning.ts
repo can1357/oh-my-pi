@@ -1,9 +1,9 @@
+import { resolveV8EvalBinary } from "@oh-my-pi/pi-natives";
 import { sanitizeDisplayWarnings } from "../utils/render-utils";
 import type { Args } from "../cli/args";
 import type { Settings } from "../config/settings";
 import { checkPythonKernelAvailability } from "./py/kernel";
-import { cfgEvalJs, cfgEvalPy, cfgPythonInterpreter } from "./settings";
-
+import { cfgEvalJs, cfgEvalPy, cfgEvalV8, cfgPythonInterpreter } from "./settings";
 const PYTHON_FIX_HINT = "Install Python 3.8+ or set python.interpreter, then verify with `omp setup python --check`.";
 
 /**
@@ -26,9 +26,10 @@ export async function resolvePythonEvalWarning({
 	if (availability.ok || signal?.aborted) return undefined;
 	// The reason embeds interpreter paths and spawn errors: shorten home, strip controls, bound length.
 	const [reason] = sanitizeDisplayWarnings([availability.reason ?? "no working Python interpreter"]);
-	return cfgEvalJs.get(settings)
-		? `Python eval unavailable (${reason}); eval will run JavaScript only. ${PYTHON_FIX_HINT}`
-		: `Eval tool unavailable: ${reason}, and JavaScript eval is disabled. ${PYTHON_FIX_HINT}`;
+	const jsOrV8Available = cfgEvalJs.get(settings) || (cfgEvalV8.get(settings) && resolveV8EvalBinary() !== null);
+	return jsOrV8Available
+		? `Python eval unavailable (${reason}); eval will run ${cfgEvalJs.get(settings) ? "JavaScript" : "V8 Sandbox"} only. ${PYTHON_FIX_HINT}`
+		: `Eval tool unavailable: ${reason}, and JavaScript/V8 eval are disabled. ${PYTHON_FIX_HINT}`;
 }
 
 /**

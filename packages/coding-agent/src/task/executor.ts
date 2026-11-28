@@ -4872,7 +4872,7 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 	if (toolNames?.includes("exec")) {
 		const backends = resolveEvalBackends({ settings } as ToolSession);
 		const expanded = toolNames.filter(name => name !== "exec");
-		if (backends.python || backends.js) expanded.push("eval");
+		if (backends.python || backends.js || backends.v8) expanded.push("eval");
 		expanded.push("bash");
 		toolNames = Array.from(new Set(expanded));
 	}

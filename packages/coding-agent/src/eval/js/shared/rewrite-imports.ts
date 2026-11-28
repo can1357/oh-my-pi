@@ -1084,3 +1084,58 @@ export async function wrapCode(code: string): Promise<{
 		finalExpressionSuppressed: finalExpression.suppressed,
 	};
 }
+
+async function assertNoV8ModuleSyntax(code: string): Promise<void> {
+	if (!code.includes("import") && !code.includes("export")) return;
+	const ast = await parseProgram(code);
+	if (!ast) return;
+	let foundModuleSyntax = false;
+	for (const node of ast.program.body) {
+		if (
+			node.type === "ImportDeclaration" ||
+			node.type === "ExportNamedDeclaration" ||
+			node.type === "ExportDefaultDeclaration" ||
+			node.type === "ExportAllDeclaration"
+		) {
+			foundModuleSyntax = true;
+			break;
+		}
+	}
+	if (!foundModuleSyntax) {
+		walkNodes(ast, node => {
+			if (node.type === "ImportExpression") foundModuleSyntax = true;
+		});
+	}
+	if (foundModuleSyntax) {
+		throw new SyntaxError(
+			"Module import/export syntax is not supported in the V8 sandbox. Use await read('local://...') or await tool.read({ path }) instead.",
+		);
+	}
+}
+
+export async function wrapV8CellCode(code: string): Promise<{
+	source: string;
+	asyncWrapped: boolean;
+	finalExpressionReturned: boolean | null;
+	finalExpressionSuppressed?: boolean;
+}> {
+	const finalExpression = await returnFinalExpression(code);
+	const stripped = stripTypeScript(finalExpression.source);
+	await assertNoV8ModuleSyntax(stripped);
+	const needsAsyncWrapper = await requiresAsyncWrapper(stripped);
+	const demoted = await demoteTopLevelLexicals(stripped, { publishGlobals: needsAsyncWrapper });
+	if (!needsAsyncWrapper) {
+		return {
+			source: demoted,
+			asyncWrapped: false,
+			finalExpressionReturned: finalExpression.returned,
+			finalExpressionSuppressed: finalExpression.suppressed,
+		};
+	}
+	return {
+		source: `(async () => {\n${demoted}\n})()`,
+		asyncWrapped: true,
+		finalExpressionReturned: finalExpression.returned,
+		finalExpressionSuppressed: finalExpression.suppressed,
+	};
+}

@@ -11,6 +11,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool, getEvalToolDescription } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { getEvalDocTopics } from "@oh-my-pi/pi-coding-agent/tools/eval-doc-topics";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { resolveV8EvalBinary } from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import { cfgEvalPy } from "@oh-my-pi/pi-coding-agent/eval/settings";
@@ -255,7 +256,7 @@ describe("eval tool description", () => {
 describe("eval tool dynamic schema", () => {
 	// resolveEvalBackends lets PI_* env flags override settings; neutralize them per-test
 	// so the schema is driven purely by the isolated settings (and restore to avoid leaks).
-	const EVAL_ENV_FLAGS = ["PI_PY", "PI_JS"] as const;
+	const EVAL_ENV_FLAGS = ["PI_PY", "PI_JS", "PI_V8"] as const;
 	let savedEnv: Record<string, string | undefined>;
 	beforeEach(() => {
 		savedEnv = {};
@@ -275,12 +276,13 @@ describe("eval tool dynamic schema", () => {
 	it("follows eval.py changes made after construction on the next schema read", () => {
 		const session = makeSession({});
 		const tool = new EvalTool(session);
-		expect(wireCellFields(tool).languages).toEqual(["js", "py"]);
+		const hasV8 = resolveV8EvalBinary() !== null;
+		expect(wireCellFields(tool).languages).toEqual(hasV8 ? ["js", "py", "v8"] : ["js", "py"]);
 		cfgEvalPy.set(session.settings, false);
-		expect(wireCellFields(tool).languages).toEqual(["js"]);
+		expect(wireCellFields(tool).languages).toEqual(hasV8 ? ["js", "v8"] : ["js"]);
 		expect(tool.examples.some(example => "call" in example && example.call.language === "py")).toBe(false);
 		cfgEvalPy.set(session.settings, true);
-		expect(wireCellFields(tool).languages).toEqual(["js", "py"]);
+		expect(wireCellFields(tool).languages).toEqual(hasV8 ? ["js", "py", "v8"] : ["js", "py"]);
 	});
 });
 

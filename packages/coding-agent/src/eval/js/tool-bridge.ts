@@ -45,7 +45,7 @@ import {
 } from "../../mcp/eval-namespaces";
 import type { JsStatusEvent } from "./shared/types";
 
-const NO_REPLY_SINK =
+export const NO_REPLY_SINK =
 	"out:// replies do not reach the user from here; write to out:// from a foreground eval cell or reply in your final message.";
 
 export type { JsStatusEvent } from "./shared/types";
@@ -89,7 +89,7 @@ function toolResultHasError(result: AgentToolResult): boolean {
 	return isRecord(result.details) && result.details.isError === true;
 }
 
-function getTool(session: ToolSession, name: string): AgentTool {
+export function getTool(session: ToolSession, name: string): AgentTool {
 	const tool = session.getToolForEvalBridge ? session.getToolForEvalBridge(name) : session.getToolByName?.(name);
 	if (tool) return tool;
 	// A registry hit means the tool exists, but the session does not expose it here.
@@ -302,7 +302,7 @@ async function runEvalMcpCall(args: unknown, options: ToolBridgeOptions): Promis
  * would; reports failures as status events. Returns the canonical name and the
  * validated args with the result.
  */
-async function runSessionTool(
+export async function runSessionTool(
 	tool: AgentTool,
 	args: unknown,
 	options: ToolBridgeOptions,
