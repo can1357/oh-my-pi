@@ -104,10 +104,16 @@ export async function prepareEvalSource(
 				if (!fstat.isFile()) {
 					throw new ToolError(`Cannot load eval script ${file}: target is not a regular file`);
 				}
-				const buf = Buffer.allocUnsafe(MAX_V8_LOAD_BYTES + 1);
+				const cap = MAX_V8_LOAD_BYTES + 1;
+				let buf = Buffer.allocUnsafe(Math.min(cap, Math.max(4096, fstat.size + 1)));
 				let total = 0;
-				while (total <= MAX_V8_LOAD_BYTES) {
+				while (total < cap) {
 					throwIfAborted(signal);
+					if (total === buf.length) {
+						const next = Buffer.allocUnsafe(Math.min(cap, buf.length * 2));
+						buf.copy(next, 0, 0, total);
+						buf = next;
+					}
 					const { bytesRead } = await fh.read(buf, total, buf.length - total, null);
 					if (bytesRead === 0) break;
 					total += bytesRead;

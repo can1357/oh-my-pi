@@ -344,9 +344,6 @@ impl V8SandboxRuntime {
 			rx,
 			&mut should_close,
 		);
-		if let Ok(mut guard) = self.active_run_tracker.lock() {
-			*guard = None;
-		}
 		let has_dangling = if let Some(state) = self.isolate.get_slot_mut::<BridgeState>() {
 			state.active_run_id = None;
 			!state.pending_resolvers.is_empty()
@@ -360,11 +357,26 @@ impl V8SandboxRuntime {
 			let mut ctx_scope = v8::ContextScope::new(scope, context);
 			reject_all_pending(&mut ctx_scope, "V8 cell finished before host call settled", false);
 		}
+		if let Ok(mut guard) = self.active_run_tracker.lock() {
+			*guard = None;
+		}
 		if let Some(state) = self.isolate.get_slot_mut::<BridgeState>() {
 			state.pending_resolvers.clear();
 			state.final_expr_set = false;
 			state.final_expr_value = None;
 		}
+
+		let outcome = if outcome.is_ok() && self.cancel_flag.swap(false, Ordering::SeqCst) {
+			Err(V8ErrorPayload {
+				name:          Some("AbortError".into()),
+				message:       "Execution aborted".into(),
+				stack:         None,
+				is_abort:      Some(true),
+				is_tool_error: None,
+			})
+		} else {
+			outcome
+		};
 
 		match outcome {
 			Ok(()) => self.emit_outbound(V8Outbound::Result {

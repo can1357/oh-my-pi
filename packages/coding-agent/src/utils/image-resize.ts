@@ -21,6 +21,7 @@ export interface ImageResizeOptions {
 	maxBytes?: number;
 	jpegQuality?: number;
 	excludeWebP?: boolean;
+	verifyDecode?: boolean;
 }
 
 export interface ResizedImage {
@@ -61,7 +62,7 @@ const DEFAULT_MAX_BYTES = 500 * 1024;
  */
 export const DEFAULT_MIN_DIMENSION = 200;
 
-const DEFAULT_OPTIONS: Required<Omit<ImageResizeOptions, "excludeWebP">> = {
+const DEFAULT_OPTIONS: Required<Omit<ImageResizeOptions, "excludeWebP" | "verifyDecode">> = {
 	// Anthropic's "internal recommended size" — Claude internally caps images at
 	// 1568px on the longest edge before vision processing.
 	maxWidth: 1568,
@@ -379,6 +380,9 @@ export async function resizeImage(
 			originalSize <= comfortableSize &&
 			!(opts.excludeWebP && sourceMime === "image/webp")
 		) {
+			if (options?.verifyDecode) {
+				await readRgba(new Bun.Image(inputBuffer));
+			}
 			return {
 				buffer: inputBuffer,
 				mimeType: sourceMime,

@@ -133,10 +133,16 @@ export async function handleV8UrlRead(
 					if (!fstat.isFile()) {
 						throw new ToolError(`Cannot read ${policy.normalized}: target is not a regular file`);
 					}
-					const buf = Buffer.allocUnsafe(MAX_V8_DIRECT_READ_BYTES + 1);
+					const cap = MAX_V8_DIRECT_READ_BYTES + 1;
+					let buf = Buffer.allocUnsafe(Math.min(cap, Math.max(4096, fstat.size + 1)));
 					let total = 0;
-					while (total <= MAX_V8_DIRECT_READ_BYTES) {
+					while (total < cap) {
 						options.signal?.throwIfAborted();
+						if (total === buf.length) {
+							const next = Buffer.allocUnsafe(Math.min(cap, buf.length * 2));
+							buf.copy(next, 0, 0, total);
+							buf = next;
+						}
 						const { bytesRead } = await fh.read(buf, total, buf.length - total, null);
 						if (bytesRead === 0) break;
 						total += bytesRead;

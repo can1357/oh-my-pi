@@ -506,6 +506,7 @@ describe("V8 sandbox eval mode", () => {
 				`const m: string = ${JSON.stringify(macroMarker)};\nimport { writeFileSync } from "node:fs" with { type: "macro" };\nwriteFileSync(m, "pwned");`,
 				`const m: string = ${JSON.stringify(macroMarker)};\n{\nimport { writeFileSync } from "node:fs" with { type: "macro" };\nwriteFileSync(m, "pwned");\n}`,
 				'import fsMod = require("node:fs");\nfsMod;',
+				'type Mod = typeof import("node:fs");\nconst x: number = 1;\nx;',
 			]) {
 				const macroRes = await h.evalWrapper.execute(
 					"v8-macro",
@@ -654,6 +655,14 @@ describe("V8 sandbox eval mode", () => {
 			expect(rab.grow).toBe("undefined");
 			// Guest image url/providerFile/detail spoofing is stripped and malformed view payloads are dropped.
 			const png1x1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+			// Valid 256x256 PNG IHDR header with truncated payload (would hit metadata-only fast path if decode isn't verified).
+			const truncated256Png = Buffer.concat([
+				Buffer.from([
+					0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00,
+					0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x08, 0x06, 0x00, 0x00, 0x00, 0x5c, 0x72, 0xa8, 0x66,
+				]),
+				Buffer.from("corrupt-idat-tail"),
+			]).toString("base64");
 			const imgRes = await h.evalWrapper.execute(
 				"v8-img-spoof",
 				{
@@ -670,6 +679,7 @@ describe("V8 sandbox eval mode", () => {
 						"};",
 						"try {",
 						`  print({ type: "image", data: ${JSON.stringify(png1x1)}, mimeType: "image/png" });`,
+						`  print({ type: "image", data: ${JSON.stringify(truncated256Png)}, mimeType: "image/png" });`,
 						'  print({ type: "image", data: "bm90LWFuLWltYWdl", mimeType: "image/png" });',
 						'  print(JSON.stringify({ okView: "valid", pad: "x".repeat(90) }));',
 						'  print(JSON.stringify({ badView: "fallback-text", pad: "y".repeat(90) }));',

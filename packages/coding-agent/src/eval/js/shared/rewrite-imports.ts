@@ -1097,7 +1097,9 @@ async function assertNoV8ModuleSyntax(code: string): Promise<boolean> {
 			node.type === "ExportAllDeclaration" ||
 			node.type === "ImportExpression" ||
 			node.type === "TSImportEqualsDeclaration" ||
-			node.type === "TSExportAssignment"
+			node.type === "TSExportAssignment" ||
+			node.type === "TSNamespaceExportDeclaration" ||
+			node.type === "TSImportType"
 		) {
 			foundModuleSyntax = true;
 		}
