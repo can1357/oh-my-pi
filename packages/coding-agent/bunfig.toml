@@ -1,0 +1,3 @@
+[test]
+# Pins spoofed client versions so no suite reaches a third-party version registry.
+preload = ["../../scripts/test-preload-client-versions.ts"]
