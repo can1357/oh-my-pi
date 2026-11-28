@@ -873,11 +873,13 @@ export class SessionMaintenance {
 
 	/**
 	 * Per-turn stale-result pass: prune older `read` results that a newer read
-	 * of the same file has made stale, plus results their tool flagged
-	 * contextually useless. Cache-aware (only fires when the suffix after a
-	 * candidate is small or the session has been idle long enough that the
-	 * provider prompt cache is cold), so it is cheap to run every turn. Gated
-	 * on the `compaction.supersedeReads` and `compaction.dropUseless` settings.
+	 * of the same file has made stale, results their tool flagged contextually
+	 * useless, and older copies of a result a later turn repeated verbatim (same
+	 * tool, same arguments, identical content). Cache-aware (only fires when the
+	 * suffix after a candidate is small or the session has been idle long enough
+	 * that the provider prompt cache is cold), so it is cheap to run every turn.
+	 * Gated on the `compaction.supersedeReads`, `compaction.dropUseless` and
+	 * `compaction.dedupeIdenticalResults` settings.
 	 *
 	 * Persists via `rewriteEntries` like every other history rewrite — the
 	 * session file must match the live (pruned) context or file-based forks
@@ -885,8 +887,8 @@ export class SessionMaintenance {
 	 * provider prompt cache.
 	 */
 	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
-		const { supersedeReads, dropUseless } = this.#compactionSettings;
-		if (!supersedeReads && !dropUseless) return undefined;
+		const { supersedeReads, dropUseless, dedupeIdenticalResults } = this.#compactionSettings;
+		if (!supersedeReads && !dropUseless && !dedupeIdenticalResults) return undefined;
 		const branchEntries = this.#host.sessionManager.getBranchView();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const model = this.#host.model();
@@ -897,6 +899,7 @@ export class SessionMaintenance {
 				supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
 				supersedeComplete: isCompleteReadResult,
 				pruneUseless: dropUseless,
+				dedupeIdentical: dedupeIdenticalResults,
 				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
 				// Never re-write summarized-away entries; only flush the whole sent
 				// region once the cache is genuinely cold (idle exceeds the 1h TTL).

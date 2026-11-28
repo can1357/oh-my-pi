@@ -2,7 +2,7 @@
  * Tool output pruning utilities for compaction.
  */
 
-import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { canonicalizeToolCallValue, type ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { Tokenizer } from "../tokenizer";
 import type { AgentMessage, AgentToolCall } from "../types";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
@@ -11,6 +11,7 @@ import { type ConvertToLlm, defaultConvertToLlm, getMessageFromEntry } from "./m
 import {
 	collectToolCallsById,
 	getToolResultMessage,
+	isArtifactRecoveryToolResult,
 	isProtectedToolResult,
 	isSkillReadToolResult,
 	type ProtectedToolMatcher,
@@ -121,6 +122,14 @@ export const SUPERSEDED_NOTICE = "[Superseded by a newer read of this file]";
 export const USELESS_NOTICE = "[Uneventful result elided]";
 
 /**
+ * Exact placeholder written over an older tool result whose content is
+ * identical to a newer result of the same call (same tool, same arguments).
+ */
+export function dedupedNotice(toolName: string): string {
+	return `[Result identical to newer ${toolName} call - see the most recent result]`;
+}
+
+/**
  * Maps a tool call to a supersede key. Results sharing a key form a group in
  * which a newer successful result supersedes every older one. A key `K` also
  * covers keys with prefix `K + "\u0000"`: they are superseded only when the
@@ -155,6 +164,12 @@ export interface SupersedePruneConfig extends CacheLookbackConfig {
 	supersedeComplete?: SupersedeCompleteFn;
 	/** Also prune results flagged useless by their tool. Default false. */
 	pruneUseless?: boolean;
+	/**
+	 * Also prune an older successful result whose call (tool name + canonical
+	 * arguments) and content are identical to a newer successful result issued
+	 * by a later assistant turn (see {@link collectDuplicateResults}). Default false.
+	 */
+	dedupeIdentical?: boolean;
 	/**
 	 * Prune a candidate now when all messages after it total at most this many
 	 * estimated tokens and it sits within
@@ -440,14 +455,112 @@ function collectUselessResults(
 }
 
 /**
+ * Dedupe floor: an older identical copy is blanked only from this many tokens.
+ * Below it the copy is nearly as cheap as the notice, and rewriting it would
+ * churn the prompt cache for almost nothing (same reasoning as
+ * {@link MIN_PRUNE_TOKENS}).
+ */
+export const MIN_DEDUPE_TOKENS = MIN_PRUNE_TOKENS;
+
+/**
+ * Collect older copies of repeated tool results. A result is a duplicate when
+ * a NEWER result shares its tool name, canonical arguments
+ * ({@link canonicalizeToolCallValue}) and byte-identical content blocks (text
+ * and images, as the model sees them), and that newer result came from a later
+ * assistant turn: parallel duplicates within one turn are left alone. Only
+ * unpruned, non-error results at/after `start` and not in `exclude` qualify,
+ * both as candidates and as the newer reference: a notice is never a result,
+ * and a reference this pass blanks for another reason cannot vouch for the
+ * copy. Protected results and spill recovery reads
+ * ({@link isArtifactRecoveryToolResult}) may serve as the reference but are
+ * never blanked. The newest copy of every group always survives. Returned in
+ * message order.
+ */
+function collectDuplicateResults(
+	entries: readonly SessionEntry[],
+	start: number,
+	tokenizer: Tokenizer,
+	toolCalls: SentToolCalls,
+	protectedTools: readonly ProtectedToolMatcher[],
+	exclude: ReadonlySet<ToolResultMessage>,
+): SupersedeCandidate[] {
+	interface Occurrence {
+		index: number;
+		message: ToolResultMessage;
+		/** Entry index of the issuing assistant turn (-1: issued before `start`). */
+		turn: number;
+		protected: boolean;
+	}
+	// Bucket by call identity first, so content is serialized only for calls
+	// that actually repeat.
+	const byCall = new Map<string, Occurrence[]>();
+	let turn = -1;
+	for (let i = start; i < entries.length; i++) {
+		const entry = entries[i];
+		if (entry.type === "message" && (entry.message as AgentMessage).role === "assistant") {
+			turn = i;
+			continue;
+		}
+		const message = getToolResultMessage(entry);
+		if (!message || message.prunedAt !== undefined || message.isError === true || exclude.has(message)) continue;
+		const toolCall = toolCalls.get(message.toolCallId);
+		if (!toolCall) continue;
+		const callKey = JSON.stringify([message.toolName, canonicalizeToolCallValue(toolCall.arguments)]);
+		let group = byCall.get(callKey);
+		if (!group) {
+			group = [];
+			byCall.set(callKey, group);
+		}
+		const isProtected =
+			isProtectedToolResult(message, toolCall, protectedTools) ||
+			isArtifactRecoveryToolResult({ toolResult: message, toolCall });
+		group.push({ index: i, message, turn, protected: isProtected });
+	}
+
+	const candidates: SupersedeCandidate[] = [];
+	for (const group of byCall.values()) {
+		if (group.length < 2) continue;
+		// Newest → oldest: the first occurrence of each content is its reference.
+		const newestTurnByContent = new Map<string, number>();
+		for (let k = group.length - 1; k >= 0; k--) {
+			const occurrence = group[k];
+			const contentKey = JSON.stringify(occurrence.message.content);
+			const newerTurn = newestTurnByContent.get(contentKey);
+			if (newerTurn === undefined) {
+				newestTurnByContent.set(contentKey, occurrence.turn);
+				continue;
+			}
+			if (newerTurn === occurrence.turn || occurrence.protected) continue;
+			const tokens = tokenizer.countMessage(occurrence.message as AgentMessage);
+			if (tokens < MIN_DEDUPE_TOKENS) continue;
+			const notice = dedupedNotice(occurrence.message.toolName);
+			if (estimatePrunedSavings(tokens, notice) <= 0) continue;
+			candidates.push({
+				entry: entries[occurrence.index] as SessionMessageEntry,
+				message: occurrence.message,
+				index: occurrence.index,
+				tokens,
+				notice,
+			});
+		}
+	}
+	return candidates.sort((a, b) => a.index - b.index);
+}
+
+/**
  * Prune superseded tool results (e.g. stale `read` outputs replaced by a newer
- * read of the same file) and, when `pruneUseless` is set, results their tool
- * flagged contextually useless. Cheap, incremental, and prompt-cache-aware: a
+ * read of the same file), when `pruneUseless` is set results their tool
+ * flagged contextually useless, and when `dedupeIdentical` is set older copies
+ * of repeated identical results. Cheap, incremental, and prompt-cache-aware: a
  * candidate is pruned now only when the suffix after it is small (tail case —
  * the read→edit→read loop) or when the context has been idle long enough that
  * the provider cache is cold anyway (then all still-sent candidates flush).
  * Never mutates entries before `keepBoundaryId` (summarized away — not sent),
  * and never walks them unless a sent result's call lives there.
+ *
+ * Precedence: supersede, then useless, then dedupe. Each later pass skips the
+ * earlier passes' candidates, so a result gets exactly one notice and a dedupe
+ * reference is always a result that stays in context this pass.
  */
 export function pruneSupersededToolResults(
 	entries: readonly SessionEntry[],
@@ -479,8 +592,21 @@ export function pruneSupersededToolResults(
 		)) {
 			candidates.push(candidate);
 		}
-		candidates.sort((a, b) => a.index - b.index);
 	}
+	if (config.dedupeIdentical) {
+		const exclude = new Set(candidates.map(candidate => candidate.message));
+		for (const candidate of collectDuplicateResults(
+			entries,
+			boundaryIndex,
+			tokenizer,
+			toolCalls,
+			config.protectedTools,
+			exclude,
+		)) {
+			candidates.push(candidate);
+		}
+	}
+	candidates.sort((a, b) => a.index - b.index);
 	if (candidates.length === 0) return NOTHING_PRUNED;
 
 	const now = config.now ?? Date.now();

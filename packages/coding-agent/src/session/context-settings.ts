@@ -412,6 +412,19 @@ export const cfgCompactionDropUseless = register({
 	},
 });
 
+export const cfgCompactionDedupeIdenticalResults = register({
+	id: "compaction.dedupeIdenticalResults",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "context",
+		group: "Compaction",
+		label: "Dedupe Identical Results",
+		description:
+			"Prune older tool results identical to a newer result of the same call (same tool and arguments; cache-aware)",
+	},
+});
+
 /** Every `compaction.*` setting as one memoized snapshot (the configured compaction policy). */
 export const cfgCompaction = combine({
 	enabled: cfgCompactionEnabled,
@@ -435,6 +448,7 @@ export const cfgCompaction = combine({
 	idleTimeoutSeconds: cfgCompactionIdleTimeoutSeconds,
 	supersedeReads: cfgCompactionSupersedeReads,
 	dropUseless: cfgCompactionDropUseless,
+	dedupeIdenticalResults: cfgCompactionDedupeIdenticalResults,
 });
 
 /**
