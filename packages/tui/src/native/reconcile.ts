@@ -897,7 +897,8 @@ export class Reconciler {
 		rec.node = node;
 		rec.rawProps = undefined;
 		rec.rawChildren = null;
-		rec.revealN = undefined;
+		// The replacement reveals when its request differs from the one this record last had: a
+		// node rebuilt with the same request (every re-render of it) leaves the scroll alone.
 		rec.scrollN = undefined;
 		this.#byNode.set(node, rec);
 		this.#watch(rec);

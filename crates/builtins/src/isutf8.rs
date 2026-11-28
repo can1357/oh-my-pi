@@ -27,6 +27,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
+use xutf::{DecodeError, UnitSet, Utf8};
 
 use crate::host::{Host, Utility, format_usage, matches_parser};
 
@@ -202,30 +203,19 @@ fn validate(input: &mut impl Read, cancel: &Arc<AtomicBool>) -> io::Result<Verdi
 			return Ok(Verdict::Valid);
 		}
 
-		let mut pos = 0usize;
-		while pos < data_len {
-			match std::str::from_utf8(&buf[pos..data_len]) {
-				Ok(_) => {
-					advance(&buf[pos..data_len], &mut line, &mut chars_in_line);
-					pos = data_len;
-				},
-				Err(err) => {
-					advance(&buf[pos..pos + err.valid_up_to()], &mut line, &mut chars_in_line);
-					pos += err.valid_up_to();
-					if err.error_len().is_some() || eof {
-						// Bad sequence, or an incomplete one truncated by EOF.
-						return Ok(Verdict::Invalid {
-							line,
-							character: chars_in_line + 1,
-							byte: offset + pos as u64,
-						});
-					}
-					break; // incomplete tail: carry it into the next chunk
-				},
-			}
-		}
-		if eof {
-			return Ok(Verdict::Valid);
+		let (valid, invalid) = match xutf::decode(&buf[..data_len]) {
+			Ok(text) => (text, false),
+			Err(DecodeError::Invalid { valid_prefix, .. }) => (valid_prefix, true),
+			Err(DecodeError::Incomplete { valid_prefix, .. }) => (valid_prefix, eof),
+		};
+		advance(valid.as_bytes(), &mut line, &mut chars_in_line);
+		let pos = valid.len();
+		if invalid {
+			return Ok(Verdict::Invalid {
+				line,
+				character: chars_in_line + 1,
+				byte: offset + pos as u64,
+			});
 		}
 		// Slide the unconsumed tail (at most 3 bytes) to the front of the buffer.
 		buf.copy_within(pos..data_len, 0);
@@ -247,7 +237,8 @@ fn advance(text: &[u8], line: &mut u64, chars_in_line: &mut u64) {
 }
 
 fn count_chars(bytes: &[u8]) -> u64 {
-	bytes.iter().filter(|&&byte| (byte & 0xc0) != 0x80).count() as u64
+	const CONTINUATIONS: UnitSet = UnitSet::from_ranges(&[0x80..=0xbf]);
+	(bytes.len() - CONTINUATIONS.count::<Utf8>(bytes)) as u64
 }
 
 fn display_name(name: &OsStr) -> String {

@@ -23,8 +23,7 @@ import {
 import { logger, withOmpOtelEnv } from "@oh-my-pi/pi-utils";
 import { metrics, trace } from "@opentelemetry/api";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
-import { SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
-import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import { SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 
 const mode = process.argv[2];
 
@@ -35,7 +34,7 @@ function leakedOtelNames(): string[] {
 if (mode === "exporter") {
 	const exporter = withOmpOtelEnv(() => new OTLPTraceExporter());
 	const afterWindow = leakedOtelNames();
-	const provider = new NodeTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+	const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
 	provider.getTracer("otel-env-window-probe").startSpan("probe-span").end();
 	await provider.forceFlush();
 	await provider.shutdown();

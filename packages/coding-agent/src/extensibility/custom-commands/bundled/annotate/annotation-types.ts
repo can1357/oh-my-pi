@@ -63,6 +63,8 @@ export interface TextReviewSource {
 	kind: "message" | "code" | "quote" | "command" | "file" | "prompt";
 	label: string;
 	text: string;
+	/** Highlight language supplied by the selected code or command block. */
+	language?: string;
 	/** Identifies the active session entry that supplied this source, when applicable. */
 	provenance?: TextReviewSourceProvenance;
 	sessionId?: string;

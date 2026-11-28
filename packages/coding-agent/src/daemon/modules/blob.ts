@@ -9,9 +9,12 @@
  * down it and the session answers `{id,mime,base64}` or `{id,error}`.
  */
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
-import { isUploaderKind, LocalBlobBackend, MAX_LAZY_RENDER_MS, redactUrl } from "../../blob-broker/broker";
+import { LocalBlobBackend, MAX_LAZY_RENDER_MS, redactUrl } from "../../blob-broker/broker";
+import { isServeKind } from "../../blob-broker/destinations";
 import {
+	BLOB_APPEND_METHOD,
 	BLOB_BROKER_KIND,
+	BLOB_MODULE_VERSION,
 	BLOB_RENDER_CHANNEL,
 	type BlobBrokerCalls,
 	type BlobBrokerDoctorRequest,
@@ -33,17 +36,6 @@ import { readBlobBrokerSavingsStatus } from "../../blob-broker/savings";
 import type { DaemonModule, ModuleContext, ModuleTunnel, ModuleUnit } from "../module";
 import type { UnitPolicy } from "../protocol";
 
-/** Bumped on incompatible changes to {@link BlobUnitParams}, {@link BlobBrokerCalls}, or the render lines. */
-export const BLOB_MODULE_VERSION = 1;
-/**
- * `call("blob", BLOB_APPEND_METHOD, { upload, data })`: stage one base64 slice
- * of a blob too large for one control line (the daemon caps lines at 16 MiB).
- * A following `blob` call passes `upload` instead of `data` to publish the
- * concatenated bytes. Result: null.
- */
-export const BLOB_APPEND_METHOD = "append";
-/** Largest base64 payload sent in one call; a multiple of 4 so each slice decodes alone. */
-export const BLOB_CALL_CHUNK_CHARS = 4 * 1024 * 1024;
 /** How long a staged upload waits for its next slice or its `blob` call. */
 const UPLOAD_IDLE_MS = 60_000;
 /** Default for how long a lazy render may take in the owning session. */
@@ -171,7 +163,7 @@ class BlobUnit implements ModuleUnit {
 
 	async #start(): Promise<void> {
 		// A ready unit is a serving unit; uploader configs have nothing to start.
-		if (isUploaderKind(this.#config.kind)) return;
+		if (!isServeKind(this.#config.kind)) return;
 		const baseUrl = await this.#backend.ensureStarted();
 		if (baseUrl === null) {
 			void this.stop("exposure failed to start");

@@ -1,6 +1,6 @@
 use std::{ffi::c_void, ptr};
 
-use super::{MaybeTypeTag, TypeName};
+use super::{check_class_identity, MaybeTypeTag, TypeName};
 use crate::{check_status, sys, Error, JsError, Result, Status};
 
 #[doc(hidden)]
@@ -69,13 +69,15 @@ where
     T::type_name(),
   )?;
 
-  // Reject a spoofed field-accessor receiver before the blind cast. Compiled
-  // only on napi8 NATIVE targets (the `T: MaybeTypeTag` bound provides
-  // `T::type_tag()` only there; elsewhere this is the pre-tag unchecked cast).
+  // Reject a spoofed field-accessor receiver before the blind cast. The tag
+  // check is compiled only on napi8 NATIVE targets (the `T: MaybeTypeTag` bound
+  // provides `T::type_tag()` only there); elsewhere `check_class_identity`
+  // checks the class recorded at wrap time.
   #[cfg(all(feature = "napi8", not(target_family = "wasm")))]
   unsafe {
     super::validate_type_tag(env, this, &T::type_tag(), T::type_name())?
   };
+  check_class_identity::<T>(wrapped_val, T::type_name)?;
 
   Ok(wrapped_val.cast())
 }
@@ -85,6 +87,7 @@ pub unsafe extern "C" fn class_getter_trampoline(
   env: sys::napi_env,
   cb_info: sys::napi_callback_info,
 ) -> sys::napi_value {
+  let _napi_native_borrow_barrier = crate::bindgen_runtime::NativeBorrowBarrier::new();
   let mut this = ptr::null_mut();
   let mut data = ptr::null_mut();
 
@@ -114,6 +117,7 @@ pub unsafe extern "C" fn class_setter_trampoline(
   env: sys::napi_env,
   cb_info: sys::napi_callback_info,
 ) -> sys::napi_value {
+  let _napi_native_borrow_barrier = crate::bindgen_runtime::NativeBorrowBarrier::new();
   let mut argc = 1;
   let mut args = [ptr::null_mut()];
   let mut this = ptr::null_mut();

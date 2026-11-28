@@ -56,6 +56,32 @@ describe("CatalogMetricsIndex", () => {
 		expect(scored.resolve(model("anthropic", "claude-opus-4-1"))).toBeUndefined();
 	});
 
+	test("an incompatible first canonical key falls through to wire candidates before the logical id", () => {
+		const base = model("openai", "gpt-5.5", { int: 10 });
+		const logical = "gpt-5.5-logical";
+		const id = "gateway/gpt-5.5:cloud";
+		const query = { ...base, id, identity: { ...base.identity, logicalId: logical } };
+		const index = new CatalogMetricsIndex([
+			{ ...base, id: "gpt-5.5-cloud", identity: { ...base.identity, thinkingVariant: true }, int: 20 },
+			{ ...base, id: logical, int: 30 },
+			base,
+		]);
+		expect(index.resolve(query)?.int).toBe(10);
+		// The same wire id's expanded keys may be reused, not its identity-specific winner.
+		expect(index.resolve({ ...query, identity: { ...query.identity, thinkingVariant: true } })?.int).toBe(20);
+	});
+
+	test("an unscored class can acquire a canonical match on add; unknown still matches only by exact id", () => {
+		const row = model("openai", "gpt-5.5", { int: 10 });
+		const query = { ...row, id: " proxy/gpt-5.5 " };
+		const index = new CatalogMetricsIndex([{ ...row, id: "opaque", identity: { class: "unknown" } }]);
+		expect(index.resolve(query)).toBeUndefined();
+		index.add([row]);
+		expect(index.resolve(query)?.int).toBe(10);
+		expect(index.resolve({ ...row, id: "proxy/opaque", identity: { class: "unknown" } })).toBeUndefined();
+		expect(index.resolve({ ...row, id: "opaque", identity: { class: "unknown" } })?.int).toBe(10);
+	});
+
 	test("exact id wins over dialect matching and merges partial rows", () => {
 		const index = new CatalogMetricsIndex([
 			model("a", "gpt-5.5", { int: 10 }),

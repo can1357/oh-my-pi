@@ -173,12 +173,15 @@ describe("assistant message block streaming thinking pulse", () => {
 		readonly term: TestTerminal;
 		readonly message: Signal<AssistantMessage | undefined>;
 		readonly finalized: Signal<boolean>;
+		/** `tui.motion` reduced or none: decorative motion off. */
+		readonly reduceMotion: Signal<boolean>;
 		text(): string;
 	}
 
 	function liveBlock(hideThinkingBlock = true): LiveBlock {
 		const message = signal<AssistantMessage | undefined>(undefined);
 		const finalized = signal(false);
+		const reduceMotion = signal(false);
 		const model: AssistantMessageModel = {
 			message,
 			transient: signal(true),
@@ -189,8 +192,9 @@ describe("assistant message block streaming thinking pulse", () => {
 			columns: RENDER_WIDTH,
 			rows: 40,
 			theme: loadThemeSync("dark"),
+			reduceMotion,
 		});
-		return { term, message, finalized, text: () => term.screen().join("\n") };
+		return { term, message, finalized, reduceMotion, text: () => term.screen().join("\n") };
 	}
 
 	function liveLines(message: AssistantMessage, hideThinkingBlock = true): string[] {
@@ -219,7 +223,7 @@ describe("assistant message block streaming thinking pulse", () => {
 	it("holds the pulse on its first facet while motion is reduced (tui.motion: none)", () => {
 		const block = liveBlock();
 		try {
-			block.term.backend.setReduceMotion(true);
+			block.reduceMotion.set(true);
 			block.message.set(streaming([{ type: "thinking", thinking: "private reasoning" }]));
 			block.term.tick(5_000);
 			expect(block.text()).toContain(`${PULSE} ${THINKING_LABEL}`);

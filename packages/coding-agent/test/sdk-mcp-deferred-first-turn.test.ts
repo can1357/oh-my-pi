@@ -93,9 +93,10 @@ function probeTools(): MCPTools {
 function fakeServers() {
 	let connected: MCPTools = [];
 	const discovery = Promise.withResolvers<MCPLoadResult>();
-	vi.spyOn(MCPManager.prototype, "discoverAndConnect").mockImplementation(() => discovery.promise);
+	const connect = vi.spyOn(MCPManager.prototype, "discoverAndConnect").mockImplementation(() => discovery.promise);
 	vi.spyOn(MCPManager.prototype, "getTools").mockImplementation(() => connected);
 	return {
+		connect,
 		/** Closes discovery's startup window with `tools` connected. */
 		closeStartupWindow(tools: MCPTools): void {
 			connected = tools;
@@ -113,7 +114,7 @@ function fakeServers() {
 	};
 }
 
-async function createDeferredSession() {
+async function createDeferredSession(options?: { deferStartupWork?: boolean }) {
 	const servers = fakeServers();
 	const root = TempDir.createSync("@pi-mcp-first-turn-");
 	cleanups.push(() => root.removeSync());
@@ -122,8 +123,9 @@ async function createDeferredSession() {
 	cleanups.push(() => auth.close());
 	const mock = createMockModel({ handler: { content: ["done"] } });
 	let turnsStarted = 0;
-	const { session } = await createAgentSession({
+	const { session, startDeferredInteractiveWork } = await createAgentSession({
 		cwd: root.path(),
+		deferInteractiveStartupWork: options?.deferStartupWork,
 		agentDir: root.path(),
 		modelRegistry: new ModelRegistry(auth),
 		model: mock,
@@ -156,16 +158,22 @@ async function createDeferredSession() {
 		systemPrompts.push((context.systemPrompt ?? []).join("\n"));
 		return mock.stream(model, context, options);
 	};
-	return { session, servers, systemPrompts, turnsStarted: () => turnsStarted };
+	return { session, servers, startDeferredInteractiveWork, systemPrompts, turnsStarted: () => turnsStarted };
 }
 
 describe("createAgentSession deferred MCP discovery and the first turn", () => {
-	it("holds the first turn until in-flight discovery lands so its request carries the MCP routes", async () => {
-		const { session, servers, systemPrompts, turnsStarted } = await createDeferredSession();
+	it("an early first turn starts MCP discovery without waiting for interactive warmup", async () => {
+		const { session, servers, startDeferredInteractiveWork, systemPrompts, turnsStarted } =
+			await createDeferredSession({
+				deferStartupWork: true,
+			});
 		const started = () => turnsStarted() > 0;
+		expect(servers.connect).not.toHaveBeenCalled();
 		vi.useFakeTimers();
 		const prompted = session.prompt("hello");
 		await parkOnFirstTimer(started);
+		expect(servers.connect).toHaveBeenCalledTimes(1);
+		startDeferredInteractiveWork?.();
 		// Without the wait the turn starts within this window, still lacking MCP.
 		await stepUntil(started, MCP_DISCOVERY_TURN_WAIT_MS - DEADLINE_SLACK_MS);
 		expect(turnsStarted()).toBe(0);
@@ -173,6 +181,7 @@ describe("createAgentSession deferred MCP discovery and the first turn", () => {
 		vi.useRealTimers();
 		await prompted;
 		expect(systemPrompts[0]).toContain(MCP_TOOL_NAME);
+		expect(servers.connect).toHaveBeenCalledTimes(1);
 	});
 
 	it("holds the first turn for servers still connecting after discovery's startup window", async () => {

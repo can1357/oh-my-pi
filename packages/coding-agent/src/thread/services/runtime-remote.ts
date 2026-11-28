@@ -293,8 +293,8 @@ export class RemoteAgentStorage implements AgentStorageApi {
 		this.#remote.notify("setCache", key, value, expiresAtSec);
 	}
 
-	listAuthCredentials(provider?: string, includeDisabled = false): StoredAuthCredential[] {
-		return this.#remote.callSync("listAuthCredentials", provider, includeDisabled);
+	listAuthCredentials(provider?: string, includeDisabled = false): Promise<StoredAuthCredential[]> {
+		return this.#remote.call("listAuthCredentials", provider, includeDisabled);
 	}
 
 	recordModelUsage(modelKey: string): void {

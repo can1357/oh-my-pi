@@ -19,19 +19,7 @@ import {
 	optionString,
 } from "./uploader-runtime";
 
-/** User-selectable exposure strategy. */
-export type ExposureKind =
-	| "cloudflared"
-	| "ngrok"
-	| "tailscale"
-	| "ssh"
-	| "direct"
-	| "localhost-run"
-	| "pinggy"
-	| "devtunnel"
-	| "zrok"
-	| "bore"
-	| "named-cloudflared";
+import type { ExposureKind } from "./destinations";
 
 export interface ExposureConfig {
 	kind: ExposureKind;

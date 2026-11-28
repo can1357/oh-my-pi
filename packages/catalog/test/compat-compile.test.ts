@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as path from "node:path";
-import { compileCompatRules, renderAuthIds } from "../scripts/compat-compiler";
+import { compileCompatRules } from "../scripts/compat-compiler";
 import { compileAuth } from "../scripts/compat-compiler/compile-auth";
 import { compileBehavior } from "../scripts/compat-compiler/compile-behavior";
 import { compileCascade } from "../scripts/compat-compiler/compile-cascade";
@@ -8,8 +8,6 @@ import { compileProviders } from "../scripts/compat-compiler/compile-providers";
 import { compileTaxonomy } from "../scripts/compat-compiler/compile-taxonomy";
 import { cursorModelParameters } from "../src/compat/behavior";
 import committed from "../src/compat/rules.json";
-
-const AUTH_IDS_PATH = path.join(import.meta.dir, "../src/compat/auth-ids.ts");
 
 const RULES_DIR = path.join(import.meta.dir, "../src/compat/rules");
 
@@ -344,8 +342,6 @@ describe("auth grammar", () => {
 			order("b"),
 		]);
 		expect(compiled.providers.map(p => p.id)).toEqual(["b", "a"]);
-		expect(renderAuthIds(compiled)).toContain('export type LoginProviderId = "b";');
-		expect(renderAuthIds(compiled)).toContain('export type AuthProviderId = "a" | "b";');
 	});
 
 	test("provider-owned authentication APIs compile into auth policy", () => {
@@ -682,6 +678,7 @@ describe("committed rules.json", () => {
 	test("matches a fresh compile of rules/ (run `bun run gen:compat` after editing KDL)", async () => {
 		const fresh = await compileCompatRules(RULES_DIR);
 		expect(fresh).toEqual(committed);
-		expect(await Bun.file(AUTH_IDS_PATH).text()).toBe(renderAuthIds(fresh.auth));
+		const { hash, priceChanges: _dates, ...policy } = fresh;
+		expect(hash).toBe(Bun.hash(JSON.stringify(policy)).toString(36));
 	});
 });

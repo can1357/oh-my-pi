@@ -582,14 +582,15 @@ pub(super) fn ident_unit(src: &[u8], at: usize, utf8: bool, continuation: bool) 
 /// Decodes a single source character, falling back to a byte for malformed UTF-8.
 pub(super) fn unit(src: &[u8], at: usize, utf8: bool) -> Option<(u32, usize)> {
 	let byte = *src.get(at)?;
-	let width = if utf8 { match byte { 0xc2..=0xdf => 2, 0xe0..=0xef => 3, 0xf0..=0xf4 => 4, _ => 1 } } else { 1 };
-	if width > 1 && let Some(ch) = src.get(at..at + width).and_then(|s| std::str::from_utf8(s).ok()).and_then(|s| s.chars().next()) {
-		Some((u32::from(ch), width))
-	} else if utf8 && let Some(extended) = extended_unit(src, at) {
-		Some(extended)
-	} else {
-		Some((u32::from(byte), 1))
+	if !utf8 || byte.is_ascii() {
+		return Some((u32::from(byte), 1));
 	}
+	let tail = &src[at..];
+	let valid = xutf::valid_prefix(&tail[..tail.len().min(char::MAX_LEN_UTF8)]);
+	if let Some(ch) = valid.chars().next() {
+		return Some((u32::from(ch), ch.len_utf8()));
+	}
+	Some(extended_unit(src, at).unwrap_or((u32::from(byte), 1)))
 }
 
 /// Perl's lax/extended UTF-8 (surrogates, code points above U+10FFFF, 0xF8..0xFF lead bytes)

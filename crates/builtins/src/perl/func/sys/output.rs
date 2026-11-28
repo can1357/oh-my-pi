@@ -125,7 +125,11 @@ fn write_result(interp: &mut Interp<'_>, result: io::Result<bool>, operation: &s
 			Ok(true)
 		},
 		Err(_) if interp.is_cancelled() => Err(Flow::Cancelled),
-		Err(e) => { set_io_errno(interp, &e); Ok(false) },
+		Err(e) => {
+			set_io_errno(interp, &e);
+			interp.broken_pipe(&e)?;
+			Ok(false)
+		},
 	}
 }
 
