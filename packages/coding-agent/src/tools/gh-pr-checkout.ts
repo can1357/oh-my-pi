@@ -628,9 +628,25 @@ export async function executePrCreate(
 			}
 		}
 
-		const output = await github.text(session.cwd, args, signal, {
-			repoProvided: Boolean(repo),
-		});
+		let output: string;
+		try {
+			output = await github.text(session.cwd, args, signal, {
+				repoProvided: Boolean(repo),
+			});
+		} catch (error) {
+			if (
+				error instanceof ToolError &&
+				head &&
+				!head.includes(":") &&
+				/Head ref must be a branch|Head sha can't be blank/i.test(error.message)
+			) {
+				const originHint = await buildCrossForkHeadHint(session.cwd, head, signal);
+				if (originHint) {
+					throw new ToolError(`${error.message}\n${originHint}`, error.context);
+				}
+			}
+			throw error;
+		}
 		const url =
 			output
 				.split("\n")
@@ -696,4 +712,133 @@ export function formatPrCreateResult(options: {
 	pushLine(lines, "Labels", formatLabels(options.data?.labels));
 
 	return lines.join("\n").trim();
+}
+
+const GIT_REMOTE_OWNER_REPO_PATTERN =
+	/(?:https?:\/\/[^/]+\/|git@[^:]+:|ssh:\/\/git@[^/]+\/)([^/]+)\/([^/]+?)(?:\.git)?$/i;
+
+async function buildCrossForkHeadHint(
+	cwd: string,
+	head: string,
+	signal: AbortSignal | undefined,
+): Promise<string | undefined> {
+	try {
+		const repository = vcs.git(cwd);
+		if (!repository) return undefined;
+		const originUrl = await repository.remoteUrl("origin", signal);
+		if (!originUrl) return undefined;
+		const match = GIT_REMOTE_OWNER_REPO_PATTERN.exec(originUrl.trim());
+		if (!match) return undefined;
+		const [, owner, repoName] = match;
+		return `Hint: 'origin' points to '${owner}/${repoName}'; if '${head}' was pushed to your fork, retry with head="${owner}:${head}".`;
+	} catch {
+		return undefined;
+	}
+}
+
+function requireSinglePrIdentifier(value: string | string[] | undefined, op: string): string {
+	if (Array.isArray(value)) {
+		throw new ToolError(`${op} accepts a single PR identifier, not an array`);
+	}
+	return requireNonEmpty(value, "pr");
+}
+
+export async function executePrUpdate(
+	session: ToolSession,
+	params: GithubInput,
+	signal: AbortSignal | undefined,
+): Promise<AgentToolResult<GhToolDetails>> {
+	const pr = requireSinglePrIdentifier(params.pr, "pr_update");
+	const repo = normalizeOptionalString(params.repo);
+	const title = normalizeOptionalString(params.title);
+	const hasBody = params.body !== undefined;
+	const body = params.body;
+	const base = normalizeOptionalString(params.base);
+	const draft = params.draft;
+	const state = params.state;
+	const reviewers = normalizePrIdentifierList(params.reviewer);
+	const assignees = normalizePrIdentifierList(params.assignee);
+	const labels = normalizePrIdentifierList(params.label);
+
+	const hasEdit = Boolean(
+		title || hasBody || base || reviewers.length > 0 || assignees.length > 0 || labels.length > 0,
+	);
+	if (!hasEdit && draft === undefined && state === undefined) {
+		throw new ToolError("pr_update requires at least one field to update");
+	}
+
+	let bodyDir: string | undefined;
+	try {
+		if (hasEdit) {
+			const editArgs = ["pr", "edit", pr];
+			appendRepoFlag(editArgs, repo, pr);
+			if (title) editArgs.push("--title", title);
+			if (base) editArgs.push("--base", base);
+			if (hasBody) {
+				if (body && body.length > 0) {
+					bodyDir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-pr-body-"));
+					const bodyFile = path.join(bodyDir, "body.md");
+					await Bun.write(bodyFile, body);
+					editArgs.push("--body-file", bodyFile);
+				} else {
+					editArgs.push("--body", "");
+				}
+			}
+			for (const reviewer of reviewers) editArgs.push("--add-reviewer", reviewer);
+			for (const assignee of assignees) editArgs.push("--add-assignee", assignee);
+			for (const label of labels) editArgs.push("--add-label", label);
+			await github.text(session.cwd, editArgs, signal, { repoProvided: Boolean(repo) });
+		}
+
+		if (draft !== undefined) {
+			const readyArgs = ["pr", "ready", pr];
+			if (draft) readyArgs.push("--undo");
+			appendRepoFlag(readyArgs, repo, pr);
+			await github.text(session.cwd, readyArgs, signal, { repoProvided: Boolean(repo) });
+		}
+
+		if (state !== undefined) {
+			const stateArgs = ["pr", state === "closed" ? "close" : "reopen", pr];
+			appendRepoFlag(stateArgs, repo, pr);
+			await github.text(session.cwd, stateArgs, signal, { repoProvided: Boolean(repo) });
+		}
+	} finally {
+		if (bodyDir) {
+			await fs.rm(bodyDir, { recursive: true, force: true }).catch(() => {});
+		}
+	}
+
+	const parsedUrl = parsePullRequestUrl(pr);
+	const numericPr = /^\d+$/.test(pr) ? Number.parseInt(pr, 10) : parsedUrl.prNumber;
+	const resolvedRepo = repo ?? parsedUrl.repo;
+	if (numericPr !== undefined) {
+		invalidateAllForNumber(numericPr, resolvedRepo);
+	}
+
+	let prView: GhPrViewData | undefined;
+	try {
+		const viewArgs = ["pr", "view", pr];
+		appendRepoFlag(viewArgs, repo, pr);
+		viewArgs.push("--json", GH_PR_CREATE_FIELDS.join(","));
+		prView = await github.json<GhPrViewData>(session.cwd, viewArgs, signal, {
+			repoProvided: Boolean(repo),
+		});
+	} catch {
+		// Best-effort summary; PR update already succeeded.
+	}
+
+	const prNumber = prView?.number ?? numericPr;
+	const headerTitle = prView?.title ?? title ?? pr;
+	const header =
+		prNumber !== undefined
+			? `# Updated Pull Request #${prNumber}: ${headerTitle}`
+			: `# Updated Pull Request: ${headerTitle}`;
+	const lines: string[] = [header, ""];
+	pushLine(lines, "URL", prView?.url);
+	pushLine(lines, "State", prView?.state ?? state?.toUpperCase());
+	pushLine(lines, "Draft", prView?.isDraft ?? draft);
+	pushLine(lines, "Base", prView?.baseRefName ?? base);
+	pushLine(lines, "Head", prView?.headRefName);
+	pushLine(lines, "Labels", formatLabels(prView?.labels));
+	return buildTextResult(lines.join("\n").trim(), prView?.url);
 }

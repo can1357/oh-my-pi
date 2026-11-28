@@ -2081,3 +2081,177 @@ describe("current checkout repository with an upstream remote", () => {
 		expect(jsonSpy).not.toHaveBeenCalled();
 	});
 });
+
+describe("github tool search_code, file_read, pr_create hint, and pr_update", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	function firstText(result: { content: ReadonlyArray<{ type: string; text?: string }> }): string {
+		const block = result.content[0];
+		return block && typeof block.text === "string" ? block.text : "";
+	}
+
+	it("search_code avoids duplicating repo: qualifier when query already scopes it", async () => {
+		const jsonSpy = vi.spyOn(github, "json").mockResolvedValue({ items: [] });
+		const tool = new GithubTool(createSession(`/tmp/gh-search-dedup-${Date.now()}`));
+
+		await tool.execute("search-dedup", {
+			op: "search_code",
+			repo: "ghe.example.com/oven-sh/bun",
+			query: "repo:oven-sh/bun transformSync",
+		});
+
+		const args = (jsonSpy.mock.calls[0]?.[1] ?? []) as string[];
+		expect(args).toContain("--hostname");
+		expect(args).toContain("ghe.example.com");
+		expect(args).toContain("q=repo:oven-sh/bun transformSync");
+	});
+
+	it("search_code extracts the matched line from text_matches indices and hints on 0-result OR queries", async () => {
+		const fragment = "*/\nexport async function addMarketplace(source: string) {\n\treturn source;\n}";
+		const matchOffset = fragment.indexOf("addMarketplace");
+		vi.spyOn(github, "json").mockResolvedValueOnce({
+			items: [
+				{
+					path: "src/manager.ts",
+					sha: "1a122eb7a4f0",
+					html_url: "https://github.com/acme/repo/blob/main/src/manager.ts",
+					repository: { full_name: "acme/repo" },
+					text_matches: [
+						{
+							fragment,
+							property: "content",
+							matches: [{ text: "addMarketplace", indices: [matchOffset, matchOffset + 14] }],
+						},
+					],
+				},
+			],
+		});
+		const tool = new GithubTool(createSession(`/tmp/gh-search-match-${Date.now()}`));
+
+		const hit = await tool.execute("search-hit", {
+			op: "search_code",
+			repo: "acme/repo",
+			query: "addMarketplace",
+		});
+		const hitText = firstText(hit);
+		expect(hitText).toContain("Match: export async function addMarketplace(source: string) {");
+		expect(hitText).not.toContain("Match: */");
+
+		vi.spyOn(github, "json").mockResolvedValueOnce({ items: [] });
+		const miss = await tool.execute("search-or", {
+			op: "search_code",
+			repo: "acme/repo",
+			query: "addMarketplace OR cloneMarketplace",
+		});
+		const missText = firstText(miss);
+		expect(missText).toContain("No code matches found.");
+		expect(missText).toContain("treats OR as a literal word");
+	});
+
+	it("file_read lists directories when path is omitted or resolves to an array", async () => {
+		const jsonSpy = vi.spyOn(github, "json").mockResolvedValue([
+			{ name: "src", path: "src", type: "dir" },
+			{ name: "README.md", path: "README.md", type: "file" },
+		]);
+		const tool = new GithubTool(createSession(`/tmp/gh-dir-list-${Date.now()}`));
+
+		const result = await tool.execute("dir-root", { op: "file_read", repo: "acme/repo" });
+		const args = (jsonSpy.mock.calls[0]?.[1] ?? []) as string[];
+		expect(args).toContain("/repos/acme/repo/contents");
+		const text = firstText(result);
+		expect(text).toContain("# Directory / in acme/repo");
+		expect(text).toContain("- [dir] src/");
+		expect(text).toContain("- [file] README.md");
+	});
+
+	it("file_read supports :start-end and :-N line-range suffixes", async () => {
+		const content = Buffer.from("line1\nline2\nline3\nline4\nline5", "utf-8").toString("base64");
+		const jsonSpy = vi.spyOn(github, "json").mockResolvedValue({
+			type: "file",
+			encoding: "base64",
+			content,
+			html_url: "https://github.com/acme/repo/blob/main/src/index.ts",
+		});
+		const tool = new GithubTool(createSession(`/tmp/gh-file-slice-${Date.now()}`));
+
+		const rangeRes = await tool.execute("slice-1", {
+			op: "file_read",
+			repo: "acme/repo",
+			path: "src/index.ts:2-4",
+		});
+		expect((jsonSpy.mock.calls[0]?.[1] ?? []) as string[]).toContain("/repos/acme/repo/contents/src/index.ts");
+		const rangeText = firstText(rangeRes);
+		expect(rangeText).toContain("2|line2\n3|line3\n4|line4");
+		expect(rangeText).toContain("[Showing lines 2-4 of 5]");
+
+		const tailRes = await tool.execute("slice-2", {
+			op: "file_read",
+			repo: "acme/repo",
+			path: "src/index.ts:-2",
+		});
+		const tailText = firstText(tailRes);
+		expect(tailText).toContain("4|line4\n5|line5");
+		expect(tailText).toContain("[Showing lines 4-5 of 5]");
+	});
+
+	it("pr_create appends cross-fork head hint when origin is configured", async () => {
+		const repoDir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-pr-create-hint-"));
+		try {
+			runGit(repoDir, ["init", "-q"]);
+			runGit(repoDir, ["remote", "add", "origin", "https://github.com/alice/widgets.git"]);
+			vi.spyOn(github, "text").mockRejectedValue(
+				new ToolError(
+					"pull request create failed: GraphQL: Head sha can't be blank, Head ref must be a branch (createPullRequest)",
+				),
+			);
+			const tool = new GithubTool(createSession(repoDir));
+
+			await expect(
+				tool.execute("pr-create-hint", {
+					op: "pr_create",
+					repo: "upstream-org/widgets",
+					base: "main",
+					head: "feat/demo",
+					title: "Demo",
+				}),
+			).rejects.toThrow('retry with head="alice:feat/demo"');
+		} finally {
+			await removeWithRetries(repoDir);
+		}
+	});
+
+	it("pr_update edits metadata, toggles draft, and updates state", async () => {
+		const textSpy = vi.spyOn(github, "text").mockResolvedValue("");
+		vi.spyOn(github, "json").mockResolvedValue({
+			number: 42,
+			title: "Updated title",
+			state: "CLOSED",
+			isDraft: false,
+			baseRefName: "main",
+			headRefName: "feat/demo",
+			url: "https://github.com/acme/repo/pull/42",
+		});
+		const tool = new GithubTool(createSession(`/tmp/gh-pr-update-${Date.now()}`));
+
+		const res = await tool.execute("pr-update-1", {
+			op: "pr_update",
+			repo: "acme/repo",
+			pr: "42",
+			title: "Updated title",
+			body: "New body",
+			draft: false,
+			state: "closed",
+		});
+
+		expect(textSpy.mock.calls.map(call => call[1])).toEqual([
+			expect.arrayContaining(["pr", "edit", "42", "--repo", "acme/repo", "--title", "Updated title", "--body-file"]),
+			["pr", "ready", "42", "--repo", "acme/repo"],
+			["pr", "close", "42", "--repo", "acme/repo"],
+		]);
+		const text = firstText(res);
+		expect(text).toContain("# Updated Pull Request #42: Updated title");
+		expect(text).toContain("State: CLOSED");
+	});
+});

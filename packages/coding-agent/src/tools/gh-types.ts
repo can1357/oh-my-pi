@@ -3,6 +3,7 @@ export interface GithubInput {
 		| "repo_view"
 		| "file_read"
 		| "pr_create"
+		| "pr_update"
 		| "pr_checkout"
 		| "pr_push"
 		| "search_issues"
@@ -26,6 +27,7 @@ export interface GithubInput {
 	reviewer?: string[];
 	assignee?: string[];
 	label?: string[];
+	state?: "open" | "closed";
 	query?: string;
 	since?: string;
 	until?: string;
@@ -74,7 +76,11 @@ export interface GhApiSearchCodeItem {
 	sha?: string;
 	html_url?: string;
 	repository?: { full_name?: string } | null;
-	text_matches?: Array<{ fragment?: string; property?: string }>;
+	text_matches?: Array<{
+		fragment?: string;
+		property?: string;
+		matches?: Array<{ text?: string; indices?: [number, number] }>;
+	}>;
 }
 export interface GhApiSearchCommitGitActor {
 	name?: string;
@@ -260,6 +266,7 @@ export interface GhSearchResult {
 export interface GhSearchCodeTextMatch {
 	fragment?: string;
 	property?: string;
+	matches?: Array<{ text?: string; indices?: [number, number] }>;
 }
 
 export interface GhSearchCodeResult {
