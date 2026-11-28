@@ -21,7 +21,7 @@ export interface VoiceStreamWebSocketLike {
 	binaryType: string;
 	onopen: ((event: Event) => void) | null;
 	onmessage: ((event: MessageEvent) => void) | null;
-	onerror: ((event: Event) => void) | null;
+	onerror: ((event: ErrorEvent) => void) | null;
 	onclose: ((event: CloseEvent) => void) | null;
 	send(data: string | Uint8Array): void;
 	close(code?: number, reason?: string): void;

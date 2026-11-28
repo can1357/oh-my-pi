@@ -64,7 +64,7 @@ class MockSocket implements VoiceStreamWebSocketLike {
 	binaryType = "blob";
 	onopen: ((event: Event) => void) | null = null;
 	onmessage: ((event: MessageEvent) => void) | null = null;
-	onerror: ((event: Event) => void) | null = null;
+	onerror: ((event: ErrorEvent) => void) | null = null;
 	onclose: ((event: CloseEvent) => void) | null = null;
 	readonly frames: Uint8Array[] = [];
 	readonly controls: string[] = [];
@@ -103,7 +103,7 @@ class MockSocket implements VoiceStreamWebSocketLike {
 	}
 
 	error(message: string): void {
-		this.onerror?.(Object.assign(new Event("error"), { message }));
+		this.onerror?.(new ErrorEvent("error", { message }));
 	}
 
 	end(code = 1000, reason = ""): void {
