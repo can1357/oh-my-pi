@@ -426,6 +426,8 @@ async function locateLocalTarget(
  * URL forms:
  * - local:// - Lists files at the session local root
  * - local://<path> - Reads a file under the session local root
+ * - local://<N>.log - Reads a session spill; requested lines retain full columns within
+ *   read byte/line limits, while off-window context retains the configured column cap
  */
 export class LocalProtocolHandler implements ProtocolHandler {
 	readonly scheme = "local";

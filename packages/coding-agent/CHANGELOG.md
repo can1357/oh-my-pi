@@ -375,6 +375,9 @@
 - Fixed unsupported `ANTHROPIC_SEARCH_BASE_URL` from appearing in `omp --help`, and improved the error shown when `bun` is unavailable in compiled JavaScript evaluation.
 - Selective commits now leave HEAD and staging unchanged if the shared index stays locked. Retry once the lock is released ([#20252](https://github.com/can1357/oh-my-pi/issues/20252)).
 - Cache warming no longer sends a refresh after sleep or another timer delay leaves less than ten seconds before cache expiry ([#20366](https://github.com/can1357/oh-my-pi/issues/20366)).
+### Fixed
+
+- Spill reads (`local://<N>.log`) now preserve full requested lines within the existing byte and paging limits instead of reapplying the ordinary-file column cap, so long single-line JSON output can be recovered without `:raw`. Off-window bracket context retains the configured column cap; oversized multi-range content reports its byte-budget omission ([#13947](https://github.com/can1357/oh-my-pi/pull/13947) by [@pedropaulovc](https://github.com/pedropaulovc)).
 
 ## [19.2.1] - 2026-11-25
 
