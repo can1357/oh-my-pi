@@ -1073,12 +1073,26 @@ describe("AskTool answered by an extension", () => {
 			const askId = ext.requested[0]?.askId ?? "missing";
 			return {
 				accepts: (data: ExtensionAskData) => ext.pending.resolveAsk(askId, { data }),
+				result: outcome,
 				close: async () => {
 					ext.pending.resolveAsk(askId, "cancel");
 					await outcome.catch(() => undefined);
 				},
 			};
 		};
+		it("unchecking a checkbox leaves its hidden fallback, as the dialog would", async () => {
+			const html = `<form>
+  <input type="hidden" name="agree" value="no">
+  <label><input type="checkbox" name="agree" value="yes" checked> Agree</label>
+</form>`;
+			const unchecked = await openForm(html);
+			expect(unchecked.accepts({ agree: [] })).toBe(true);
+			expect(text(await unchecked.result)).toContain(JSON.stringify({ agree: "no" }, null, 2));
+			// Left unchecked, the fallback is what the name submits, not an option the checkbox lacks.
+			const untouched = await openForm(html.replace(" checked>", ">"));
+			expect(untouched.accepts({})).toBe(true);
+			expect(text(await untouched.result)).toContain(JSON.stringify({ agree: "no" }, null, 2));
+		});
 		it("refuses an answer to a name several controls share, or that leaves its shared default invalid", async () => {
 			const form = await openForm(`<form>
   <label>Contact <input type="email" name="contact" required></label>

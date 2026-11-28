@@ -492,6 +492,8 @@ function extensionChoiceValue(field: ChoiceField, value: unknown): HtmlFormValue
  */
 function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlFormData | undefined {
 	const submitted = defaultFormData(form);
+	// What a name submits when its controls submit nothing: the last hidden input of that name.
+	const hiddenFallback = new Map(form.hidden);
 	const named = new Map<string, FormField[]>();
 	for (const field of form.fields) {
 		if (field.name) named.set(field.name, [...(named.get(field.name) ?? []), field]);
@@ -503,8 +505,11 @@ function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlF
 		if (field.kind === "choice") {
 			const choice = extensionChoiceValue(field, value);
 			if (choice === undefined) return undefined;
-			if (Array.isArray(choice) && choice.length === 0) delete submitted[name];
-			else submitted[name] = choice;
+			if (Array.isArray(choice) && choice.length === 0) {
+				const fallback = hiddenFallback.get(name);
+				if (fallback === undefined) delete submitted[name];
+				else submitted[name] = fallback;
+			} else submitted[name] = choice;
 			continue;
 		}
 		if (typeof value !== "string" && typeof value !== "number") return undefined;
@@ -514,7 +519,12 @@ function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlF
 	// which has to satisfy every one of them (a later select's default cannot stand in for an empty email,
 	// nor for an option an earlier choice does not offer).
 	for (const field of form.fields) {
-		if (field.name && !extensionFieldAccepts(field, submitted[field.name])) return undefined;
+		if (!field.name) continue;
+		const value = submitted[field.name];
+		// A choice that submits nothing leaves the hidden fallback: check the choice as unanswered.
+		const own =
+			field.kind === "choice" && value !== undefined && value === hiddenFallback.get(field.name) ? undefined : value;
+		if (!extensionFieldAccepts(field, own)) return undefined;
 	}
 	return submitted;
 }
