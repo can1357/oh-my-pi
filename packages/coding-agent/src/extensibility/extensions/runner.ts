@@ -1170,10 +1170,16 @@ export class ExtensionRunner {
 		await this.emit({ type: "mcp_notification", ...event });
 	}
 
-	/** Emits a session stop pass that can be cancelled with the active settle signal. */
-	async emitSessionStop(event: Omit<SessionStopEvent, "type">): Promise<SessionStopEventResult | undefined> {
+	/**
+	 * Emits a session stop pass that can be cancelled with the active settle signal.
+	 * With `runEveryHandler`, every handler runs and no decision is returned.
+	 */
+	async emitSessionStop(
+		event: Omit<SessionStopEvent, "type">,
+		options?: { runEveryHandler?: boolean },
+	): Promise<SessionStopEventResult | undefined> {
 		if (event.signal.aborted) return undefined;
-		return await this.emit({ type: "session_stop", ...event });
+		return await this.#emitTo(this.extensions, { type: "session_stop", ...event }, options?.runEveryHandler === true);
 	}
 
 	/**
@@ -2386,6 +2392,7 @@ export class ExtensionRunner {
 	async #emitTo<TEvent extends RunnerEmitEvent>(
 		extensions: readonly Extension[],
 		event: TEvent,
+		runEveryHandler = false,
 	): Promise<RunnerEmitResult<TEvent>> {
 		// Defer the per-event context allocation (and the Promise.race/Bun.sleep
 		// timeout machinery) to the first matching handler. Streaming sessions emit
@@ -2443,7 +2450,7 @@ export class ExtensionRunner {
 						result = handlerResult as SessionCompactingResult;
 					}
 
-					if (event.type === "session_stop" && handlerResult) {
+					if (event.type === "session_stop" && handlerResult && !runEveryHandler) {
 						const stopResult = handlerResult as SessionStopEventResult;
 						if (stopResult.decision === "block") {
 							return stopResult as RunnerEmitResult<TEvent>;

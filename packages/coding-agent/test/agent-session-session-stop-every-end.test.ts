@@ -1,6 +1,8 @@
 import { afterAll, afterEach, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import * as compaction from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockHandler, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -10,7 +12,12 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { AgentEndEvent } from "@oh-my-pi/pi-coding-agent/extensibility/shared-events";
-import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import {
+	AgentSession,
+	type AgentSessionEvent,
+	type StopContinuation,
+	type StopRoute,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -19,22 +26,7 @@ import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/transcri
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import { flush } from "@oh-my-pi/pi-utils/logger";
-import * as compaction from "../../agent/src/compaction";
-import { Agent, type AgentMessage, type AgentTool } from "../../agent/src/index";
 import { activateTodoTool, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
-
-// Import this type from the session once it exports the route inventory.
-type StopRoute =
-	| "normal"
-	| "no-assistant-message"
-	| "skip-post-turn-maintenance"
-	| "skip-superseded-speculative-maintenance"
-	| "successful-yield"
-	| "active-goal-compaction-blocked"
-	| "aborted"
-	| "trailing-tool-call"
-	| "compaction-blocked"
-	| "maintenance-failed";
 
 type Answer = "observe" | "continue" | "block";
 type Family = "openai-responses" | "anthropic-messages";
@@ -57,7 +49,8 @@ interface Options {
 }
 interface Case {
 	name: string;
-	continuation: "allowed" | "refused";
+	continuation: StopContinuation;
+	answers?: Answer[];
 	drive(answer: Answer): Promise<void>;
 }
 
@@ -70,8 +63,14 @@ const SUMMARY = "## Goal\nContinue from the earlier answer.";
 const WINDOW = 128_000;
 const BAND = 96_000;
 const GRACE_BAND = 112_000;
+const FAMILY_MODELS = {
+	"openai-responses": { provider: "gateway-openai", id: "gpt-5" },
+	"anthropic-messages": { provider: "anthropic", id: "claude-sonnet-4-5" },
+} satisfies Record<Family, { provider: string; id: string }>;
 const auth = createInMemoryAuthStorage();
-for (const provider of ["mock", "gateway-openai", "anthropic"]) auth.keys.setRuntime(provider, "test-key");
+for (const provider of ["mock", ...Object.values(FAMILY_MODELS).map(model => model.provider)]) {
+	auth.keys.setRuntime(provider, "test-key");
+}
 const modelRegistry = new ModelRegistry(auth);
 let fixture: Fixture | undefined;
 let tempDir: TempDir | undefined;
@@ -94,10 +93,7 @@ async function setup(responses: MockHandler[], answer: Answer, options: Options 
 	tempDir = TempDir.createSync("@pi-stop-every-end-");
 	const cwd = tempDir.path();
 	const family = options.family;
-	const provider =
-		family === "openai-responses" ? "gateway-openai" : family === "anthropic-messages" ? "anthropic" : "mock";
-	const id =
-		family === "openai-responses" ? "gpt-5" : family === "anthropic-messages" ? "claude-sonnet-4-5" : "mock-model";
+	const { provider, id } = family ? FAMILY_MODELS[family] : { provider: "mock", id: "mock-model" };
 	const mock = createMockModel({ id, provider, contextWindow: WINDOW, responses });
 	const model: Model = family
 		? {
@@ -288,7 +284,7 @@ async function verifyRefused(
 ): Promise<void> {
 	const ended = [...f.events];
 	const callsAtEnd = f.mock.calls.length;
-	// Take the next request even on the red base to check for leaked continuation context.
+	// A refused continuation must not leave hidden context for the next request.
 	if (answer !== "observe") {
 		await f.session.prompt("Answer a new user request.", { skipCompactionCheck: true });
 		await idle(f);
@@ -463,8 +459,9 @@ async function withProviderAbort(answer: Answer, withToolCall: boolean): Promise
 
 const routes: Record<StopRoute, Case> = {
 	normal: {
-		name: "C1 normal stop notifies once before agent_end",
+		name: "normal stop notifies once before agent_end",
 		continuation: "allowed",
+		answers: ["observe"],
 		async drive(answer) {
 			const f = await setup([reply(TARGET)], answer);
 			await prompt(f);
@@ -472,15 +469,16 @@ const routes: Record<StopRoute, Case> = {
 		},
 	},
 	"no-assistant-message": {
-		name: "C13 interrupt during a pre-stream stop runs no stop handler",
+		name: "interrupt during a pre-stream stop runs no stop handler",
 		continuation: "refused",
+		answers: ["observe"],
 		async drive(answer) {
 			const f = await setup([reply(TARGET)], answer);
 			const { agent } = f.session;
 			let endedMessages: AgentMessage[] | undefined;
 			let aborted: Promise<void> | undefined;
-			// Upstream normally records a synthetic assistant reply when interrupted.
-			// Stop at the first-call gate and interrupt before the empty end finishes routing.
+			// Stop at the first-call gate to avoid a synthetic assistant reply, then interrupt
+			// before the empty end finishes routing.
 			cleanups.push(
 				agent.addBeforeModelCall(() => ({ stop: true, reason: "Stop before the first request" })),
 				agent.subscribe(event => {
@@ -500,18 +498,13 @@ const routes: Record<StopRoute, Case> = {
 			expect(passCount(f)).toBe(0);
 		},
 	},
-	"skip-post-turn-maintenance": {
-		name: "C2 openai-responses notifies while speculative handoff is pending",
-		continuation: "allowed",
-		drive: answer => runningSpeculation("openai-responses", answer),
-	},
 	"skip-superseded-speculative-maintenance": {
-		name: "C4 superseded length stop refuses continuation but notifies",
+		name: "superseded length stop refuses continuation but notifies",
 		continuation: "refused",
 		drive: answer => withLengthStop(answer, true),
 	},
 	"successful-yield": {
-		name: "C5 main-session yield refuses continuation but notifies",
+		name: "main-session yield refuses continuation but notifies",
 		continuation: "refused",
 		async drive(answer) {
 			const f = await setup([{ content: [TARGET, toolCall], stopReason: "toolUse" }, reply(NEXT)], answer, {
@@ -525,17 +518,17 @@ const routes: Record<StopRoute, Case> = {
 		},
 	},
 	"active-goal-compaction-blocked": {
-		name: "C6 active goal blocked by compaction refuses continuation but notifies",
+		name: "active goal blocked by compaction refuses continuation but notifies",
 		continuation: "refused",
 		drive: answer => withCompactionResult(answer, "active goal"),
 	},
 	aborted: {
-		name: "C7 provider abort without tool call refuses continuation but notifies",
+		name: "provider abort without tool call refuses continuation but notifies",
 		continuation: "refused",
 		drive: answer => withProviderAbort(answer, false),
 	},
 	"trailing-tool-call": {
-		name: "C8 trailing tool call on error refuses continuation but notifies",
+		name: "trailing tool call on error refuses continuation but notifies",
 		continuation: "refused",
 		async drive(answer) {
 			const f = await setup(
@@ -554,38 +547,42 @@ const routes: Record<StopRoute, Case> = {
 		},
 	},
 	"compaction-blocked": {
-		name: "C9 bottom compaction block refuses continuation but notifies",
+		name: "bottom compaction block refuses continuation but notifies",
 		continuation: "refused",
 		drive: answer => withCompactionResult(answer, "bottom"),
 	},
 	"maintenance-failed": {
-		name: "C10 maintenance failure refuses continuation and notifies once",
+		name: "maintenance failure refuses continuation and notifies once",
 		continuation: "refused",
 		drive: answer => withCompactionResult(answer, "failure"),
 	},
 };
 
+function holdOwnedJob(jobs: AsyncJobManager, suppressDelivery: boolean) {
+	const result = gate("Background result");
+	const id = jobs.register(
+		"bash",
+		"Held background job",
+		async () => {
+			const value = await result.promise;
+			if (suppressDelivery) jobs.acknowledgeDeliveries([id]);
+			return value;
+		},
+		{ ownerId: "Main" },
+	);
+	const job = jobs.getJob(id);
+	if (!job) throw new Error("Expected the background job to be registered");
+	return { job, result };
+}
+
 const asyncWait: Case = {
-	name: "C11 suppressed job delivery notifies only after the wait ends",
+	name: "suppressed job delivery notifies only after the wait ends",
 	continuation: "allowed",
 	async drive(answer) {
 		const jobs = new AsyncJobManager({});
 		cleanups.push(() => jobs.dispose().then(() => undefined));
 		const f = await setup([reply(TARGET), reply(FOLLOW_UP)], answer, { jobs });
-		const result = gate("Background result");
-		const id = jobs.register(
-			"bash",
-			"Held background job",
-			async () => {
-				const value = await result.promise;
-				// Suppress the delivery as the job returns, so it can hold the run open until then.
-				jobs.acknowledgeDeliveries([id]);
-				return value;
-			},
-			{ ownerId: "Main" },
-		);
-		const job = jobs.getJob(id);
-		if (!job) throw new Error("Expected the background job to be registered");
+		const { job, result } = holdOwnedJob(jobs, true);
 		await prompt(f);
 		const waiting = end(TARGET, true, true);
 		expect(f.events).toEqual([waiting]);
@@ -593,7 +590,7 @@ const asyncWait: Case = {
 		result.resolve("Background result");
 		await job.promise;
 		await idle(f);
-		expect(jobs.isDeliverySuppressed(id)).toBe(true);
+		expect(jobs.isDeliverySuppressed(job.id)).toBe(true);
 		expect(f.session.isRunActive).toBe(false);
 		const continued = answer === "continue";
 		expect(passCount(f)).toBe(continued ? 2 : 1);
@@ -625,7 +622,7 @@ function holdSoftCompaction() {
 }
 
 const dropped: Case = {
-	name: "C12 todo continuation dropped during compaction notifies",
+	name: "todo continuation dropped during compaction notifies",
 	continuation: "refused",
 	async drive(answer) {
 		const target = "The review is finished.";
@@ -680,31 +677,70 @@ const dropped: Case = {
 	},
 };
 
-function register(row: Case, control = false): void {
-	const answers: Answer[] = control
-		? ["observe"]
-		: row.continuation === "allowed"
-			? ["observe", "continue"]
-			: ["observe", "continue", "block"];
+function register(row: Case): void {
+	const answers: Answer[] =
+		row.answers ?? (row.continuation === "allowed" ? ["observe", "continue"] : ["observe", "continue", "block"]);
 	for (const answer of answers) it(`${row.name} (${answer})`, () => row.drive(answer));
 }
 
-for (const [route, row] of Object.entries(routes))
-	register(row, route === "normal" || route === "no-assistant-message");
+for (const row of Object.values(routes)) register(row);
 register({
-	name: "C2 anthropic-messages notifies while speculative handoff is pending",
+	name: "openai-responses notifies while speculative handoff is pending",
+	continuation: "allowed",
+	drive: answer => runningSpeculation("openai-responses", answer),
+});
+register({
+	name: "anthropic-messages notifies while speculative handoff is pending",
 	continuation: "allowed",
 	drive: answer => runningSpeculation("anthropic-messages", answer),
 });
 register({
-	name: "C7 provider abort with tool call refuses continuation but notifies",
+	name: "provider abort with tool call refuses continuation but notifies",
 	continuation: "refused",
 	drive: answer => withProviderAbort(answer, true),
 });
 register(asyncWait);
 register(dropped);
 
-it("C14 user interrupt during the reply runs no stop handler", async () => {
+for (const suppressDelivery of [false, true]) {
+	it(`provider-aborted stop with a pending job defers the pass until ${suppressDelivery ? "the wait ends" : "the resumed loop ends"}`, async () => {
+		const jobs = new AsyncJobManager({});
+		cleanups.push(() => jobs.dispose().then(() => undefined));
+		const f = await setup(
+			[
+				{ ...reply(TARGET), stopReason: "aborted", errorMessage: "Provider cancelled the request." },
+				reply(FOLLOW_UP),
+			],
+			"continue",
+			{ jobs },
+		);
+		const { job, result } = holdOwnedJob(jobs, suppressDelivery);
+		await prompt(f);
+		const waiting = end(TARGET, true, true);
+		expect(f.session.getLastAssistantMessage()).toMatchObject({ stopReason: "aborted" });
+		expect(passCount(f)).toBe(0);
+		expect(f.events).toEqual([waiting]);
+		expect(f.session.isRunActive).toBe(true);
+
+		result.resolve("Background result");
+		await job.promise;
+		expect(await jobs.drainDeliveries({ timeoutMs: 2_000 })).toBe(true);
+		await idle(f);
+		expect(f.session.isRunActive).toBe(false);
+		expect(passCount(f)).toBe(1);
+		if (suppressDelivery) {
+			expect(f.events).toEqual([waiting, stop(TARGET), end(TARGET)]);
+			expect(f.mock.calls).toHaveLength(1);
+		} else {
+			expect(f.events).toEqual([waiting, stop(FOLLOW_UP), end(FOLLOW_UP)]);
+			expect(f.mock.calls).toHaveLength(2);
+			expect(requestContains(f, 1, "Background result")).toBe(true);
+			expect(requestContains(f, 1, HIDDEN)).toBe(false);
+		}
+	});
+}
+
+it("user interrupt during the reply runs no stop handler", async () => {
 	const entered = Promise.withResolvers<void>();
 	const f = await setup(
 		[
@@ -725,7 +761,7 @@ it("C14 user interrupt during the reply runs no stop handler", async () => {
 	expect(passCount(f)).toBe(0);
 });
 
-it("C14 disposal during settle runs no stop handler", async () => {
+it("disposal during settle runs no stop handler", async () => {
 	const f = await setup([reply(TARGET)], "observe");
 	const entered = Promise.withResolvers<void>();
 	const release = gate<void>(undefined);
@@ -745,7 +781,7 @@ it("C14 disposal during settle runs no stop handler", async () => {
 });
 
 for (const autoContinue of [false, true]) {
-	it(`C14 manual compaction during the reply runs no stop handler before ${autoContinue ? "the resume" : "going idle"}`, async () => {
+	it(`manual compaction during the reply runs no stop handler before ${autoContinue ? "the resume" : "going idle"}`, async () => {
 		const entered = Promise.withResolvers<void>();
 		const f = await setup(
 			[
@@ -781,7 +817,7 @@ for (const autoContinue of [false, true]) {
 	});
 }
 
-it("C14 subagent terminal reply emits agent_end but not session_stop", async () => {
+it("subagent terminal reply emits agent_end but not session_stop", async () => {
 	const f = await setup([reply(TARGET)], "observe", { kind: "sub" });
 	await prompt(f);
 	expect(f.mock.calls).toHaveLength(1);
@@ -811,7 +847,6 @@ it("speculative states: armed handoff at stop notifies normally", async () => {
 	verifyAllowed(f, "observe", 2);
 });
 
-// C2 covers a running handoff at stop. C4 covers the superseded length stop.
 it("speculative states: a length stop waits for the handoff and then notifies", () => withLengthStop("observe", false));
 
 it("speculative states: retryable error retries before any stop notification", async () => {
