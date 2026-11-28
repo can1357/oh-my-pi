@@ -4159,7 +4159,7 @@ export function buildAnthropicSystemBlocks(
 
 /** Inputs for {@link buildGitHubCopilotAnthropicHeaders}. */
 export interface GitHubCopilotAnthropicHeaderArgs {
-	model: Pick<Model<"anthropic-messages">, "provider" | "providerType" | "headers">;
+	model: Pick<Model<Api>, "provider" | "providerType" | "headers" | "compat">;
 	/** Copilot credential: a bare token or the OAuth login's JSON envelope. */
 	apiKey: string;
 	/** Effective endpoint (`resolveAnthropicBaseUrl`); selects the `anthropic-version`. */
@@ -4204,6 +4204,7 @@ export function buildGitHubCopilotAnthropicHeaders(args: GitHubCopilotAnthropicH
 		protocol: "anthropic",
 		sessionId: args.sessionId,
 		parentSessionId: args.parentSessionId,
+		compat: model.compat,
 	});
 	return headers;
 }
@@ -4363,6 +4364,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		protocol: "anthropic",
 		sessionId,
 		parentSessionId,
+		compat: model.compat,
 	});
 
 	if (model.provider === "cloudflare-ai-gateway") {

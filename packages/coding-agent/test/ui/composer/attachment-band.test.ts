@@ -82,6 +82,7 @@ describe("attachment band pictures", () => {
 				textSizing: false,
 				tsp: false,
 				emoji: CONSERVATIVE_EMOJI,
+				styledUnderlines: false,
 			});
 			const placeholders = signal(false);
 			const images = new TerminalImages({ capabilities: caps, placeholders });

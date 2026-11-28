@@ -8,7 +8,9 @@ This page documents `packages/natives/native/loader-state.js`, the runtime betwe
 - `native/desktop.js`, `native/clipboard.js`, `native/path.js`, and `native/vcs.js` defer native loading. Desktop, path, and VCS wrappers cache their selected class/bindings; clipboard calls `loadNative()` on each invocation. Path helpers return their input unchanged without loading on non-Windows platforms.
 - Pure loader helpers are exported for focused tests and do not perform detection or filesystem probing until `loadNative()` or `initLoaderContext()` is called.
 
-A successful call is not memoized by JS. Repeated calls rely on `openNativeAddon`'s cache: it opens each `.node` path once with `process.dlopen` and returns the same exports on every later call, as `require`'s module cache did (a second `dlopen` would run the addon's init again and make new classes). Post-load setup is idempotent or best-effort.
+Release executables register their own `napi_register_module_v1` through `process.dlopen`. The loader checks the native release stamp, installs the native runtime, configures the grammar directory and caches the exports once per VM; registering twice would create distinct JS classes. Workers register separately. There is no `.node` probe or extraction fallback. `--no-addons` disables registration; `--no-ffi-cc` does not.
+
+For installations that use a `.node` file, `openNativeAddon` caches exports by path so a second load doesn't create a second set of classes. The remainder of this page describes this file-backed loader.
 
 ## Loader context
 
@@ -74,7 +76,7 @@ When the platform is Windows, the runtime is non-compiled, and `nativeDir` conta
 
 Before probing, `maybeStageNodeModulesAddon()` copies each available filename from `leafPackageDir ?? nativeDir` to a missing cache target. Existing cache files are retained. This keeps the loaded DLL handle away from the package-manager copy that an update must replace. Directory/copy failures are recorded and normal probing continues.
 
-### Compiled runtime
+### Standalone built with an embedded `.node` (Nix)
 
 1. For each filename, `versionedDir`, then the legacy user-data directory.
 2. For each filename, package-local `nativeDir`, then the executable directory.

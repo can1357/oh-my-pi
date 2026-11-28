@@ -86,6 +86,7 @@ export const PROVIDER_CATALOG_NODES: ReadonlySet<string> = new Set([
 	"dynamic-models-authoritative",
 	"skip-cross-provider-reference-fills",
 	"keep-bundled-names",
+	"use-model-names-in-picker",
 	"discovery",
 	"kind-apis",
 	"seed",
@@ -413,6 +414,10 @@ function parseProvider(node: KdlNodeView): ParsedProvider | undefined {
 			case "keep-bundled-names":
 				if (provider.keepBundledNames !== undefined) malformed(child);
 				provider.keepBundledNames = singleBoolean(child);
+				break;
+			case "use-model-names-in-picker":
+				if (provider.useModelNamesInPicker !== undefined) malformed(child);
+				provider.useModelNamesInPicker = singleBoolean(child);
 				break;
 			case "discovery":
 				if (provider.discovery !== undefined) malformed(child);

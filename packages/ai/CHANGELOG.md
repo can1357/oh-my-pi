@@ -28,6 +28,7 @@
 
 ### Fixed
 
+- Fixed startup failing with `no such column: salt` when `agent.db` records auth schema v9 but its credentials table has no `salt` column
 - An OpenAI Responses request retried after an empty completion keeps the provider session it started with, so a session the host retired mid-request (a model switch) is not recreated for the next model ([#20858](https://github.com/can1357/oh-my-pi/pull/20858) by [@JustasMasiulis](https://github.com/JustasMasiulis))
 - Fixed DeepSeek sessions failing every request with `400 … image special token` after a tool result quoted DeepSeek's chat template: `<｜…｜>` and `｜DSML｜` tokens in outgoing message text are now broken with a zero-width space ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
 - Usage checks no longer send a private gateway’s configured credential to a built-in provider’s public quota service.
@@ -49,6 +50,7 @@
 ### Changed
 
 - Explicit OpenAI prompt caching (`promptCache: { mode: "explicit" }`) now marks the leading instructions, every user message, and each run of tool outputs, so each request reads the prefix the previous one wrote, and nested gateway markers are rejected ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
+- GitHub Copilot Responses requests for `gpt-6.2-sol` now default to `reasoning.summary: "detailed"` instead of `"auto"`, which often came back blank; an explicit summary level still wins ([#20804](https://github.com/can1357/oh-my-pi/pull/20804) by [@wapenshaw](https://github.com/wapenshaw))
 - Expanded xAI text-to-speech support with configurable playback speed, PCM output, and inputs up to 60,000 characters.
 - Devin sessions now automatically switch to another stored login when the active login has exhausted its weekly quota and has no on-demand balance.
 - The tool-call loop guard now also detects consecutive tool calls whose arguments drift only in numbers, such as `echo merge-live-3` after `echo merge-live-2`, when the assistant's text repeats. Progress-bearing arguments (`grep`'s `skip`, `offset`, cursor keys) and digits inside path-like tokens of command strings keep their values. Legitimate pagination and sweeps over distinct files are not interrupted ([#13426](https://github.com/can1357/oh-my-pi/pull/13426) by [@nick-maderight](https://github.com/nick-maderight))

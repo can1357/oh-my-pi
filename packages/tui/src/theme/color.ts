@@ -11,6 +11,7 @@ export type ColorDepth = "truecolor" | "256" | "16";
 
 export const FG_DEFAULT = "\x1b[39m";
 export const BG_DEFAULT = "\x1b[49m";
+export const UNDERLINE_COLOR_DEFAULT = "\x1b[59m";
 
 /** Depth of a terminal the driver probed. */
 export function depthOf(capabilities: Pick<TerminalCapabilities, "truecolor" | "colors">): ColorDepth {
@@ -107,6 +108,21 @@ export function fgSgr(value: ColorValue, depth: ColorDepth): string {
 		return `\x1b[${ansi16Code(value < 16 ? value : nearestAnsi16(paletteHex(value)), false)}m`;
 	}
 	return stringFg(value, depth);
+}
+
+/**
+ * Underline-color SGR (colon-form `58`) of a resolved color; `""` follows the
+ * text color. Only for terminals with `TerminalCapabilities.styledUnderlines`.
+ */
+export function underlineSgr(value: ColorValue, depth: ColorDepth): string {
+	const fg = fgSgr(value, depth);
+	if (fg === FG_DEFAULT) return UNDERLINE_COLOR_DEFAULT;
+	const params = fg.slice(2, -1).split(";");
+	if (params[0] === "38") {
+		return params[1] === "2" ? `\x1b[58:2::${params.slice(2).join(":")}m` : `\x1b[58:5:${params[2]}m`;
+	}
+	const code = Number(params[0]);
+	return `\x1b[58:5:${code >= 90 ? code - 82 : code - 30}m`;
 }
 
 /** Background SGR of a resolved color. */

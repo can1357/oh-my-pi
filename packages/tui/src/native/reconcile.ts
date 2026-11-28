@@ -44,6 +44,7 @@ import {
 	type TspOp,
 	type TspOverlayAnchor,
 	type TspOverlayProps,
+	type TspPickerProps,
 } from "@oh-my-pi/pi-wire";
 import type { UiEvent } from "../events";
 import type { CanvasProps, UiNode } from "../node";
@@ -55,7 +56,8 @@ import { normalizeIconProps } from "./icons";
 import { estimateRows } from "./measure";
 
 type Props = Readonly<Record<string, unknown>>;
-type AnchorRef = Exclude<TspOverlayAnchor, string>;
+/** An anchor naming a node by keypath: an overlay's, or a picker's caret anchor with its `query` range. */
+type AnchorRef = Exclude<TspOverlayAnchor | NonNullable<TspPickerProps["anchor"]>, string>;
 
 const TEXT_KINDS: ReadonlySet<string> = new Set(TSP_TEXT_KINDS);
 const HOISTED_KINDS: Readonly<Record<string, true>> = { overlay: true, picker: true };
@@ -723,8 +725,16 @@ export class Reconciler {
 			return rest;
 		}
 		if ("caret" in ref) {
-			if (typeof prev === "object" && "caret" in prev && prev.caret === id) return props;
-			return { ...props, anchor: { caret: id } };
+			// Only the keypath resolves: a picker's `query` range goes out as given.
+			const query = "query" in ref ? ref.query : undefined;
+			if (
+				typeof prev === "object" &&
+				"caret" in prev &&
+				prev.caret === id &&
+				("query" in prev ? prev.query : undefined) === query
+			)
+				return props;
+			return { ...props, anchor: query ? { caret: id, query } : { caret: id } };
 		}
 		if (typeof prev === "object" && "node" in prev && prev.node === id && prev.side === ref.side) return props;
 		return { ...props, anchor: { node: id, side: ref.side } };

@@ -873,6 +873,12 @@ export interface AnthropicCompat {
 	betweenToolsEffort?: "low" | "medium" | "high";
 	/** The model is a fast-mode SKU: send `speed: "fast"` with the fast-mode beta. Default: false. */
 	fastMode?: boolean;
+	/**
+	 * Host header that also carries the conversation session id. Sent alongside
+	 * `x-session-id` and `X-Claude-Code-Session-Id`, never instead of them; a
+	 * caller-set value wins. Default: unset.
+	 */
+	additiveSessionHeader?: "x-client-session-id";
 }
 
 /**
@@ -1236,6 +1242,13 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 */
 	toolNamePrefix?: string;
 	/**
+	 * `reasoning.summary` level sent when reasoning is engaged and the caller did
+	 * not choose one. Rule-owned: host/model pairs whose `"auto"` summaries come
+	 * back sparse; see the KDL rules for current assignments. Unset keeps
+	 * `"auto"`. Ignored while `supportsReasoningSummary` is false.
+	 */
+	reasoningSummaryDefault?: "auto" | "detailed" | "concise";
+	/**
 	 * Whether the host binds native history items (`encrypted_content`, item
 	 * ids) to the connection that issued them, so a new process must rebuild
 	 * prior turns from message content until its first successful response.
@@ -1280,6 +1293,7 @@ export type ResolvedAnthropicCompat = Required<
 		| "betweenToolsEffort"
 		| "stripThinkingHistory"
 		| "fastMode"
+		| "additiveSessionHeader"
 		| "maxImageDimension"
 		| "maxImagePayloadBytes"
 	>
@@ -1296,6 +1310,8 @@ export type ResolvedAnthropicCompat = Required<
 	stripThinkingHistory?: AnthropicCompat["stripThinkingHistory"];
 	/** Fast-mode SKU; undefined behaves as false. */
 	fastMode?: AnthropicCompat["fastMode"];
+	/** Additive host session header; undefined sends none. */
+	additiveSessionHeader?: AnthropicCompat["additiveSessionHeader"];
 	/**
 	 * Largest width or height a single image block may carry. Undefined defers
 	 * to the canonical Anthropic API limit applied by the request builder.

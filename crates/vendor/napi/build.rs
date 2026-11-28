@@ -4,6 +4,11 @@ extern crate napi_build as _;
 
 fn main() {
   println!("cargo::rustc-check-cfg=cfg(tokio_unstable)");
+  println!("cargo::rustc-check-cfg=cfg(omp_linked_natives)");
+  println!("cargo::rerun-if-env-changed=OMP_LINKED_NATIVES");
+  if std::env::var("OMP_LINKED_NATIVES").as_deref() == Ok("1") {
+    println!("cargo::rustc-cfg=omp_linked_natives");
+  }
   // The two WASI targets are indistinguishable at cfg level on current rustc:
   // `rustc --print cfg` emits IDENTICAL sets for wasm32-wasip1 and
   // wasm32-wasip1-threads (same `target_env = "p1"`, and `target_feature =

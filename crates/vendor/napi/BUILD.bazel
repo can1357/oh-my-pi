@@ -8,9 +8,9 @@ exports_files(["Cargo.toml"])
 # Vendored napi-rs with the per-env leak fix (see README.md), promoted to a
 # workspace member so Bazel treats it as first-party (crate_universe's path-dep
 # rendering is machine-local and breaks lockfile portability). Feature list
-# mirrors cargo's resolved set for omp-natives. build.rs is not wired in: it
-# only sets cfgs for wasm32-wasip1-threads and links windows-gnu, neither of
-# which ships; its check-cfg declarations are covered by --cap-lints.
+# mirrors cargo's resolved set for omp-natives. This target builds dynamic
+# addons, so it needs none of build.rs's linked-runtime, WASI, or Windows GNU
+# settings; --cap-lints covers its check-cfg declarations.
 rust_library(
     name = "napi",
     srcs = glob(["src/**/*.rs"]),

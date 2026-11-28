@@ -315,8 +315,8 @@ export abstract class OAuthCallbackFlow {
 			this.#throwIfCancelled();
 			this.ctrl.onProgress?.(
 				receiver || !this.#manualInputOnly
-					? "Waiting for browser authentication..."
-					: "Waiting for pasted authorization code...",
+					? "Waiting for you to finish in the browser…"
+					: "Waiting for you to paste the address or code from your browser…",
 			);
 			this.#throwIfCancelled();
 
@@ -334,7 +334,7 @@ export abstract class OAuthCallbackFlow {
 
 			receiverAbort.abort("OAuth callback received");
 			await nativeCallback?.catch(() => undefined);
-			this.ctrl.onProgress?.("Exchanging authorization code for tokens...");
+			this.ctrl.onProgress?.("Finishing sign-in…");
 			this.#throwIfCancelled();
 
 			return await this.exchangeToken(callback.code, state, redirectUri);

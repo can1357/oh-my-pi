@@ -1,6 +1,7 @@
 export * from "./arbiter";
 export * from "./engine";
 export * from "./parse";
+export * from "./scopes";
 export * from "./sources/agents";
 export * from "./sources/files";
 export * from "./sources/forge";

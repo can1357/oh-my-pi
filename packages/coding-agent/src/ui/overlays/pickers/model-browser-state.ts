@@ -17,6 +17,7 @@
  */
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { getFactoryDroidCreditRate } from "@oh-my-pi/pi-catalog/models";
 import { batch, type KeyEvent, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
@@ -193,6 +194,7 @@ export interface ModelRowView {
 	readonly selector: string;
 	readonly provider: string;
 	readonly id: string;
+	readonly displayName?: string;
 	readonly labelColor?: string;
 	readonly current: boolean;
 	/** The context window the session exceeds (`4.1k`); undefined when it fits. */
@@ -695,6 +697,7 @@ export class ModelBrowserState {
 			provider: item.provider,
 			id: item.id,
 			...(item.labelColor ? { labelColor: item.labelColor } : {}),
+			...(providerEntry(item.provider)?.useModelNamesInPicker ? { displayName: model.name } : {}),
 			current: item.selector === this.#current(),
 			...(this.isOverContext(item) ? { overContext: tokenCount(window) } : {}),
 			...(intelligenceOf(model) !== undefined ? { intelligence: intelligenceOf(model) } : {}),
@@ -749,8 +752,9 @@ export class ModelBrowserState {
 
 	// ─── Picker (`picker` kind) ─────────────────────────────────────────────
 
-	/** A picker row's label: the model id, after `provider/` unless the provider shows as a logo. */
+	/** A picker row's name, or its ID with an optional provider prefix. */
 	pickerLabel(item: ModelBrowserItem): string {
+		if (providerEntry(item.provider)?.useModelNamesInPicker) return item.model.name;
 		return item.provider === "" || !this.#pickerProvider() ? item.id : item.selector;
 	}
 
@@ -987,8 +991,9 @@ export class ModelBrowserState {
 	// ─── Internals ──────────────────────────────────────────────────────────
 
 	#scopedHits(item: ModelBrowserItem, provider: string, model: string): [number, number][] | undefined {
+		const label = this.pickerLabel(item);
+		if (label !== item.selector) return fuzzyHits(label, model);
 		const idHits = fuzzyHits(item.id, model) ?? [];
-		if (this.pickerLabel(item) === item.id) return idHits.length > 0 ? idHits : undefined;
 		const offset = item.provider.length + 1;
 		const ranges = [
 			...(fuzzyHits(item.provider, provider) ?? []),

@@ -2,7 +2,7 @@
 
 This runbook describes how `@oh-my-pi/pi-natives` produces `.node` addons, generated declarations, and compiled-binary embedded payloads, and how to debug loader/build failures.
 
-Every release addon is built by Bazel (`rules_rust` + `crate_universe` + hermetic cc toolchains); both Windows addons cross-build from Linux. The cargo workspace stays authoritative for local Rust iteration (rust-analyzer, `cargo nextest`) and host builds. Runtime loading and embedding are unchanged.
+The `.node` packages use Bazel (`rules_rust` + `crate_universe` + hermetic cc toolchains); both Windows addons cross-build from Linux. Standalone releases instead build a Cargo static library and link it into a target-matched Bun executable. Nix retains its independently configured addon and stock Bun template.
 
 It follows the architecture terms from `docs/natives-architecture.md`:
 
@@ -198,7 +198,7 @@ Single source of truth for cache wiring, emitted as a bazelrc fragment (its `rc`
 
 ### Release binary builds and publishing
 
-Binary builds are build-only and run in parallel with the test fan-out. `release_binary` builds every binary on one `ubuntu-22.04` image (bun cross-compiles every target) and needs only the two addon jobs, whose workflow artifacts supply its addons. The darwin legs then sign with `scripts/ci-macos-sign.sh` (rcodesign: Developer ID + notarization when the `APPLE_*` secrets exist, ad hoc otherwise; see `docs/macos-signing-notarization.md`). Before publishing, the `release_smoke` matrix downloads each binary on its own platform and runs `--version` and `--smoke-test`: `ubuntu-22.04` / `ubuntu-24.04-arm` for linux (musl inside an Alpine container), `macos-15-intel` / `macos-15` for darwin (after `codesign --verify --strict`, plus a not-ad-hoc assertion when the `APPLE_*` secrets exist), `windows-2025` / `windows-11-arm` for win32.
+`linked_runtime` links one runtime per target. `release_binary` supplies that executable to the stock Bun bundler and signs the Darwin outputs with `scripts/ci-macos-sign.sh`. Before publication `release_smoke` runs the resulting bytes on each target, including Alpine for musl and native Windows ARM64. `--smoke-test-linked-natives` exercises Rust on the main thread and in a fresh Worker without opening a `.node`; the ordinary `--smoke-test` covers the rest of the CLI.
 
 ## Debugging playbook
 
@@ -277,7 +277,21 @@ Runtime x64 candidate order also includes the unsuffixed default filename after 
 - `PI_DEBUG_STARTUP`: writes synchronous `[startup] native:…` markers to stderr around loader entry, embedded extraction, candidate loads, and native Tokio runtime installation; use it to localize startup hangs.
 - `PI_COMPILED`: compiled-mode signal. Release compilation constant-folds `process.env.PI_COMPILED` to `"true"`; a populated embedded-addon manifest and Bun embedded URL markers also signal compiled mode.
 
-## Embed lifecycle (`embed-native.ts`)
+## Standalone native runtime
+
+`python3 scripts/linked-natives/build.py <target-id>` builds the runtime template. `bun --cwd=packages/coding-agent run build` builds it as needed before compiling the CLI. `CROSS_TARGET` selects the OS, CPU and (on Linux) libc; `BUN_COMPILE_EXECUTABLE_PATH` supplies an already-linked template for that exact target. The Rust package version must match the bundled JS package. Do not pass a plain upstream Bun executable for a linked build. The tooling in `scripts/linked-natives/` is Python 3.10+ with no third-party packages; it runs Bun only for upstream's build and verifier scripts and the shared native version stamper.
+
+The standalone loader uses `process.dlopen` to register the executable’s own Node-API export. Darwin and Windows open `process.execPath`. On Linux a link-time wrapper maps exactly `/proc/self/exe` to the main-program handle; all other `dlopen` calls keep their normal behavior. No C compiler or addon cache is needed at startup. An x64 release uses the baseline native target regardless of `PI_NATIVE_VARIANT`.
+
+**CI does not build Bun.** Use stock Bun at the revision in `scripts/linked-natives/kits.json`, the workspace Rust toolchain for the addon, and the target linker/SDK. On a cache miss, CI downloads `<OMP_BUN_KIT_BASE_URL>/<sha256>/omp-bun-<bun-version>-<target-id>.tar.zst`; the digest directory keeps old releases buildable after a kit change. For an offline build, place that file in `target/linked-natives/kits/`. Missing or invalid kits fail the build rather than falling back to a Bun source checkout. The archive and its manifest are SHA-256-pinned; the link step verifies the individual inputs. No runtime download occurs on the user's machine.
+
+Kits contain the **Bun side** of the final link, not a particular version of `pi-natives`. Normal Rust edits and OMP version bumps reuse the same kit. When changing the pinned Bun revision, on a maintainer build machine run `python3 scripts/linked-natives/prepare_kit.py <target-id> <new-kit-dir>`, then `python3 scripts/linked-natives/kit.py pack <kit-dir> <archive.tar.zst>`. Record the emitted pin in `kits.json`. Keep the upstream notices with the kit, review redistribution terms, and stage the archive at the configured HTTPS origin before enabling the new pin in CI. The producer does not publish anything.
+
+The current 1.4.5 kits predate self-registration. Their compiled-in FFI hook is unused. New kits are minted from the unmodified upstream release; Windows kit producers need upstream's Visual Studio/SDK prerequisites, including ATL.
+
+To test the finished executable on its target, run `python3 scripts/ci-smoke-release.py /path/to/omp`. The probe copies the binary away from the checkout, blocks the addon cache, and exercises the main thread and a Worker.
+
+## Nix embedded-addon lifecycle (`embed-native.ts`)
 
 `compileCodingAgent` (`packages/coding-agent/scripts/compile-binary.ts`) calls `embeddedAddonFiles()` for the binary's target and hands the result to `Bun.build({ files })`. Nothing under `native/` is written; the checked-in `embedded-addon.js` stays the null stub.
 
@@ -307,7 +321,7 @@ Typical local loop:
 
 ## Shipped/compiled binary workflow
 
-In compiled mode (`PI_COMPILED`, Bun embedded URL markers, or populated embedded manifest):
+A release executable uses its linked runtime as described above. In Nix embedded mode:
 
 1. Loader computes versioned cache dir: `<getNativesDir()>/<packageVersion>`. The root is `PI_NATIVES_DIR` first (trimmed, `~`-expanded, and normalized; empty or relative values are ignored), then `$XDG_DATA_HOME/omp/natives` when `$XDG_DATA_HOME/omp` already exists, otherwise `~/.omp/natives`.
 2. If the embedded manifest matches platform+version and has a selectable file, loader decompresses all missing or wrong-sized manifest files from their embedded `<addon>.node.zst` frames into that versioned directory.
@@ -375,7 +389,7 @@ bazelisk build //:natives-darwin-arm64
 # Regenerate TS typedefs + enum exports (napi CLI, only on Rust API changes)
 bun --cwd=packages/natives run build:bindings
 
-# Compile a standalone binary embedding the host addon (CROSS_TARGET=<id> for another target)
+# Compile a standalone binary with a linked native runtime (CROSS_TARGET=<id> for another target)
 bun --cwd=packages/coding-agent run build
 ```
 

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { type AgentMessage, ASIDE_MESSAGE_COMMIT } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, ASIDE_MESSAGE_COMMIT, type CommittableAsideMessage } from "@oh-my-pi/pi-agent-core";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
+import { liveAfterGc } from "../helpers/gc";
+import { rejectionOf } from "../helpers/rejection";
 
 type Entry = {
 	id: string;
@@ -53,16 +55,19 @@ type SettlementPath = "idle commit" | "idle discard" | "lazy commit";
 
 /**
  * Delivers one receipt-tracked entry through `path`, keeping the built message in `transcript` the
- * way an agent's context keeps a delivered message, and returns a weak ref to the entry's value.
- * Kept out of the test body so no strong local binding to the value survives.
+ * way an agent's context keeps a delivered message, checks that the receipt settled as `path`
+ * requires (fulfilled on a commit, rejected with the injection's error on a discard), and returns a
+ * weak ref to the entry's value. Kept out of the test body so no strong local binding to the value
+ * survives.
  */
 async function settleOneEntry(path: SettlementPath, transcript: AgentMessage[]): Promise<WeakRef<object>> {
+	const injectionError = new Error("turn ended before insertion");
 	const scheduledFlushes: Array<() => Promise<void>> = [];
 	const queue = new YieldQueue({
 		isStreaming: () => path === "lazy commit",
 		injectIdle: async messages => {
 			transcript.push(...messages);
-			if (path === "idle discard") throw new Error("turn ended before insertion");
+			if (path === "idle discard") throw injectionError;
 		},
 		scheduleIdleFlush: run => scheduledFlushes.push(run),
 	});
@@ -70,35 +75,19 @@ async function settleOneEntry(path: SettlementPath, transcript: AgentMessage[]):
 		build: entries => userMessage(entries.map(entry => entry.id).join(",")),
 	});
 	const value: Entry = { id: `entry-${transcript.length}` };
-	const receipt = queue.enqueueWithReceipt("items", value).catch(() => {});
+	const receipt = queue.enqueueWithReceipt("items", value);
+	// Both handlers attach before delivery settles the receipt, so neither outcome goes unhandled.
+	const outcome = path === "idle discard" ? rejectionOf(receipt) : receipt.then(() => "fulfilled");
 	if (path === "lazy commit") {
-		const message = queue.drainLazy()[0]!();
+		const message: CommittableAsideMessage | null = queue.drainLazy()[0]!();
 		if (!message) throw new Error("lazy thunk built no message");
 		transcript.push(message);
-		(message as AgentMessage & { [ASIDE_MESSAGE_COMMIT]?: () => void })[ASIDE_MESSAGE_COMMIT]?.();
+		message[ASIDE_MESSAGE_COMMIT]?.();
 	} else {
 		await scheduledFlushes[0]!();
 	}
-	await receipt;
+	expect(await outcome).toBe(path === "idle discard" ? injectionError : "fulfilled");
 	return new WeakRef(value);
-}
-
-/**
- * Collects across a few event-loop turns and returns how many targets are still reachable. Bun's
- * conservative stack scan can pin the most recently dropped object in a stale native stack slot,
- * so callers settle several entries and tolerate one survivor.
- */
-async function liveAfterGc(refs: WeakRef<object>[]): Promise<number> {
-	let live = refs.length;
-	for (let turn = 0; turn < 20; turn++) {
-		Bun.gc(true);
-		live = refs.filter(ref => ref.deref() !== undefined).length;
-		if (live === 0) break;
-		// A WeakRef target stays alive until the current task ends: a zero-length sleep yields one
-		// task so the next collection can clear it (no wall-clock wait; fake timers cannot end a task).
-		await Bun.sleep(0);
-	}
-	return live;
 }
 
 /**
@@ -110,9 +99,9 @@ async function commitThenFailOneEntry(transcript: AgentMessage[], outcomes: stri
 	const scheduledFlushes: Array<() => Promise<void>> = [];
 	const queue = new YieldQueue({
 		isStreaming: () => false,
-		injectIdle: async messages => {
+		injectIdle: async (messages: CommittableAsideMessage[]) => {
 			transcript.push(...messages);
-			(messages[0] as AgentMessage & { [ASIDE_MESSAGE_COMMIT]?: () => void })[ASIDE_MESSAGE_COMMIT]?.();
+			messages[0][ASIDE_MESSAGE_COMMIT]?.();
 			throw new Error("the turn failed after the message reached the context");
 		},
 		scheduleIdleFlush: run => scheduledFlushes.push(run),
@@ -126,6 +115,37 @@ async function commitThenFailOneEntry(transcript: AgentMessage[], outcomes: stri
 		() => outcomes.push("rejected"),
 	);
 	await scheduledFlushes[0]!();
+	await receipt;
+	return new WeakRef(value);
+}
+
+/**
+ * Delivers one receipt-tracked entry through an idle flush whose injection commits the message into
+ * `transcript` and then waits on `turn`, the way the agent inserts a prompt and then runs the whole
+ * turn before `injectIdle` returns. Waits for the receipt, pushes the still-running flush onto
+ * `flushes`, and returns a weak ref to the entry's value.
+ */
+async function commitDuringTurnOneEntry(
+	transcript: AgentMessage[],
+	turn: Promise<void>,
+	flushes: Promise<void>[],
+): Promise<WeakRef<object>> {
+	const scheduledFlushes: Array<() => Promise<void>> = [];
+	const queue = new YieldQueue({
+		isStreaming: () => false,
+		injectIdle: async (messages: CommittableAsideMessage[]) => {
+			transcript.push(...messages);
+			messages[0][ASIDE_MESSAGE_COMMIT]?.();
+			await turn;
+		},
+		scheduleIdleFlush: run => scheduledFlushes.push(run),
+	});
+	queue.register<Entry>("items", {
+		build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+	});
+	const value: Entry = { id: `entry-${transcript.length}` };
+	const receipt = queue.enqueueWithReceipt("items", value);
+	flushes.push(scheduledFlushes[0]!());
 	await receipt;
 	return new WeakRef(value);
 }
@@ -377,9 +397,12 @@ describe("YieldQueue", () => {
 			const transcript: AgentMessage[] = [];
 			const refs: WeakRef<object>[] = [];
 			for (let i = 0; i < 8; i++) refs.push(await settleOneEntry(path, transcript));
-			expect(transcript).toHaveLength(8);
 			expect(await liveAfterGc(refs)).toBeLessThanOrEqual(1);
+			// Read only after the collection, so the transcript holds every message through it, as a
+			// session's context does.
+			expect(transcript).toHaveLength(8);
 		},
+		30_000,
 	);
 
 	// If this regresses, a background job's result that reached the agent's context before its idle turn
@@ -390,8 +413,59 @@ describe("YieldQueue", () => {
 		const outcomes: string[] = [];
 		const refs: WeakRef<object>[] = [];
 		for (let i = 0; i < 8; i++) refs.push(await commitThenFailOneEntry(transcript, outcomes));
-		expect(transcript).toHaveLength(8);
 		expect(outcomes).toEqual(Array.from({ length: 8 }, () => "resolved"));
 		expect(await liveAfterGc(refs)).toBeLessThanOrEqual(1);
+		// Read only after the collection, so the transcript holds every message through it, as a
+		// session's context does.
+		expect(transcript).toHaveLength(8);
+	}, 30_000);
+
+	// If this regresses, every background job an idle turn delivers stays in memory until that whole turn
+	// (its model calls and tool runs) ends, although the job's receipt resolved when the turn's prompt
+	// reached the agent's context.
+	test("a message committed while its idle turn still runs keeps none of its entries reachable", async () => {
+		const turn = Promise.withResolvers<void>();
+		const flushes: Promise<void>[] = [];
+		let flushOutcomes: PromiseSettledResult<void>[] = [];
+		try {
+			const transcript: AgentMessage[] = [];
+			const refs: WeakRef<object>[] = [];
+			for (let i = 0; i < 8; i++) refs.push(await commitDuringTurnOneEntry(transcript, turn.promise, flushes));
+			expect(await liveAfterGc(refs)).toBeLessThanOrEqual(1);
+			// Read only after the collection, so the turns are still running and the transcript holds
+			// every message through it.
+			expect(transcript).toHaveLength(8);
+		} finally {
+			// A failed check above must not leave the started flushes waiting on the turn.
+			turn.resolve();
+			flushOutcomes = await Promise.allSettled(flushes);
+		}
+		expect(flushOutcomes.filter(outcome => outcome.status === "rejected")).toEqual([]);
+	}, 30_000);
+
+	// If this regresses, a settlement hook called again after its message object was delivered a second
+	// time strips the second delivery's hooks: the agent loop's commit of that delivery finds no hook, and
+	// its receipt never settles.
+	test("a saved settlement hook called again leaves a later delivery's hooks in place", async () => {
+		const harness = createHarness(true);
+		const shared: CommittableAsideMessage = userMessage("shared");
+		harness.queue.register<Entry>("items", { build: () => shared });
+
+		const first = harness.queue.enqueueWithReceipt("items", { id: "first" });
+		expect(harness.queue.drainLazy()[0]!()).toBe(shared);
+		const staleCommit = shared[ASIDE_MESSAGE_COMMIT]!;
+		staleCommit();
+		await first;
+
+		let laterDelivered = false;
+		const later = harness.queue.enqueueWithReceipt("items", { id: "later" }).then(() => {
+			laterDelivered = true;
+		});
+		expect(harness.queue.drainLazy()[0]!()).toBe(shared);
+		staleCommit();
+		shared[ASIDE_MESSAGE_COMMIT]?.();
+		await Promise.resolve();
+		expect(laterDelivered).toBe(true);
+		await later;
 	});
 });

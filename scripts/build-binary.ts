@@ -1,43 +1,11 @@
 #!/usr/bin/env bun
 
 import * as path from "node:path";
-import { compileCodingAgent } from "./compile-binary";
+import { compileCodingAgent } from "../packages/coding-agent/scripts/compile-binary";
+import { buildLinkedRuntime, hostLinkedRuntimeTarget, resolveLinkedRuntimeTarget } from "./linked-runtime";
 
-const packageDir = path.join(import.meta.dir, "..");
-const repoRoot = path.join(packageDir, "..", "..");
-
-/** Binary cross-compilation settings selected by `CROSS_TARGET`. */
-export interface CrossBuild {
-	readonly id: string;
-	readonly platform: string;
-	readonly arch: string;
-	readonly target: Bun.Build.CompileTarget;
-}
-
-/** Resolves a CROSS_TARGET value to the Bun compile target used by local binary builds. */
-function resolveCrossBuild(value: string | undefined): CrossBuild | null {
-	switch (value) {
-		case undefined:
-		case "":
-			return null;
-		case "darwin-arm64":
-			return { id: value, platform: "darwin", arch: "arm64", target: "bun-darwin-arm64" };
-		case "darwin-x64":
-			return { id: value, platform: "darwin", arch: "x64", target: "bun-darwin-x64" };
-		case "linux-arm64":
-			return { id: value, platform: "linux", arch: "arm64", target: "bun-linux-arm64" };
-		case "linux-x64":
-			return { id: value, platform: "linux", arch: "x64", target: "bun-linux-x64-baseline" };
-		case "win32-x64":
-		case "windows-x64":
-			return { id: value, platform: "win32", arch: "x64", target: "bun-windows-x64-baseline" };
-		case "win32-arm64":
-		case "windows-arm64":
-			return { id: value, platform: "win32", arch: "arm64", target: "bun-windows-arm64" };
-		default:
-			throw new Error(`Unsupported CROSS_TARGET: ${value}`);
-	}
-}
+const repoRoot = path.join(import.meta.dir, "..");
+const packageDir = path.join(repoRoot, "packages", "coding-agent");
 
 async function runCommand(command: string[]): Promise<void> {
 	const proc = Bun.spawn(command, {
@@ -52,7 +20,12 @@ async function runCommand(command: string[]): Promise<void> {
 }
 
 async function main(): Promise<void> {
-	const crossBuild = resolveCrossBuild(Bun.env.CROSS_TARGET);
+	const crossBuild = Bun.env.CROSS_TARGET ? resolveLinkedRuntimeTarget(Bun.env.CROSS_TARGET) : null;
+	const native = crossBuild ?? hostLinkedRuntimeTarget();
+	const mode = Bun.env.OMP_COMPILED_NATIVES ?? "linked";
+	if (mode !== "linked" && mode !== "embedded") throw new Error(`Unknown OMP_COMPILED_NATIVES: ${mode}`);
+	const template = Bun.env.BUN_COMPILE_EXECUTABLE_PATH;
+	if (mode === "embedded" && !template) throw new Error("Embedded builds require BUN_COMPILE_EXECUTABLE_PATH");
 	const shouldAdhocSign =
 		process.platform === "darwin" &&
 		(!crossBuild || crossBuild.platform === "darwin") &&
@@ -70,9 +43,9 @@ async function main(): Promise<void> {
 			repoRoot,
 			entrypoint: path.join(packageDir, "src", "cli.ts"),
 			outfile: outputPath,
-			native: crossBuild ?? { platform: process.platform, arch: process.arch },
-			target: crossBuild?.target,
-			executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
+			executablePath: template ?? (await buildLinkedRuntime(native.id)),
+			target: native.target,
+			embeddedNative: mode === "embedded" ? native : undefined,
 			skipBuiltinCodesign: shouldAdhocSign,
 		});
 

@@ -121,6 +121,12 @@ impl Process {
 		kill_process_group(pgid, signal.unwrap_or(KILL_SIGNAL))
 	}
 
+	/// Signal only this process through its pinned identity.
+	#[napi]
+	pub fn signal(&self, signal: i32) -> bool {
+		self.inner.signal(signal)
+	}
+
 	/// Send `signal` to this process and its descendants, children first.
 	///
 	/// On Linux and macOS the signal is forwarded as-is. On Windows there is no

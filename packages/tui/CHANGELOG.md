@@ -10,6 +10,7 @@
 ### Added
 
 - Terminal canvas views can handle mouse clicks, motion, and wheel ticks with `onMouse` ([#20819](https://github.com/can1357/oh-my-pi/issues/20819)).
+- A picker's caret `anchor` reaches a native host with its `query` range.
 - Added `MarkdownOptions.linkUrls` and `MarkdownLook.linkUrls` to hide the URL drawn after named links whose label is an OSC 8 hyperlink ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 - `ProcessTerminalDriver.setResizeScrollback()` and `FrameWriter.setResizeScrollback()` change the resize scrollback policy of a running driver ([#20845](https://github.com/can1357/oh-my-pi/issues/20845))
 - Added opt-in fullscreen terminal rendering: a scrollable transcript above a pinned dock, a draggable scrollbar, character/word/line selection and incremental search. The normal exit can append the transcript or keep the original screen ([#2040](https://github.com/can1357/oh-my-pi/issues/2040), building on [#2103](https://github.com/can1357/oh-my-pi/pull/2103) by [@shoucandanghehe](https://github.com/shoucandanghehe) and [#20766](https://github.com/can1357/oh-my-pi/pull/20766) by [@camjac251](https://github.com/camjac251))
@@ -26,6 +27,7 @@
 
 ### Fixed
 
+- Kept a bottom-aligned inline dock on the last row when replaying changed transcript rows, replacing retired blocks, or rebuilding the normal screen after a resize. An explicit display reset still starts a fresh viewport ([#20912](https://github.com/can1357/oh-my-pi/pull/20912) by [@thebtf](https://github.com/thebtf))
 - Moving through a question's options in Tern with the arrow keys no longer scrolls the chat back to the question each time
 - Improved performance when editing large documents and updating or closing views with many reactive values.
 - Fixed pane resizing in Herdr to avoid repeated redraw loops.
@@ -40,6 +42,7 @@
 - Fixed win32 input-mode key records being inserted as literal composer text in certain timing conditions.
 - Fixed pastes on Windows Terminal arriving as raw `[Vk;Sc;Uc;…_` key records instead of the pasted text, CJK and line breaks included ([#20718](https://github.com/can1357/oh-my-pi/issues/20718))
 - Fixed SIXEL and iTerm2 images losing their bottom cell row in terminals that clear image cells on line erase, such as xterm.js ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
+- Fixed anchored SIXEL and iTerm2 images split across streaming history batches being drawn over transcript rows and the dock once their first rows scrolled off the screen ([#20915](https://github.com/can1357/oh-my-pi/pull/20915) by [@eggpeat](https://github.com/eggpeat))
 - Fixed code blocks drawn with `codeIndent: 0` putting their ``` fence rows one column right of the code; fences now sit at column 0 with it, so copying the whole block yields its markdown ([#20752](https://github.com/can1357/oh-my-pi/issues/20752))
 - Stopped trusting an inherited `TERM_FEATURES` sync hint inside tmux/screen panes, which caused top-to-bottom redraw flashes while streaming in an inactive tmux 3.6 pane ([#20091](https://github.com/can1357/oh-my-pi/issues/20091))
 - Enabled kitty Unicode placeholder image rendering by default in Rex ([#19830](https://github.com/can1357/oh-my-pi/issues/19830))

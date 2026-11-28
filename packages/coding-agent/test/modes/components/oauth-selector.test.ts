@@ -1,5 +1,7 @@
-import { afterAll, afterEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, spyOn } from "bun:test";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
+import * as authRules from "@oh-my-pi/pi-catalog/compat/auth";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { OAuthSelector, type OAuthSelectorAuthSource } from "../../../src/ui/overlays/pickers/oauth-selector";
 import { mountOverlay } from "../../helpers/overlay-terminal";
@@ -70,6 +72,66 @@ describe("OAuth selector", () => {
 		expect(rendered).toContain(target.name);
 		expect(rendered).toContain(target.id);
 		expect(selected).toEqual([target.id]);
+	});
+
+	it.each([false, true])("groups sign-in methods and labels the linked account (linked=%s)", linked => {
+		const subscription = "example-subscription";
+		const connectedName = "Example subscription";
+		const signInName = "Sign in to Example";
+		const keyId = "example-key";
+		const keyName = "Example API key";
+		const group = { title: "Example", label: "Example (subscription or API key)" };
+		const providers: OAuthProviderInfo[] = [
+			{ id: keyId, name: keyName, available: true, loginGroup: { ...group, order: 2 } },
+			{ id: subscription, name: signInName, available: true, loginGroup: { ...group, order: 1 } },
+			...Array.from({ length: 10 }, (_, i) => ({ id: `vendor-${i}`, name: `Vendor ${i}`, available: true })),
+		];
+		const auth: OAuthSelectorAuthSource = {
+			credentials: { has: id => linked && id === subscription },
+			keys: {
+				source: id => (linked && id === subscription ? { kind: "oauth", concrete: true } : undefined),
+			},
+		};
+		const connected = spyOn(authRules, "providerConnectedName").mockImplementation(id =>
+			id === subscription ? connectedName : undefined,
+		);
+		const selected: string[] = [];
+		let cancelled = false;
+		const term = mountOverlay(
+			() =>
+				OAuthSelector({
+					mode: "login",
+					auth,
+					providers,
+					onSelect: id => selected.push(id),
+					onCancel: () => {
+						cancelled = true;
+					},
+				}),
+			{ columns: 80 },
+		);
+		try {
+			term.type(subscription);
+			expect(term.screen().join("\n")).toContain(group.label);
+			term.press("enter");
+			const menu = term.screen().join("\n");
+			const label = linked ? connectedName : signInName;
+			expect(menu.indexOf(label)).toBeGreaterThanOrEqual(0);
+			expect(menu.indexOf(keyName)).toBeGreaterThan(menu.indexOf(label));
+			expect(menu.includes("logged in")).toBe(linked);
+			expect(selected).toEqual([]);
+			term.press("escape");
+			expect(cancelled).toBe(false);
+			expect(term.screen().join("\n")).toContain(`Search: ${subscription}`);
+			term.press("enter");
+			term.press("enter");
+			term.press("down");
+			term.press("enter");
+			expect(selected).toEqual([subscription, keyId]);
+		} finally {
+			term.dispose();
+			connected.mockRestore();
+		}
 	});
 
 	it("does not offer env-only providers as logout targets", () => {

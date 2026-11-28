@@ -1259,8 +1259,20 @@ pub unsafe extern "C" fn napi_register_module_v1(
     target_env = "msvc",
     all(not(target_family = "wasm"), feature = "dyn-symbols")
   ))]
-  unsafe {
-    sys::setup();
+  {
+    // Static constructors register Rust callbacks only. Resolve N-API after
+    // Bun has entered a VM, never from a DLL notification or a CRT initializer.
+    // setup writes a process-global table: two worker VMs must not race those
+    // writes, and the host Library must outlive every callback in the image.
+    #[cfg(omp_linked_natives)]
+    {
+      static LOAD: std::sync::Once = std::sync::Once::new();
+      LOAD.call_once(|| std::mem::forget(unsafe { sys::setup() }));
+    }
+    #[cfg(not(omp_linked_natives))]
+    unsafe {
+      sys::setup();
+    }
   }
   // A disposal that began and was never finished (a host that walked away between the phases)
   // must not make the new environment's first `begin` a no-op, leave it dispatching into a

@@ -153,7 +153,7 @@ export function validateLoadedBindings(
 
 /** Identity of the addon `loadNative()` returned, for missing-export diagnostics. */
 export interface NativeAddonStatus {
-	/** Absolute path of the loaded `.node`. */
+	/** Absolute path of the image providing the bindings: the executable or a separately loaded `.node`. */
 	path: string;
 	/** Release the loaded addon reports (post-link stamp or legacy sentinel), or `null` when unidentified. */
 	version: string | null;
