@@ -20,6 +20,7 @@ import type { InteractiveModeContext, PendingTool } from "@oh-my-pi/pi-coding-ag
 import { isSettled } from "@oh-my-pi/pi-tui";
 import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { TranscriptPresenter } from "../../../src/modes/interactive/transcript";
 import { initTheme } from "../../../src/ui/theme/service";
 import { blockText, transcriptText } from "../../helpers/transcript-text";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -274,17 +275,122 @@ describe("EventController async update finalization", () => {
 		}
 	});
 
-	it("finalizes a backgrounded Bash block without tracking later job updates", async () => {
-		const { controller, pendingTools } = createFixture();
+	const jobFrame = (partialResult: BashFrame) => ({
+		type: "tool_execution_update" as const,
+		toolCallId: "tc-bash",
+		toolName: "bash",
+		args: {},
+		partialResult,
+	});
+
+	it("updates backgrounded Bash until a card row, not just its separator, enters scrollback", async () => {
+		const { controller, ctx } = createFixture();
+		const columns = 100;
+		ctx.presentAssistant(createAssistantMessage("Earlier assistant reply.")).finalized.set(true);
+		const transcript = ctx.shell.transcript;
+		const term = createTestTerminal(() => ({ main: transcript.nodes }), { columns, rows: 40 });
+		let replays = 0;
+		transcript.attach({
+			retired: node => term.backend.retired(node),
+			contentInHistory: node => term.backend.contentInHistory(node),
+			replayHistory: () => replays++,
+			redescribe: () => {},
+		});
+		try {
+			const earlierRows = term.rows().length;
+			await controller.handleEvent({
+				type: "tool_execution_start",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				args: { command: "run benchmark" },
+			});
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				result: bashResult(formatBackgroundNotice("bash-1", 300)),
+				isError: false,
+			});
+			await controller.handleEvent(jobFrame(bashResult("First sample")));
+			term.render();
+			expect(term.screen().join("\n")).toContain("First sample");
+			expect(term.history()).toEqual([]);
+
+			const cardRows = term.rows().length - earlierRows - 1;
+			term.resize(columns, cardRows);
+			expect(term.history()).toHaveLength(earlierRows + 1);
+			expect(term.history().at(-1)).toBe("");
+			await controller.handleEvent(jobFrame(bashResult("Second sample")));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Second sample");
+
+			const firstCardRow = term.rows()[0];
+			term.resize(columns, cardRows - 1);
+			expect(term.history().at(-1)).toBe(firstCardRow);
+			expect(term.screen().join("\n")).toContain("Second sample");
+			await controller.handleEvent(jobFrame(bashResult("Off-screen sample")));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Second sample");
+			expect(term.screen().join("\n")).not.toContain("Off-screen sample");
+			expect(term.history()).toHaveLength(earlierRows + 2);
+
+			// A rebuild drops the card's rows from scrollback (history is replayed), so it draws the
+			// job's latest frame, the one the frozen card dropped, and follows the job again.
+			const call: AssistantMessage = {
+				...createAssistantMessage(""),
+				stopReason: "toolUse",
+				content: [{ type: "toolCall", id: "tc-bash", name: "bash", arguments: { command: "run benchmark" } }],
+			};
+			const result: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				...bashResult(formatBackgroundNotice("bash-1", 300)),
+				isError: false,
+				timestamp: call.timestamp + 1,
+			};
+			ctx.eventController = controller;
+			ctx.viewSession.activeToolExecutionUpdates = () => [jobFrame(bashResult("Off-screen sample"))];
+			const helpers = new UiHelpers(ctx);
+			ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+			// What `InteractiveMode.rebuildChatFromMessages` does when no call is live.
+			transcript.retain(new Set());
+			expect(replays).toBe(1);
+			helpers.renderSessionContext({ messages: [call, result] } as SessionContext);
+			const rebuiltCard = ctx.pendingTools.get("tc-bash")!;
+			term.render();
+			expect(term.history()).toEqual([]);
+			expect(term.screen().join("\n")).toContain("Off-screen sample");
+			expect(term.screen().join("\n")).not.toContain("Second sample");
+
+			// The rebuilt card follows the job again, and freezes again once its content scrolls off.
+			await controller.handleEvent(jobFrame(bashResult("Sample after rebuild")));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Sample after rebuild");
+			expect(term.backend.contentInHistory(rebuiltCard.block.node)).toBe(true);
+			await controller.handleEvent(jobFrame(bashResult("Dropped after rebuild", "completed", 0)));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Sample after rebuild");
+			expect(term.screen().join("\n")).not.toContain("Dropped after rebuild");
+		} finally {
+			transcript.attach(undefined);
+			term.dispose();
+		}
+	});
+
+	it("reports plain-terminal background job results to presenters as final, as omp's own card draws them", async () => {
+		const { controller } = createFixture();
+		const asked = vi.spyOn(TranscriptPresenter.prototype, "presentationOf");
+		const lastPartial = (text: string) =>
+			asked.mock.calls
+				.flatMap(([block]) => (block.type === "toolCall" ? [block] : []))
+				.findLast(block => JSON.stringify(block.result?.content).includes(text))?.isPartial;
 		await controller.handleEvent({
 			type: "tool_execution_start",
 			toolCallId: "tc-bash",
 			toolName: "bash",
-			args: { command: "sleep 30" },
+			args: { command: "run benchmark" },
 		});
-		const component = pendingTools.get("tc-bash")!;
-		sealed.push(component);
-
 		await controller.handleEvent({
 			type: "tool_execution_end",
 			toolCallId: "tc-bash",
@@ -292,9 +398,29 @@ describe("EventController async update finalization", () => {
 			result: bashResult(formatBackgroundNotice("bash-1", 300)),
 			isError: false,
 		});
+		// A viewport-only Bash card draws its frames as static results; reporting them partial would flip
+		// the presentation when the card freezes in scrollback and rewrite rows history already holds.
+		await controller.handleEvent(jobFrame(bashResult("Running sample")));
+		expect(lastPartial("Running sample")).toBe(false);
 
-		expect(pendingTools.has("tc-bash")).toBe(false);
-		expect(isSettled(component.block.node)).toBe(true);
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-eval",
+			toolName: "eval",
+			args: { language: "py", code: "run()" },
+		});
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-eval",
+			toolName: "eval",
+			result: {
+				content: [{ type: "text", text: "Eval backgrounded" }],
+				details: { async: { state: "running", jobId: "eval-1", type: "eval" } },
+			},
+			isError: false,
+		});
+		// A plain-terminal eval card takes no job frames: its running result is all it will show.
+		expect(lastPartial("Eval backgrounded")).toBe(false);
 	});
 
 	describe("native rendering", () => {
@@ -316,14 +442,6 @@ describe("EventController async update finalization", () => {
 			sealed.push(component);
 			return component;
 		}
-
-		const jobFrame = (partialResult: BashFrame) => ({
-			type: "tool_execution_update" as const,
-			toolCallId: "tc-bash",
-			toolName: "bash",
-			args: {},
-			partialResult,
-		});
 
 		const rendered = (component: PendingTool) => blockText(component.block);
 
@@ -361,7 +479,7 @@ describe("EventController async update finalization", () => {
 				result: bashResult(formatBackgroundNotice("bash-1", 300)),
 				isError: false,
 			});
-			await controller.handleEvent(jobFrame(bashResult("[Command cancelled]\nBenchmark 1", "cancelled")));
+			await controller.handleEvent(jobFrame(bashResult("[cancelled]\nBenchmark 1", "cancelled")));
 
 			expect(rendered(component)).toContain("Benchmark 1");
 			expect(component.call?.status()).toBe("cancelled");

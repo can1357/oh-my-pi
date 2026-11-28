@@ -138,10 +138,11 @@ impl Spawn {
 		}
 	}
 
-	/// obash invoked as `name` (`zsh`, `bash`, `sh`).
+	/// obash invoked as `name` (`zsh`, `bash`, `sh`), without pi's extras:
+	/// its commands come from `PATH`, as the real shell's do.
 	#[must_use]
 	pub fn obash_as(name: &str) -> Self {
-		Self::new(obash()).argv0(name)
+		Self::new(obash()).argv0(name).arg("--no-extras")
 	}
 
 	/// obash invoked as `zsh`.
@@ -602,6 +603,13 @@ impl Pty {
 	/// When an answer to the program cannot be written.
 	pub fn screen(&mut self) -> &Screen {
 		self.pump().expect("answering the terminal");
+		&self.screen
+	}
+
+	/// The screen as the last wait or [`Self::screen`] left it, without the
+	/// output that came since.
+	#[must_use]
+	pub const fn last_screen(&self) -> &Screen {
 		&self.screen
 	}
 

@@ -4,8 +4,22 @@
 
 ### Fixed
 
-- Fixed tool definitions sent to providers carrying each tool's host state (such as its session), which made auth-gateway requests megabytes large
-- Fixed OpenTelemetry chat spans reporting the requested model as `gen_ai.response.model` when the provider recorded the model that actually served the turn ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
+- Fixed turn-end hooks being unable to tell which tool calls named no tool: `AgentTurnEndContext.unresolvedToolCallIds` now lists them ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
+- Fixed `generateHandoffFromContext` sending no output limit, so a server without its own limit could stream a handoff forever; the request is now capped at `MAX_SUMMARY_TOKENS` and ends as an incomplete-output failure ([#18031](https://github.com/can1357/oh-my-pi/issues/18031))
+- Reduced the size of authentication-gateway requests by preventing tool definitions from including internal host state.
+- Corrected OpenTelemetry chat spans to report the model that actually served the response.
+- Fixed shake replacing tool results smaller than its recovery placeholder, which grew context instead of shrinking it ([#7204](https://github.com/can1357/oh-my-pi/issues/7204))
+- Fixed the context figure that the status line and compaction read leaving out `$` Python output, `@file` mentions and a `!` command's terminal images, and counting `!!` output that no request carries ([#20834](https://github.com/can1357/oh-my-pi/pull/20834) by [@sjawhar](https://github.com/sjawhar))
+- Fixed token counting throwing on a stored custom message whose content is neither text nor blocks ([#20834](https://github.com/can1357/oh-my-pi/pull/20834) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a failed split-turn compaction leaving its other summary request running after the failure was reported ([#20713](https://github.com/can1357/oh-my-pi/pull/20713) by [@sjawhar](https://github.com/sjawhar))
+
+### Added
+
+- Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
+
+### Changed
+
+- `resolveThresholdTokens()` caps the reserve-based default trigger at `DEFAULT_THRESHOLD_CEILING_TOKENS` (690,000), so 1M-class windows compact at 690K instead of 85% of the window; a configured percentage, fixed trigger, or `baseWindowTokens` is not capped
 
 ## [19.2.1] - 2026-11-25
 

@@ -246,6 +246,214 @@ mod tests {
 
 	use super::*;
 
+	const EDGE_GLYPHS: &str = "─│┌┐└┘├┤┬┴┼▲▼◄►┄┆";
+
+	/// Rendered art as display cells; a wide glyph's second cell is `'\0'`.
+	fn cells(art: &str) -> Vec<Vec<char>> {
+		art.lines()
+			.map(|line| {
+				let mut row = Vec::new();
+				for c in line.chars() {
+					row.push(c);
+					if text::char_width(c) == 2 {
+						row.push('\0');
+					}
+				}
+				row
+			})
+			.collect()
+	}
+
+	/// `(top, left, bottom, right)` border cells of the box whose text starts
+	/// with `prefix`.
+	fn node_box(grid: &[Vec<char>], prefix: &str) -> Option<(usize, usize, usize, usize)> {
+		let prefix: Vec<char> = cells(prefix).remove(0);
+		let (row, col) = grid.iter().enumerate().find_map(|(r, line)| {
+			line
+				.windows(prefix.len())
+				.position(|window| window == prefix.as_slice())
+				.map(|c| (r, c))
+		})?;
+		let line = &grid[row];
+		let left = (0..col).rev().find(|&c| "│├┤".contains(line[c]))?;
+		let right = (col..line.len()).find(|&c| "│├┤".contains(line[c]))?;
+		let top = (0..row).rev().find(|&r| grid[r].get(left) == Some(&'┌'))?;
+		let bottom = (row..grid.len()).find(|&r| grid[r].get(left) == Some(&'└'))?;
+		Some((top, left, bottom, right))
+	}
+
+	/// Check that the box of the node whose text starts with `prefix` has whole
+	/// borders (tees only where an edge leaves or meets it from outside) and
+	/// holds `label` intact and no edge glyph; return the arrowheads pointing
+	/// into it.
+	fn assert_clean_box(art: &str, prefix: &str, label: &str) -> usize {
+		let grid = cells(art);
+		let (top, left, bottom, right) =
+			node_box(&grid, prefix).unwrap_or_else(|| panic!("no box for {prefix}:\n{art}"));
+		let at = |r: usize, c: usize| grid.get(r).and_then(|line| line.get(c)).copied();
+		let corners = [at(top, left), at(top, right), at(bottom, left), at(bottom, right)];
+		assert_eq!(corners, [Some('┌'), Some('┐'), Some('└'), Some('┘')], "{prefix} corners:\n{art}");
+		for c in left + 1..right {
+			assert!("─┴".contains(at(top, c).unwrap()), "{prefix} top border:\n{art}");
+			assert!("─┬".contains(at(bottom, c).unwrap()), "{prefix} bottom border:\n{art}");
+		}
+		let mut inside = String::new();
+		for r in top + 1..bottom {
+			assert!("│┤".contains(at(r, left).unwrap()), "{prefix} left wall:\n{art}");
+			assert!("│├".contains(at(r, right).unwrap()), "{prefix} right wall:\n{art}");
+			for c in left + 1..right {
+				let cell = at(r, c).unwrap();
+				assert!(!EDGE_GLYPHS.contains(cell), "edge glyph inside {prefix}:\n{art}");
+				inside.push(cell);
+			}
+		}
+		let squash = |s: &str| {
+			s.replace("<br/>", "")
+				.chars()
+				.filter(|c| !c.is_whitespace() && *c != '\0')
+				.collect::<String>()
+		};
+		assert_eq!(squash(&inside), squash(label), "{prefix} label:\n{art}");
+		let mut arrowheads = 0;
+		for c in left + 1..right {
+			arrowheads += usize::from(top > 0 && at(top - 1, c) == Some('▼'));
+			arrowheads += usize::from(at(bottom + 1, c) == Some('▲'));
+		}
+		for r in top + 1..bottom {
+			arrowheads += usize::from(left > 0 && at(r, left - 1) == Some('►'));
+			arrowheads += usize::from(at(r, right + 1) == Some('◄'));
+		}
+		arrowheads
+	}
+
+	/// Two back edges into a top-rank node of a graph that also fans out:
+	/// neither may cut through the nodes or merge into the other, and each
+	/// ends in its own arrowhead (top-down and left-to-right).
+	#[test]
+	fn back_edges_route_around_nodes_into_their_own_arrowheads() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let nodes = ["judge", "ladder", "more", "stop", "confirm", "next"];
+		let source = "flowchart TD\nG[judge] --> L[ladder]\nG --> M[more]\nG --> S[stop]\nL --> \
+		              C[confirm]\nL --> M\nM --> G\nC --> N[next]\nN --> G";
+		for direction in ["TD", "LR"] {
+			let art = render(&source.replacen("TD", direction, 1), &options).unwrap();
+			for label in nodes {
+				let arrowheads = assert_clean_box(&art, label, label);
+				if label == "judge" {
+					assert_eq!(arrowheads, 2, "{direction}: an edge into judge has no arrowhead\n{art}");
+				}
+			}
+		}
+	}
+
+	/// Wide CJK node text, multi-line nodes and long edge labels.
+	#[test]
+	fn labeled_back_edges_keep_node_text_and_edge_labels_intact() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let source = "flowchart TD
+  G[一次レビューの判定 10:30] -->|承認 ≥ 2 かつ未解決 = 0 かつ差分 ≤ +400| L[本番版と検証版の比較 \
+		              1,024件]
+  G -->|1 ≤ 承認 < 2| M[同じ環境でテストを追加<br/>夜間ジョブで数千〜一万件]
+  G -->|承認 < 1| S[α版は直す余地が少ない<br/>リリースを止めて報告・別の案を検討]
+  L -->|差分が誤差ではない かつ 本番版が劣らない| C[最適な設定で確認<br/>検証環境の結果と build \
+		              v512 に]
+  L -->|届かない| M
+  M --> G
+  C --> N[採用した版を次の基準にして 2 回目のレビュー]
+  N --> G";
+		let nodes = [
+			("一次レ", "一次レビューの判定 10:30"),
+			("本番版と", "本番版と検証版の比較 1,024件"),
+			("同じ環", "同じ環境でテストを追加<br/>夜間ジョブで数千〜一万件"),
+			("α版", "α版は直す余地が少ない<br/>リリースを止めて報告・別の案を検討"),
+			("最適な", "最適な設定で確認<br/>検証環境の結果と build v512 に"),
+			("採用し", "採用した版を次の基準にして 2 回目のレビュー"),
+		];
+		let edge_labels = [
+			"承認 ≥ 2 かつ未解決 = 0 かつ差分 ≤ +400",
+			"1 ≤ 承認 < 2",
+			"承認 < 1",
+			"差分が誤差ではない かつ 本番版が劣らない",
+			"届かない",
+		];
+		for direction in ["TD", "LR"] {
+			let art = render(&source.replacen("TD", direction, 1), &options).unwrap();
+			for (prefix, label) in nodes {
+				let arrowheads = assert_clean_box(&art, prefix, label);
+				if prefix == "一次レ" {
+					assert_eq!(arrowheads, 2, "{direction}: a back edge has no arrowhead\n{art}");
+				}
+			}
+			for label in edge_labels {
+				assert!(art.contains(label), "{direction}: {label} overwritten\n{art}");
+			}
+		}
+	}
+
+	/// A back edge whose source also has a forward edge must leave the
+	/// source's fan-out bundle, which can only enter a target from above.
+	#[test]
+	fn back_edge_leaves_its_sources_fan_out() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art = render("flowchart TD\nA --> B\nB --> C\nB --> A", &options).unwrap();
+		assert_eq!(assert_clean_box(&art, "A", "A"), 1, "{art}");
+		assert_eq!(assert_clean_box(&art, "B", "B"), 1, "{art}");
+		assert_eq!(assert_clean_box(&art, "C", "C"), 1, "{art}");
+	}
+
+	/// Two back edges into a top node stay unbundled, yet the source with
+	/// forward edges still fans them out through one exit, apart from its back
+	/// edge.
+	#[test]
+	fn fan_out_stays_apart_from_its_sources_back_edge() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art =
+			render("flowchart TD\nA --> B\nB --> C\nC --> D\nC --> E\nB --> A\nC --> A", &options)
+				.unwrap();
+		assert_eq!(assert_clean_box(&art, "A", "A"), 2, "{art}");
+		assert_eq!(assert_clean_box(&art, "D", "D"), 1, "{art}");
+		assert_eq!(assert_clean_box(&art, "E", "E"), 1, "{art}");
+		assert_clean_box(&art, "C", "C");
+		let grid = cells(&art);
+		let (top, left, bottom, right) = node_box(&grid, "C").unwrap();
+		let at = |r: usize, c: usize| grid.get(r).and_then(|line| line.get(c)).copied();
+		let (exit, start, step) = (top + 1..bottom)
+			.flat_map(|r| [(r, right + 1, 1), (r, left.wrapping_sub(1), -1)])
+			.find(|&(r, c, _)| at(r, c) == Some('─'))
+			.unwrap();
+		let mut c = start;
+		while at(exit, c) == Some('─') {
+			c = c.wrapping_add_signed(step);
+		}
+		assert!(
+			matches!(at(exit, c), Some('┘' | '┐' | '└' | '┌')),
+			"back edge from C shares its line:\n{art}"
+		);
+		let column = (left + 1..right)
+			.find(|&c| at(bottom + 1, c) == Some('│'))
+			.unwrap();
+		let mut r = bottom + 1;
+		while at(r, column) == Some('│') {
+			r += 1;
+		}
+		assert!(
+			matches!(at(r, column), Some('├' | '┤' | '┴' | '┼')),
+			"no shared exit below C:\n{art}"
+		);
+	}
+
+	/// Edges inside a left-to-right subgraph on the top row of a top-down
+	/// graph all end on row zero, so they cannot be bundled either.
+	#[test]
+	fn top_row_edges_in_a_sideways_subgraph_stay_out_of_bundles() {
+		let options = RenderOptions { color_mode: Some(ColorMode::None), ..RenderOptions::default() };
+		let art =
+			render("flowchart TD\nsubgraph S\ndirection LR\nA --> C\nB --> C\nend", &options).unwrap();
+		assert_clean_box(&art, "A", "A");
+		assert_clean_box(&art, "B", "B");
+		assert_eq!(assert_clean_box(&art, "C", "C"), 2, "{art}");
+	}
+
 	#[test]
 	fn bundled_edges_stay_aligned_with_mixed_width_borders() {
 		let source = "graph TD\nA --> B[Order Service]\nA --> C\nB --> D[[Queue]]\nB --> E\nD --> E";

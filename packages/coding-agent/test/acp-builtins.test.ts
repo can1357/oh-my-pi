@@ -12,7 +12,7 @@ import type {
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { PluginManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
 import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
-import type { AgentSession, AsyncJobTree } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession, AsyncJobTree, SessionStats } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionDumpArchive } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -41,8 +41,10 @@ interface FakeAcpBuiltinSession {
 	setFastMode(enabled: boolean): boolean;
 	isFastModeEnabled(): boolean;
 	isUltrafastModeEnabled(): boolean;
+	getEvalPreludes(): [];
 	setForcedToolChoice(toolName: string): void;
 	fetchUsageReports?: () => Promise<unknown>;
+	getSessionStats: () => Pick<SessionStats, "aiu">;
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
 	getAsyncJobTree: () => AsyncJobTree | null;
 	requestJobCaptions: () => void;
@@ -79,6 +81,7 @@ interface FakeAcpBuiltinSession {
 	modelRegistry: {
 		getAll(): Array<{ provider: string; id: string; contextWindow?: number }>;
 		getAvailable(): Array<{ provider: string; id: string; contextWindow?: number }>;
+		awaitBackgroundRefresh(): Promise<void>;
 	};
 	setModel(model: unknown): Promise<void>;
 	setModelTemporary(model: unknown, thinkingLevel?: string): Promise<void>;
@@ -123,6 +126,9 @@ function createRuntime() {
 		},
 		isUltrafastModeEnabled() {
 			return false;
+		},
+		getEvalPreludes() {
+			return [];
 		},
 		setForcedToolChoice(toolName: string) {
 			this.forcedToolChoice = toolName;
@@ -187,9 +193,11 @@ function createRuntime() {
 		modelRegistry: {
 			getAll: () => session.getAvailableModels(),
 			getAvailable: () => session.getAvailableModels(),
+			awaitBackgroundRefresh: async () => {},
 		},
 		async setModel(_model: unknown) {},
 		async setModelTemporary(_model: unknown, _thinkingLevel?: string) {},
+		getSessionStats: () => ({}),
 	};
 	const typedSession = session as unknown as AgentSession & FakeAcpBuiltinSession;
 	const fakeSessionManager = {
@@ -277,13 +285,29 @@ function createRuntime() {
 }
 
 describe("ACP builtin slash commands", () => {
-	it("consumes fast status without returning prompt text", async () => {
+	it("includes mode status alongside session identity in /session info", async () => {
 		const { output, runtime } = createRuntime();
 
-		const result = await executeAcpBuiltinSlashCommand("/fast status", runtime);
+		await executeAcpBuiltinSlashCommand("/session info", runtime);
 
-		expect(result).toEqual({ consumed: true });
-		expect(output).toEqual(["Fast mode is off."]);
+		expect(output[0]).toContain("Session: fake-session-id");
+		expect(output[0]).toContain("Fast tier: off");
+		expect(output[0]).toContain("Computer use: disabled");
+	});
+
+	it("reports that /reload-plugins leaves extension hooks and tools for a restart", async () => {
+		const { output, runtime } = createRuntime();
+		let reloads = 0;
+		runtime.reloadPlugins = async () => {
+			reloads++;
+		};
+
+		expect(await executeAcpBuiltinSlashCommand("/reload-plugins", runtime)).toEqual({ consumed: true });
+
+		expect(reloads).toBe(1);
+		expect(output).toEqual([
+			"Reloaded plugin skills and slash commands. Extension hooks and tools are unchanged; restart omp to apply their changes.",
+		]);
 	});
 
 	it("toggles extended context with explicit controls and reports state", async () => {
@@ -315,7 +339,7 @@ describe("ACP builtin slash commands", () => {
 	});
 
 	it("renders provider usage reports when the session can fetch them", async () => {
-		const { output, runtime } = createRuntime();
+		const { output, runtime, session } = createRuntime();
 		runtime.session.fetchUsageReports = async () => [
 			{
 				provider: "openai-codex",
@@ -332,6 +356,7 @@ describe("ACP builtin slash commands", () => {
 				metadata: { email: "user@example.com" },
 			},
 		];
+		session.getSessionStats = () => ({ aiu: { nano: 1_250_000_000, unknownCalls: 1 } });
 
 		const result = await executeAcpBuiltinSlashCommand("/usage", runtime);
 
@@ -340,6 +365,8 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("5 hours (prolite)");
 		expect(output[0]).toContain("user@example.com: 0.24 unknown used (76.0% left)");
 		expect(output[0]).toContain("resets in");
+		// The session's own spend follows the provider quota, as a lower bound when a call missed its frame.
+		expect(output[0]).toContain("Session spend\nAI credits (reported): 1.2500+\nCalls without billing frame: 1");
 	});
 
 	it("suppresses redundant usage window suffixes while retaining legitimate ones", async () => {

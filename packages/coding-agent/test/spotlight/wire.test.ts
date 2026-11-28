@@ -717,7 +717,7 @@ describe("spotlight column-capped output", () => {
 		const artifactId = await manager.saveArtifact(FULL);
 		if (artifactId === undefined) throw new Error("the in-memory session keeps artifacts");
 		// The sink puts its timeout notice above the preview; the artifact holds only what the command printed.
-		const preview = `[Command timed out after 1 seconds]\n${FULL.slice(0, 768)}…`;
+		const preview = `[timed out after 1s]\n${FULL.slice(0, 768)}…`;
 		const timedOut: bashExecutor.BashResult = {
 			...bashOutput(preview),
 			exitCode: undefined,
@@ -734,7 +734,7 @@ describe("spotlight column-capped output", () => {
 
 		expect(result.details?.spotlight?.inChars).toBe(FULL.length);
 		expect(result.isError).toBe(true);
-		expect(resultText(result).match(/\[Command timed out after 1 seconds\]/g)).toHaveLength(1);
+		expect(resultText(result).match(/\[timed out after 1s\]/g)).toHaveLength(1);
 	});
 });
 
@@ -970,6 +970,17 @@ describe("spotlight shaping of any tool", () => {
 			plainTokens: countTokens(plainText),
 		});
 		expect(trace?.savedTokens).toBe((trace?.plainTokens ?? 0) - (trace?.outTokens ?? 0));
+	});
+
+	it("gives a session without an active read the whole result, since it could not read a cut's hidden lines back", async () => {
+		const run = await experimentSession(ranked());
+		run.session.isToolActive = name => name !== "read";
+
+		const result = await agentCall(fakeTool("grep", OUTPUT), run, "g1", ARGS);
+
+		expect(resultText(result)).toBe(OUTPUT);
+		expect(spotlightDetails(result.details)).toBeUndefined();
+		expect(entries(run.manager, SPOTLIGHT_ENTRY.shape)).toEqual([]);
 	});
 
 	it("gives a held-out cut the wrapper's text and traces the would-be cut", async () => {

@@ -12,6 +12,9 @@ export interface PromptFormatOptions {
 	normalizeRfc2119?: boolean;
 }
 
+// Only an ordered list starting at 1 can interrupt a paragraph in Markdown.
+const LIST_START = /^[ \t]*(?:[-+*]|1[.)])[ \t]+\S/;
+
 // Opening XML tag (not self-closing, not closing)
 const OPENING_XML = /^<([a-z_-]+)(?:\s+[^>]*)?>$/;
 
@@ -330,7 +333,15 @@ function formatLines<A extends AtomicLine = never>(
 				i = j - 1;
 				continue;
 			}
-			if (n === 0 || result[n - 1] === "") {
+			const previous = result[n - 1];
+			if (n === 0 || previous === "") continue;
+			if (
+				isPreRender &&
+				typeof previous === "string" &&
+				previous.endsWith(":") &&
+				typeof next === "string" &&
+				(LIST_START.test(next) || isFenceLine(next, lineIndent(next)))
+			) {
 				continue;
 			}
 		}

@@ -3,8 +3,13 @@ import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
-import { forEachInSlices, readModelCache, writeModelCacheAsync } from "./model-cache";
-import { getBundledModelSlice, isBundledModelSlice } from "./models";
+import { type CacheEntry, forEachInSlices, readCacheForHeaderRestore, writeModelCacheAsync } from "./model-cache";
+import {
+	getBundledModelSlice,
+	getBundledModelSliceHash,
+	getBundledProviderModelHash,
+	isBundledModelSlice,
+} from "./models";
 import { TimeBasedCostShape } from "./pricing";
 import { type Api, type Model, modelKind, type ModelSpec, type Provider } from "./types";
 import { isRecord } from "./utils";
@@ -146,7 +151,7 @@ export function createModelManager<TApi extends Api = Api, TModelsDevPayload = u
 ): ModelManager<TApi> {
 	return {
 		refresh(strategy: ModelRefreshStrategy = "online-if-uncached", signal?: AbortSignal) {
-			return resolveProviderModels(options, strategy, signal);
+			return resolveProviderModels(options, strategy, undefined, signal);
 		},
 	};
 }
@@ -164,10 +169,13 @@ function isBuiltModel<TApi extends Api>(value: ModelSpec<TApi> | Model<TApi>): v
  * Materialize caller-provided raw static specs while preserving explicitly
  * prebuilt override rows. Cache and bundled rows use separate trusted paths.
  */
-function materializeStaticModels<TApi extends Api>(value: readonly (ModelSpec<TApi> | Model<TApi>)[]): Model<TApi>[] {
+function materializeStaticModels<TApi extends Api>(
+	value: readonly (ModelSpec<TApi> | Model<TApi>)[],
+): readonly Model<TApi>[] {
 	if (!Array.isArray(value)) {
 		return [];
 	}
+	if (isBundledModelSlice(value)) return value as readonly Model<TApi>[];
 	const out: Model<TApi>[] = [];
 	for (let index = 0; index < value.length; index++) {
 		const item: ModelSpec<TApi> | Model<TApi> = value[index];
@@ -177,7 +185,7 @@ function materializeStaticModels<TApi extends Api>(value: readonly (ModelSpec<TA
 	return out;
 }
 interface CachedHeaderRestoreResult<TApi extends Api> {
-	models: Model<TApi>[];
+	models: readonly Model<TApi>[];
 	unresolvedModelIds: ReadonlySet<string>;
 }
 
@@ -203,14 +211,14 @@ function restoreCachedModelHeaders<TApi extends Api>(
 	restoreCachedHeaders: ModelManagerOptions<TApi>["restoreCachedHeaders"],
 ): CachedHeaderRestoreResult<TApi> {
 	if (headerOmittedModelIds.length === 0) {
-		return { models: [...cachedModels], unresolvedModelIds: new Set() };
+		return { models: cachedModels, unresolvedModelIds: new Set() };
 	}
 	const omittedIds = new Set(headerOmittedModelIds);
 	const unrestorableIds = new Set(unrestorableHeaderModelIds);
 	const staticById = new Map(staticModels.map(model => [model.id, model]));
 	const unresolvedModelIds = new Set<string>();
-	const restored = cachedModels.map(model => {
-		if (!omittedIds.has(model.id)) return model;
+	for (const model of cachedModels) {
+		if (!omittedIds.has(model.id)) continue;
 		const unrestorable = unrestorableIds.has(model.id);
 		// Current unrestorable markers prove that neither same-id nor request-model
 		// static headers matched the live model. Only the old id-only writer's
@@ -226,16 +234,22 @@ function restoreCachedModelHeaders<TApi extends Api>(
 			// model with no bundled entry). Reattach the constant by value instead
 			// of dropping the model on this offline read.
 			if (!unrestorable && restorableHeaderFallback) {
-				return { ...model, headers: { ...restorableHeaderFallback } };
+				model.headers = { ...restorableHeaderFallback };
+				continue;
 			}
 			const configured = restoreCachedHeaders?.(model);
-			if (configured?.headers || configured?.resolveHeaders) return { ...model, ...configured };
-			unresolvedModelIds.add(model.id);
-			return model;
+			if (configured?.headers || configured?.resolveHeaders) {
+				model.headers = configured.headers;
+				model.resolveHeaders = configured.resolveHeaders;
+			} else {
+				unresolvedModelIds.add(model.id);
+			}
+			continue;
 		}
-		return { ...model, headers: staticModel.headers, resolveHeaders: staticModel.resolveHeaders };
-	});
-	return { models: restored, unresolvedModelIds };
+		model.headers = staticModel.headers;
+		model.resolveHeaders = staticModel.resolveHeaders;
+	}
+	return { models: cachedModels, unresolvedModelIds };
 }
 
 /**
@@ -246,13 +260,16 @@ function restoreCachedModelHeaders<TApi extends Api>(
  * when at least one configured remote source did not refresh successfully.
  * After a network fetch, models are built, merged and persisted in
  * time-budgeted slices across event-loop turns; the returned promise settles
- * once the cache row is stored. Aborting `signal` cancels the in-flight
- * fetches and any cache write not yet stored, and rejects with its reason
- * (an `AbortError` when the reason is not an `Error`).
+ * once the cache row is stored. An offline batch can supply shared snapshots from
+ * the same cache database, keyed by the requested cache namespaces (unlisted rows
+ * are misses); live refreshes always read their own current row. Aborting
+ * `signal` cancels the in-flight fetches and any cache write not yet stored, and
+ * rejects with its reason (an `AbortError` when the reason is not an `Error`).
  */
 export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPayload = unknown>(
 	options: ModelManagerOptions<TApi, TModelsDevPayload>,
 	strategy: ModelRefreshStrategy = "online-if-uncached",
+	offlineSnapshots?: ReadonlyMap<string, CacheEntry<TApi>>,
 	signal?: AbortSignal,
 ): Promise<ModelResolutionResult<TApi>> {
 	throwIfAborted(signal);
@@ -264,40 +281,48 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const ttlMs = options.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
 	const dbPath = options.cacheDbPath;
 	const restorableHeaderFallback = options.restorableHeaderFallback;
-	const staticModels = options.staticModels
-		? materializeStaticModels<TApi>(options.staticModels)
-		: (getBundledModelSlice(options.providerId) as readonly Model<TApi>[]);
-	const modelsDevAdditiveStaticModelIds =
-		options.modelsDev?.additiveOnly && staticModels.length > 0
-			? new Set(staticModels.map(model => model.id))
+	const staticOverride = options.staticModels ? materializeStaticModels<TApi>(options.staticModels) : undefined;
+	const cache = readCacheForHeaderRestore<TApi>(
+		cacheProviderId,
+		ttlMs,
+		now,
+		dbPath,
+		strategy === "offline" ? offlineSnapshots : undefined,
+	);
+	// A matching cache needs bundled rows only to restore omitted headers. Use
+	// the generator's digest for the comparison; decode on the merge path instead.
+	const bundledHash =
+		staticOverride === undefined && strategy !== "online" && cache?.fresh && cache.headerOmittedModelIds.length === 0
+			? getBundledProviderModelHash(options.providerId)
 			: undefined;
-	const cache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
+	const cacheStaticModels =
+		staticOverride ??
+		(bundledHash === undefined ? (getBundledModelSlice(options.providerId) as readonly Model<TApi>[]) : []);
+	const additiveStatic =
+		Boolean(options.modelsDev?.additiveOnly) && (bundledHash !== undefined || cacheStaticModels.length > 0);
 	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
 	const isAuthoritativeDynamicCache = dynamicModelsAuthoritative && (cache?.payloadAuthoritative ?? false);
 	const restoredCache = restoreCachedModelHeaders(
 		cache?.models ?? [],
-		staticModels,
+		cacheStaticModels,
 		cache?.headerOmittedModelIds ?? [],
 		cache?.unrestorableHeaderModelIds ?? [],
 		cache?.legacyHeaderRestoreMarkers ?? false,
 		restorableHeaderFallback,
 		options.restoreCachedHeaders,
 	);
-	const usableCachedModels = restoredCache.models.filter(model => !restoredCache.unresolvedModelIds.has(model.id));
 	const cacheHasUnresolvedHeaders = restoredCache.unresolvedModelIds.size > 0;
-	const mergeAuthority: DynamicMergeAuthority = {
-		input: options.dynamicInputAuthoritative ?? false,
-		reasoning: options.dynamicReasoningAuthoritative ?? false,
-		cost: options.dynamicCostAuthoritative ?? false,
-		staticNames: options.keepStaticNames ? new Map(staticModels.map(model => [model.id, model.name])) : undefined,
-	};
+	const usableCachedModels = cacheHasUnresolvedHeaders
+		? restoredCache.models.filter(model => !restoredCache.unresolvedModelIds.has(model.id))
+		: restoredCache.models;
 	const cacheDropIds = options.dropCachedModelIdsOnStaticMismatch;
 	// Additive mode is cache identity: a snapshot written while shared-catalog
 	// rows could replace bundled metadata must not match an additive resolver.
-	const staticCatalogFingerprint = fingerprintStaticModels(staticModels, {
-		authoritative: dynamicModelsAuthoritative,
-		additive: modelsDevAdditiveStaticModelIds !== undefined,
-	});
+	const policy = { authoritative: dynamicModelsAuthoritative, additive: additiveStatic };
+	const staticCatalogFingerprint =
+		bundledHash === undefined
+			? fingerprintStaticModels(cacheStaticModels, policy)
+			: staticFingerprintForHash(bundledHash, policy);
 	// Endpoint-migration policy is cache identity: adding an id must invalidate
 	// matching-static-catalog caches written by the prior resolver.
 	const staticFingerprint =
@@ -305,13 +330,6 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			? `${staticCatalogFingerprint}:drop:${Bun.hash(cacheDropIds.join("\0")).toString(36)}`
 			: staticCatalogFingerprint;
 	const cacheFingerprintMatches = cache?.staticFingerprint === staticFingerprint && staticFingerprint.length > 0;
-	// A matching cache was written against this static catalog under the same
-	// additive policy, so its same-id rows are live discovery merged over the
-	// bundled rows, never shared-catalog overrides (#17481). Strip them only on
-	// a mismatch: a static-catalog upgrade or a cache written before additive
-	// semantics were enabled.
-	const cacheAdditiveStaticModelIds =
-		isAuthoritativeDynamicCache || cacheFingerprintMatches ? undefined : modelsDevAdditiveStaticModelIds;
 	const cacheNeedsModelMigration =
 		!cacheFingerprintMatches &&
 		cacheDropIds !== undefined &&
@@ -351,6 +369,21 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		};
 	}
 
+	const staticModels =
+		bundledHash === undefined
+			? cacheStaticModels
+			: (getBundledModelSlice(options.providerId) as readonly Model<TApi>[]);
+	const modelsDevAdditiveStaticModelIds = additiveStatic ? new Set(staticModels.map(model => model.id)) : undefined;
+	// Same-id rows of a matching cache are live discovery merged over bundled
+	// rows, not shared-catalog overrides. Strip them only for a static mismatch.
+	const cacheAdditiveStaticModelIds =
+		isAuthoritativeDynamicCache || cacheFingerprintMatches ? undefined : modelsDevAdditiveStaticModelIds;
+	const mergeAuthority: DynamicMergeAuthority = {
+		input: options.dynamicInputAuthoritative ?? false,
+		reasoning: options.dynamicReasoningAuthoritative ?? false,
+		cost: options.dynamicCostAuthoritative ?? false,
+		staticNames: options.keepStaticNames ? new Map(staticModels.map(model => [model.id, model.name])) : undefined,
+	};
 	const [fetchedModelsDevModels, dynamicFetch] = shouldFetchFromNetwork
 		? await Promise.all([
 				fetchModelsDev(options, signal),
@@ -454,16 +487,18 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			// models cannot be restored offline: rewriting it would drop them and
 			// mark the remainder fresh, while the untouched row keeps forcing a
 			// refetch that recovers them (#18227).
-			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
-			const latestRestoredCache = restoreCachedModelHeaders(
-				latestCache?.models ?? cache?.models ?? [],
-				staticModels,
-				latestCache?.headerOmittedModelIds ?? cache?.headerOmittedModelIds ?? [],
-				latestCache?.unrestorableHeaderModelIds ?? cache?.unrestorableHeaderModelIds ?? [],
-				latestCache?.legacyHeaderRestoreMarkers ?? cache?.legacyHeaderRestoreMarkers ?? false,
-				restorableHeaderFallback,
-				options.restoreCachedHeaders,
-			);
+			const latestCache = readCacheForHeaderRestore<TApi>(cacheProviderId, ttlMs, now, dbPath);
+			const latestRestoredCache = latestCache
+				? restoreCachedModelHeaders(
+						latestCache.models,
+						staticModels,
+						latestCache.headerOmittedModelIds,
+						latestCache.unrestorableHeaderModelIds,
+						latestCache.legacyHeaderRestoreMarkers,
+						restorableHeaderFallback,
+						options.restoreCachedHeaders,
+					)
+				: restoredCache;
 			const latestUsableCacheModels = latestRestoredCache.models.filter(
 				model => !latestRestoredCache.unresolvedModelIds.has(model.id),
 			);
@@ -594,13 +629,8 @@ function prepareCacheModelsForStaticMismatch<TApi extends Api>(
 	staticModels: readonly Model<TApi>[],
 	cacheFingerprintMatches: boolean,
 	ids: readonly string[] | undefined,
-): Model<TApi>[] {
-	if (models.length === 0) {
-		return [];
-	}
-	if (cacheFingerprintMatches) {
-		return [...models];
-	}
+): readonly Model<TApi>[] {
+	if (models.length === 0 || cacheFingerprintMatches) return models;
 
 	const droppedIds = ids && ids.length > 0 ? new Set(ids) : undefined;
 	const staticIds = staticModels.length > 0 ? new Set(staticModels.map(model => model.id)) : undefined;
@@ -615,9 +645,9 @@ function prepareCacheModelsForStaticMismatch<TApi extends Api>(
 }
 
 function mergeCatalogMetrics<TApi extends Api>(
-	models: Model<TApi>[],
+	models: readonly Model<TApi>[],
 	catalogModels: readonly Model<TApi>[],
-): Model<TApi>[] {
+): readonly Model<TApi>[] {
 	if (models.length === 0 || catalogModels.length === 0) return models;
 	return applyCatalogMetrics(models, new CatalogMetricsIndex(catalogModels));
 }
@@ -640,12 +670,12 @@ async function mergeDynamicModels<TApi extends Api>(
 	dynamicModels: readonly Model<TApi>[],
 	authority: DynamicMergeAuthority,
 	explicitKindModels?: ReadonlySet<Model<TApi>>,
-): Promise<Model<TApi>[]> {
+): Promise<readonly Model<TApi>[]> {
 	// Empty-side fast paths: `mergeDynamicModels(base, [])` is the common shape
 	// after we've already merged the first pair, and `(...)` with no base
 	// happens for providers without static catalogs.
-	if (dynamicModels.length === 0) return baseModels.length === 0 ? [] : [...baseModels];
-	if (baseModels.length === 0) return [...dynamicModels];
+	if (dynamicModels.length === 0) return baseModels;
+	if (baseModels.length === 0) return dynamicModels;
 	const merged = new Map<string, Model<TApi>>(baseModels.map(model => [model.id, model]));
 	await forEachInSlices(dynamicModels, dynamicModel => {
 		if (!dynamicModel?.id) return;
@@ -673,7 +703,7 @@ async function mergeCachedModels<TApi extends Api>(
 	staticModels: readonly Model<TApi>[],
 	cacheModels: readonly Model<TApi>[],
 	options: { authority: DynamicMergeAuthority; matchesStatic: boolean },
-): Promise<Model<TApi>[]> {
+): Promise<readonly Model<TApi>[]> {
 	if (!options.matchesStatic) return await mergeDynamicModels(staticModels, cacheModels, options.authority);
 	const merged = new Map<string, Model<TApi>>(staticModels.map(model => [model.id, model]));
 	for (const cachedModel of cacheModels) merged.set(cachedModel.id, cachedModel);
@@ -702,20 +732,20 @@ export interface StaticFingerprintPolicy {
 	additive?: boolean;
 }
 
-const bundledContentHashes = new WeakMap<object, string>();
-
 /** Return the versioned identity, always observing current content for caller-owned models. */
 export function fingerprintStaticModels<TApi extends Api>(
 	models: readonly (ModelSpec<TApi> | Model<TApi>)[],
 	policy: StaticFingerprintPolicy = {},
 ): string {
+	const hash =
+		models.length === 0
+			? "empty"
+			: (getBundledModelSliceHash(models) ?? Bun.hash(JSON.stringify(models)).toString(36));
+	return staticFingerprintForHash(hash, policy);
+}
+
+function staticFingerprintForHash(hash: string, policy: StaticFingerprintPolicy): string {
 	const policyKey = `${policy.authoritative ? ":authoritative" : ""}${policy.additive ? ":additive" : ""}`;
-	if (models.length === 0) return `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:empty`;
-	let hash = bundledContentHashes.get(models);
-	if (hash === undefined) {
-		hash = Bun.hash(JSON.stringify(models)).toString(36);
-		if (isBundledModelSlice(models)) bundledContentHashes.set(models, hash);
-	}
 	return `${MODEL_CACHE_FINGERPRINT_VERSION}${policyKey}:${hash}`;
 }
 

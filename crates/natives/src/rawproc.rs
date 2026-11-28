@@ -86,7 +86,7 @@ fn errno_code(error: &io::Error) -> String {
 
 // --- spawnRaw -------------------------------------------------------------
 
-/// Options for `spawnRaw`.
+/// Options for `spawnRaw` and `spawnBreakaway`.
 #[napi(object)]
 pub struct SpawnRawOptions {
 	/// Executable name or path (resolved against `env.PATH`).
@@ -172,6 +172,64 @@ pub fn spawn_raw(env: &Env, options: SpawnRawOptions) -> Result<RawChild> {
 			stdout: stdout.into_raw_handle() as i64,
 			stderr: stderr.into_raw_handle() as i64,
 		})
+	}
+}
+
+// --- spawnBreakaway -------------------------------------------------------
+
+/// Start a detached Windows process outside this process's job objects.
+///
+/// Like Bun's `detached` spawn, the child gets no console (`DETACHED_PROCESS`),
+/// its own process group, and null stdio. Unlike it, the child also leaves
+/// every job this process belongs to (`CREATE_BREAKAWAY_FROM_JOB`), so a
+/// terminal host that terminates its job on close does not take the child
+/// down. A job that forbids breakaway makes `CreateProcessW` fail with
+/// `ERROR_ACCESS_DENIED`; the child is then started inside the job.
+///
+/// Returns the child's pid.
+///
+/// # Errors
+/// The spawn error, as a JS error whose `code` is errno-style; `ENOSYS` off
+/// Windows.
+#[napi]
+pub fn spawn_breakaway(env: &Env, options: SpawnRawOptions) -> Result<u32> {
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+		const DETACHED_PROCESS: u32 = 0x0000_0008;
+		const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+		const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+		let spawn = |flags: u32| {
+			Command::new(&options.application)
+				.args(&options.args)
+				.env_clear()
+				.envs(&options.env)
+				.current_dir(&options.cwd)
+				.stdin(Stdio::null())
+				.stdout(Stdio::null())
+				.stderr(Stdio::null())
+				.creation_flags(flags)
+				.spawn()
+		};
+		let detached = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+		let child = match spawn(detached | CREATE_BREAKAWAY_FROM_JOB) {
+			Err(error) if error.kind() == io::ErrorKind::PermissionDenied => spawn(detached),
+			spawned => spawned,
+		}
+		.map_err(|error| {
+			coded_error(
+				env,
+				&errno_code(&error),
+				format!("spawnBreakaway {}: {error}", options.application),
+			)
+		})?;
+		// Dropping `child` only closes its handles; the process runs on.
+		Ok(child.id())
+	}
+	#[cfg(not(windows))]
+	{
+		let _ = options;
+		Err(coded_error(env, "ENOSYS", "spawnBreakaway is Windows-only"))
 	}
 }
 
@@ -383,8 +441,13 @@ impl FdIo {
 		// SAFETY: the caller hands over ownership of `raw`.
 		let owned = unsafe { OwnedFd::from_raw_fd(raw) };
 		set_nonblocking(raw)?;
-		napi::bindgen_prelude::within_runtime_if_available(|| tokio::io::unix::AsyncFd::new(owned))
-			.map(Self)
+		napi::bindgen_prelude::within_runtime_if_available(|| {
+			// SAFETY: the `OwnedFd` keeps its descriptor open and unchanged for
+			// the `AsyncFd`'s lifetime.
+			unsafe { tokio::io::unix::AsyncFd::register(owned) }
+		})
+		.map(Self)
+		.map_err(io::Error::from)
 	}
 
 	async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {

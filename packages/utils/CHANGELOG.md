@@ -4,16 +4,20 @@
 
 ### Breaking Changes
 
-- Removed the unused `getToolsDir()` export. Custom tool discovery is unchanged.
+- Removed the unused `getToolsDir()` export; custom tool discovery is unchanged.
+- `@oh-my-pi/pi-utils/chalk` detects color on first use instead of at import. Use `detectColorLevel(process.env, Boolean(stream.isTTY))` in place of the `supportsColor` and `supportsColorStderr` exports.
 
 ### Added
 
-- Added `getBunStubDir()`, the cache directory holding the `bun` stub a compiled omp appends to its JS eval kernel's PATH ([#19241](https://github.com/can1357/oh-my-pi/pull/19241) by [@mccraigmccraig](https://github.com/mccraigmccraig))
+- Added `getBunStubDir()` to expose the cache directory used for the `bun` executable stub in compiled applications.
 
 ### Fixed
 
-- Fixed 429 retry hints ignoring `rests until <ISO-8601>` quota reset timestamps ([#20647](https://github.com/can1357/oh-my-pi/issues/20647)).
-- Fixed `parseImageMetadata` omitting the dimensions of lossless WebP (VP8L) headers shorter than 30 bytes ([#20521](https://github.com/can1357/oh-my-pi/pull/20521) by [@shgew](https://github.com/shgew))
+- Startup timings now show elapsed wall time from Bun’s process clock, distinguish overlapping and unfinished spans, and report optional module reads and evaluations separately instead of attributing loader gaps to modules.
+- `PI_TIMING=full` includes sub-millisecond startup phases; custom tools report preparation, import, and factory time by file.
+- Fixed 429 retry guidance to honor quota reset timestamps in `rests until <ISO-8601>` responses.
+- Fixed `parseImageMetadata` failing to report dimensions for short lossless WebP (VP8L) headers.
+- Fixed requests using `NODE_EXTRA_CA_CERTS` (including remote MCP HTTP/SSE) dropping system CAs added by `NODE_USE_SYSTEM_CA=1`; the extra bundle now extends the runtime default trust store ([#18556](https://github.com/can1357/oh-my-pi/issues/18556))
 
 ## [19.2.1] - 2026-11-25
 

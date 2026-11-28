@@ -1,12 +1,12 @@
 import { transcriptEntryMessage } from "../../../../session/transcript/transcript-entry";
 import { jsx } from "@oh-my-pi/pi-tui";
 import { CopySelector } from "../../../../ui/overlays/pickers/copy-selector";
+import { openPath } from "../../../../utils/open";
 import { type CopyPickSource } from "../../../../modes/view-model/overlays/copy-selector";
-import { assistantText } from "../../../../modes/view-model/overlays/copy-targets";
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
 import { isTranscriptEntry } from "../../../../session/session-context";
-import type { SessionEntry } from "../../../../session/session-entries";
 import type { TextReviewSource } from "./annotation-types";
+import { latestAssistantEntry, latestAssistantTextReviewSource } from "./direct-source";
 
 export type AnnotationSourceKind = "code-review" | "last" | "session" | "file" | "prompt" | "draft";
 
@@ -59,33 +59,6 @@ export interface SessionPick extends CopyPickSource {
 	label: string;
 }
 
-function latestAssistantEntry(branch: readonly SessionEntry[]): { id: string; text: string } | undefined {
-	for (let index = branch.length - 1; index >= 0; index--) {
-		const entry = branch[index];
-		if (entry?.type !== "message") continue;
-		const text = assistantText(entry.message);
-		if (text) return { id: entry.id, text };
-	}
-	return undefined;
-}
-
-/** The latest non-empty assistant reply on the active branch, or undefined when none exists. */
-export function latestAssistantTextReviewSource(
-	branch: readonly SessionEntry[],
-	sessionId: string,
-): TextReviewSource | undefined {
-	const latest = latestAssistantEntry(branch);
-	if (!latest) return undefined;
-	return {
-		id: `message:${latest.id}`,
-		kind: "message",
-		label: "Latest assistant reply",
-		text: latest.text,
-		provenance: { kind: "latest-assistant", entryId: latest.id },
-		sessionId,
-	};
-}
-
 function sourceKind(selection: SessionPick): TextReviewSource["kind"] {
 	if (selection.block?.kind) return selection.block.kind;
 	switch (transcriptEntryMessage(selection.entry)?.role) {
@@ -115,6 +88,9 @@ function sourceFromSelection(
 		kind,
 		label: selection.label,
 		text: selection.content,
+		...(selection.block?.language !== undefined && (kind === "code" || kind === "command")
+			? { language: selection.block.language }
+			: {}),
 		provenance: isLatestWholeAssistant ? { kind: "latest-assistant", entryId } : { kind: "session", entryId },
 		sessionId: ctx.sessionManager.getSessionId(),
 	};
@@ -146,9 +122,14 @@ export async function selectSessionTextReviewSource(
 				title: "Select message to annotate",
 				actionLabel: "select",
 				onPick: (content: string, label: string, source: CopyPickSource) => done({ content, label, ...source }),
+				onOpen: (href: string, label: string) => {
+					done(undefined);
+					openPath(href);
+					ctx.ui.notify(`Opening ${label}: ${href}`, "info");
+				},
 				onCancel: () => done(undefined),
 			}),
-		{ overlay: true },
+		{ overlay: true, fullscreen: true },
 	);
 	return selection ? sourceFromSelection(ctx, selection, latest?.id) : undefined;
 }

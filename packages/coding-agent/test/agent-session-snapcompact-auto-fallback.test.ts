@@ -12,7 +12,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { cfgCompaction } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
-const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
+const UNRENDERABLE_SNAPCOMPACT_TEXT = "\u{10FFFF}".repeat(10);
 
 interface Harness {
 	session: AgentSession;
@@ -328,6 +328,23 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		expect(waitSpy).toHaveBeenCalledWith(7_200_000, expect.anything());
 	});
 
+	it("uses soft compaction for a default manual pass when no face covers the transcript", async () => {
+		const harness = await createHarness(modelRegistry, {
+			activeModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
+			seedMessages: [
+				{ role: "user", content: UNRENDERABLE_SNAPCOMPACT_TEXT.repeat(10), timestamp: 1 },
+				{ role: "user", content: "Keep this turn.", timestamp: 2 },
+			],
+		});
+		session = harness.session;
+
+		expect((await session.compact()).summary).toBe("compacted");
+		expect(compactionModule.compact).toHaveBeenCalledTimes(1);
+		expect(harness.notices.some(message => message.includes("no installed font covers the whole transcript"))).toBe(
+			true,
+		);
+	});
+
 	it("downgrades to context-full when unsupported glyphs make snapcompact unsafe", async () => {
 		const harness = await createHarness(modelRegistry, {
 			activeModel: { provider: "aimlapi", id: "claude-sonnet-4-5-20250929" },
@@ -347,7 +364,7 @@ describe("AgentSession auto-snapcompact local-blocker fallback", () => {
 		expect(result.errorMessage).toBeUndefined();
 		expect(compactionModule.compact).toHaveBeenCalled();
 		const unsupportedGlyphNotice = harness.notices.find(message =>
-			message.startsWith("snapcompact disabled: unsupported characters for selected snapcompact font"),
+			message.startsWith("snapcompact disabled: no installed font covers the whole transcript"),
 		);
 		expect(unsupportedGlyphNotice).toContain("trying the next preferred compaction method.");
 		expect(harness.sessionManager.getBranch().find(entry => entry.type === "compaction")).toMatchObject({

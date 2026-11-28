@@ -1,9 +1,24 @@
 
 // Ensure navigator.webdriver behaves like real Chrome
-if (navigator.webdriver !== false && navigator.webdriver !== undefined) {
+// Deleting the property leaves `"webdriver" in navigator` false, which no real browser reports;
+// replace it with a native-shaped accessor that answers false instead.
+if (navigator.webdriver !== false) {
 	const proto = Object_getPrototypeOf(navigator);
-	if (proto && "webdriver" in proto) {
-		delete proto.webdriver;
+	const descriptor = proto && Object_getOwnPropertyDescriptor(proto, "webdriver");
+	if (proto && descriptor && descriptor.configurable) {
+		// Object-literal shorthand is the only place `get x()` is valid syntax; a plain
+		// `function get x()` is a SyntaxError that would take the whole patch down.
+		const webdriverGetter = Object_getOwnPropertyDescriptor(
+			{ get webdriver() { return false; } },
+			"webdriver",
+		).get;
+		if (typeof patchToString === "function") patchToString(webdriverGetter, "get webdriver");
+		Object_defineProperty(proto, "webdriver", {
+			get: webdriverGetter,
+			set: descriptor.set,
+			enumerable: descriptor.enumerable,
+			configurable: descriptor.configurable,
+		});
 	}
 }
 
@@ -12,7 +27,7 @@ if (!window.chrome) {
 	Object_defineProperty(window, "chrome", {
 		writable: true,
 		enumerable: true,
-		configurable: false,
+		configurable: true,
 		value: {},
 	});
 }
@@ -32,13 +47,11 @@ if (window.chrome && !("app" in window.chrome)) {
 		},
 	};
 
-	const makeError = (fn) => new TypeError(`Error in invocation of app.${fn}()`);
+	const makeError = (fn) => new TypeError(`Error in invocation of app.${fn}(optional function callback): `);
 
 	window.chrome.app = {
 		...STATIC_DATA,
-		get isInstalled() {
-			return false;
-		},
+		isInstalled: false,
 		getDetails: function getDetails() {
 			if (arguments.length) throw makeError("getDetails");
 			return null;
@@ -367,7 +380,12 @@ if (navigator.permissions?.query) {
 			return originalQuery.call(this, parameters);
 		};
 		patchToString(patchedPermissionsQuery, "query");
-		navigator.permissions.query = patchedPermissionsQuery;
+		Object_defineProperty(Object_getPrototypeOf(navigator.permissions), "query", {
+			value: patchedPermissionsQuery,
+			writable: true,
+			enumerable: true,
+			configurable: true,
+		});
 	}
 }
 

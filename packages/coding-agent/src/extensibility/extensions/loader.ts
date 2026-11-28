@@ -274,7 +274,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			handler: RegisteredCommand["handler"];
 		},
 	): void {
-		this.extension.commands.set(name, { name, ...options });
+		this.extension.commands.set(name, { name, ...options, extensionPath: this.extension.path });
 	}
 
 	setLabel(label: string): void {
@@ -395,6 +395,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		}
 		if (typeof definition.replace !== "function") {
 			throw new TypeError(`Todo backend "${id}" must have a replace function`);
+		}
+		if (definition.apply !== undefined && typeof definition.apply !== "function") {
+			throw new TypeError(`Todo backend "${id}" apply must be a function`);
 		}
 		(this.extension.todoBackends ??= new Map()).set(id, definition);
 	}
@@ -793,9 +796,9 @@ export async function discoverExtensionPaths(
 	if (ambient) {
 		// 1. Discover extension modules via capability API (native .omp/.pi only).
 		// Scope the load to the native provider — the extension-module capability
-		// also has claude/codex/gemini/opencode providers, and their items were
+		// also has claude/codex/opencode providers, and their items were
 		// discarded here anyway (see #4198). The provider filter skips the walk
-		// entirely instead of running four foreign directory scans and dropping
+		// entirely instead of running three foreign directory scans and dropping
 		// the results.
 		const discovered = await loadCapability<ExtensionModule>(extensionModuleCapability.id, {
 			...loadOptions,

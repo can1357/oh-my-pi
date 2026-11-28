@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { loadCustomTools, type ToolPathWithSource } from "../../src/extensibility/custom-tools/loader";
+import { loadLegacyPiModule } from "../../src/extensibility/plugins/legacy-pi-compat";
 
 let tempRoot: string | undefined;
 
@@ -201,7 +202,7 @@ describe("custom tool loader", () => {
 	});
 
 	it("restores host stdin after a tool hijacks it at import time (#5618)", async () => {
-		// A ~/.claude/tools MCP server attaches a stdin consumer at module top
+		// A custom tool wrapping an MCP server attaches a stdin consumer at module top
 		// level (a bare `resume()` here stands in for `new StdioServerTransport()`).
 		// Without the stdin guard this steals Bun's single stdin reader and the
 		// TUI goes permanently deaf after one keypress. The tool also exports a
@@ -352,6 +353,55 @@ describe("custom tool host package imports", () => {
 		expect(Reflect.get(globalThis, counterKey)).toBe(1);
 		// Each load still calls the factory, so sessions get their own tool objects.
 		expect(sessionB.tools[0]?.tool).not.toBe(sessionA.tools[0]?.tool);
+	});
+
+	it("rebinds an evaluated tool without rereading edited helpers, but explicit reload sees the edits", async () => {
+		const helper = await writeTool("version.ts", 'export const version = "first";');
+		const entry = await writeTool(
+			"entry.ts",
+			esmTool("version", "version", ['import { version } from "./version";']),
+		);
+		const bind = () => loadCustomTools([{ path: entry }], requireTempRoot(), []);
+		expect((await bind()).tools[0]?.tool.description).toBe("first");
+
+		await Bun.write(helper, 'import "@mariozechner/pi-tui";');
+		const rebound = await bind();
+		expect(rebound.errors).toEqual([]);
+		expect(rebound.tools[0]?.tool.description).toBe("first");
+		await expect(loadLegacyPiModule(entry)).rejects.toThrow("@mariozechner/pi-tui");
+	});
+
+	it("rewrites an escaped global require in an otherwise standalone entry", async () => {
+		const entry = await writeTool(
+			"escaped.ts",
+			esmTool("escaped", "typeof logger.warn", ['const { logger } = re\\u0071uire("@oh-my-pi/pi-utils");']),
+		);
+		const result = await loadCustomTools([{ path: entry }], requireTempRoot(), []);
+		expect(result.errors).toEqual([]);
+		expect(result.tools[0]?.tool.description).toBe("function");
+	});
+
+	it("retries a corrected tool whose plain module preparation failed", async () => {
+		const entry = await writeTool("corrected.ts", 'import "@mariozechner/pi-tui";');
+		const bind = () => loadCustomTools([{ path: entry }], requireTempRoot(), []);
+		expect((await bind()).errors[0]?.error).toContain("@mariozechner/pi-tui");
+
+		await Bun.write(entry, VALID_TOOL_SOURCE);
+		expect((await bind()).tools[0]?.tool.name).toBe("safe_custom_tool");
+	});
+
+	it("finishes each factory before evaluating the next configured module", async () => {
+		const later = await writeTool("later.ts", 'throw new Error("loaded too early");');
+		const first = await writeTool(
+			"first.ts",
+			`export default async () => {
+				await Bun.write(${JSON.stringify(later)}, ${JSON.stringify(esmTool("later", '"ready"', []))});
+				return [];
+			};`,
+		);
+		const result = await loadCustomTools([{ path: first }, { path: later }], requireTempRoot(), []);
+		expect(result.errors).toEqual([]);
+		expect(result.tools.map(tool => tool.tool.name)).toEqual(["later"]);
 	});
 
 	it("loads a CommonJS tool whose transpiled default export is the factory", async () => {

@@ -1,0 +1,292 @@
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { createRoot, resolveChildren } from "@oh-my-pi/pi-tui";
+import { anchoredRows, RESERVED_ROW, reservedRows } from "@oh-my-pi/pi-tui/driver/images/anchor";
+import { textSized } from "@oh-my-pi/pi-tui/text/osc";
+import { defaultPresenter } from "../../src/ui/tools/default";
+import { legacyPresenter } from "../../src/ui/tools/legacy";
+import { type Block, type PaintImages, staticEnvironment } from "@oh-my-pi/pi-tui/term/paint";
+import { renderBlock } from "@oh-my-pi/pi-tui/term/render";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { ensureTheme } from "../../src/ui/theme/service";
+import { ToolBlock, ToolCall } from "../../src/ui/transcript/tool-block";
+import { toolCall } from "../helpers/tool-text";
+
+const restoreTheme = currentTheme();
+const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+beforeAll(async () => {
+	resetSettingsForTest();
+	await Settings.init({ inMemory: true });
+	ensureTheme();
+});
+
+afterAll(() => {
+	setCurrentTheme(restoreTheme);
+	resetSettingsForTest();
+});
+
+/** The block, painted at a fixed height (the transcript's viewport allocation) when given. */
+function paint(call: ToolCall, height: number | undefined, images?: PaintImages): Block {
+	const env = staticEnvironment(currentTheme(), images ? { images } : {});
+	return createRoot(dispose => {
+		try {
+			const [node] = resolveChildren(() => ToolBlock({ call }))();
+			return renderBlock(node!, 80, { env, height });
+		} finally {
+			dispose();
+		}
+	});
+}
+
+function text(rows: readonly string[]): string[] {
+	return rows.map(row => Bun.stripANSI(row));
+}
+
+function lines(prefix: string, count: number): string {
+	return Array.from({ length: count }, (_, i) => `${prefix} ${i}`).join("\n");
+}
+
+function taskCall(): ToolCall {
+	return toolCall({
+		name: "task",
+		args: {
+			context: lines("- Shared rule", 20),
+			tasks: Array.from({ length: 3 }, (_, i) => ({ name: `Agent${i}`, task: `Task number ${i}` })),
+		},
+	});
+}
+
+describe("tool block viewport allocation", () => {
+	it("fills a tall allocation with the card's head and newest rows instead of a 2-row stub", () => {
+		const full = text(paint(taskCall(), undefined).rows).filter(row => row.trim().length > 0);
+		expect(full.length).toBeGreaterThan(10);
+
+		const rows = text(paint(taskCall(), 8).rows);
+		expect(rows).toHaveLength(8);
+		expect(rows[0]).toBe(full[0]);
+		expect(rows.slice(1)).toEqual(full.slice(-7));
+		expect(rows.at(-1)).toContain("╰");
+	});
+
+	it("keeps a boxed look's title row, not just its blank pad row", () => {
+		const call = toolCall({
+			name: "mcp__demo_search",
+			args: { query: "x" },
+			result: { content: [{ type: "text", text: lines("line", 30) }] },
+			expanded: true,
+		});
+		const rows = text(paint(call, 8).rows);
+		expect(rows).toHaveLength(8);
+		expect(rows[0]?.trim()).toBe("");
+		expect(rows[1]).toContain("MCP");
+	});
+
+	it("keeps every row of a wrapped title", () => {
+		const name = `inspect_${"very_long_segment_".repeat(5)}end`;
+		const call = toolCall({
+			name,
+			args: { q: "x" },
+			result: { content: [{ type: "text", text: lines("line", 30) }] },
+			expanded: true,
+		});
+		const rows = text(paint(call, 8).rows);
+		expect(rows).toHaveLength(8);
+		// The title wraps past the first row; its tail must stay above the newest output.
+		const title = rows.join("").replace(/\s+/g, "");
+		expect(title).toContain(name);
+		expect(rows.at(-1)).toContain("line 29");
+	});
+
+	it("never starts the tail inside an image, whose draw would move up over the head", () => {
+		// SIXEL-style rows: three reserved rows, the draw on the last one moving up over them.
+		const images: PaintImages = {
+			rows: () => ({ rows: anchoredRows("\x1bPq~\x1b\\", 4), columns: 8, state: "image" }),
+			cell: () => ({ w: 10, h: 20 }),
+		};
+		const call = toolCall({
+			name: "bash",
+			args: { command: "echo hi" },
+			result: {
+				content: [
+					{ type: "text", text: lines("out", 30) },
+					{ type: "image", data: PNG, mimeType: "image/png" },
+				],
+			},
+			expanded: true,
+		});
+
+		// The untitled frame's edge and command, then three tail rows: the 4-row image cannot fit, so it is
+		// dropped whole with its blank separator, and the rows above it fill in.
+		const { rows } = paint(call, 5, images);
+		expect(rows).toHaveLength(5);
+		expect(text(rows)[0]).toContain("╭");
+		expect(text(rows)[1]).toContain("hi");
+		expect(text(rows).slice(2, 4).join("\n")).toMatch(/out 28[\s\S]*out 29/);
+		expect(text(rows)[4]).toContain("╰");
+		rows.forEach((row, at) => {
+			const up = Number(/\x1b\[(\d+)A/.exec(row)?.[1] ?? 0);
+			for (let above = at - up; above < at; above++) expect(rows[above]?.trim()).toBe(RESERVED_ROW);
+		});
+	});
+
+	it("keeps an image fallback's label and skips the reserved rows that draw nothing", () => {
+		// A demoted image on a graphics terminal: its fallback label, then reserved rows for its box.
+		let label = "";
+		const images: PaintImages = {
+			rows: (_source, request) => {
+				label = Bun.stripANSI(request.fallback);
+				return { rows: [request.fallback, RESERVED_ROW, RESERVED_ROW], columns: 8, state: "fallback" };
+			},
+			cell: () => ({ w: 10, h: 20 }),
+		};
+		const call = toolCall({
+			name: "bash",
+			args: { command: "x" },
+			result: {
+				content: [
+					{ type: "text", text: lines("out", 30) },
+					{ type: "image", data: PNG, mimeType: "image/png" },
+				],
+			},
+			expanded: true,
+		});
+
+		// Head plus two tail rows: exactly the room the two reserved rows would take.
+		const rows = paint(call, 3, images).rows;
+		expect(rows).toHaveLength(3);
+		expect(label).not.toBe("");
+		expect(text(rows).at(-1)).toContain(label);
+		expect(rows.filter(row => row.trim() === RESERVED_ROW)).toEqual([]);
+	});
+
+	it("keeps a tinted image's reserved rows with its draw row in a boxed legacy card", () => {
+		// An extension's rows: text, then a SIXEL-style image (three reserved rows, the draw on the last).
+		const drawn = [...lines("text", 10).split("\n"), ...anchoredRows("\x1bPq~\x1b\\", 4)];
+		const call = new ToolCall({
+			id: "call-legacy",
+			name: "ext_tool",
+			args: {},
+			presenter: legacyPresenter({ renderResult: () => ({ render: () => drawn }) }, defaultPresenter),
+		});
+		call.setArgsComplete();
+		call.setExecutionStarted();
+		call.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
+
+		// The box tints every row, the reserved ones too; the draw still moves up three rows. Six rows fit
+		// pad, the first text row and the whole image (the blank bottom pad spends no room); five leave no
+		// room for the image, so it is dropped.
+		const drawMovesOver = (rows: readonly string[]): void =>
+			rows.forEach((row, at) => {
+				const up = Number(/\x1b\[(\d+)A/.exec(row)?.[1] ?? 0);
+				for (let above = at - up; above < at; above++) expect(Bun.stripANSI(rows[above] ?? "x").trim()).toBe("");
+			});
+		const fits = paint(call, 6).rows;
+		expect(fits).toHaveLength(6);
+		expect(fits.some(row => /\x1b\[3A/.test(row))).toBe(true);
+		drawMovesOver(fits);
+		const tight = paint(call, 5).rows;
+		expect(tight.some(row => /\x1b\[\d+A/.test(row))).toBe(false);
+		drawMovesOver(tight);
+	});
+
+	it("spends no room on a tinted pending image's reserved rows in a boxed legacy card", () => {
+		const drawn = [...lines("text", 10).split("\n"), ...reservedRows(3)];
+		const call = new ToolCall({
+			id: "call-legacy-pending",
+			name: "ext_tool",
+			args: {},
+			presenter: legacyPresenter({ renderResult: () => ({ render: () => drawn }) }, defaultPresenter),
+		});
+		call.setArgsComplete();
+		call.setExecutionStarted();
+		call.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
+
+		const rows = text(paint(call, 5).rows);
+		expect(rows).toHaveLength(5);
+		expect(rows[0]?.trim()).toBe("");
+		expect(rows.slice(1).map(row => row.trim())).toEqual(["text 0", "text 7", "text 8", "text 9"]);
+	});
+
+	it("keeps a scaled heading's spacer row under it in a boxed legacy card", () => {
+		// A 2x OSC 66 heading takes its own row and the blank one under it.
+		const drawn = [...lines("text", 10).split("\n"), textSized("Title", { scale: 2, widthCells: 10 }), "", "after"];
+		const call = new ToolCall({
+			id: "call-legacy-sized",
+			name: "ext_tool",
+			args: {},
+			presenter: legacyPresenter({ renderResult: () => ({ render: () => drawn }) }, defaultPresenter),
+		});
+		call.setArgsComplete();
+		call.setExecutionStarted();
+		call.updateResult({ content: [{ type: "text", text: "ok" }] }, false);
+
+		const rows = paint(call, 5).rows;
+		expect(rows).toHaveLength(5);
+		expect(rows[2]).toContain("\x1b]66;");
+		expect(Bun.stripANSI(rows[3]!).trim()).toBe("");
+		expect(text(rows)[4]).toContain("after");
+	});
+
+	it("keeps every row of a wrapped search header", () => {
+		const pattern = `needle_${"long_pattern_segment_".repeat(5)}end`;
+		const call = toolCall({
+			name: "grep",
+			args: { pattern, path: "packages/coding-agent/src" },
+			result: { content: [{ type: "text", text: lines("match.ts", 30) }] },
+			expanded: true,
+		});
+		const full = text(paint(call, undefined).rows).filter(row => row.trim().length > 0);
+		const head = full.findIndex(row => row.includes("match.ts"));
+		expect(head).toBeGreaterThan(1);
+
+		const rows = text(paint(call, head + 2).rows);
+		expect(rows.slice(0, head)).toEqual(full.slice(0, head));
+		expect(rows.at(-1)).toBe(full.at(-1));
+	});
+
+	it("keeps a running agent's newest rows clickable when its row run starts above the cut", () => {
+		const progress = {
+			index: 0,
+			id: "0-Alpha",
+			agent: "task",
+			agentSource: "bundled",
+			status: "running",
+			task: "Do it",
+			recentTools: [],
+			recentOutput: lines("output", 12).split("\n"),
+			toolCount: 0,
+			requests: 1,
+			tokens: 10,
+			durationMs: 1000,
+		};
+		const call = toolCall({
+			name: "task",
+			args: { context: lines("- rule", 10), tasks: [{ name: "Alpha", task: "Do it" }] },
+			result: {
+				content: [{ type: "text", text: "" }],
+				details: { projectAgentsDir: null, results: [], totalDurationMs: 0, progress: [progress] },
+			} as never,
+			partial: true,
+			expanded: true,
+		});
+
+		// Head plus seven tail rows: the agent's output rows above the closing edge.
+		const { rows, hits } = paint(call, 8);
+		expect(
+			text(rows)
+				.slice(1, -1)
+				.every(row => row.includes("output")),
+		).toBe(true);
+		expect(hits?.map(({ row, height, item }) => ({ row, height, item }))).toEqual([
+			{ row: 1, height: 6, item: "0-Alpha" },
+		]);
+	});
+
+	it("keeps the 2-row frame edge when only two rows are allocated", () => {
+		const rows = text(paint(taskCall(), 2).rows);
+		expect(rows).toHaveLength(2);
+		expect(rows[0]).toContain("╭─");
+		expect(rows[1]?.trim()).toBe("╰");
+	});
+});

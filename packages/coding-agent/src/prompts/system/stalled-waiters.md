@@ -5,6 +5,6 @@ Your turn is ending, but nothing will wake you: no job, service, subagent, or qu
 {{/each}}
 Before ending your turn, you MUST do one of these for each:
 - Do it now.
-- Work can start only once something holds (a run ends, a time passes)? Start an async `bash` job that waits for that, then does the work and reports; its completion wakes you. This is allowed: the rule against `sleep` jobs is about waiting longer, not about doing queued work.
+- Work can start only once something holds (a run ends, a time passes)? Start an async `bash` job that waits for that, then does the work and reports; its completion wakes you. This is allowed: the rule against `sleep` jobs is about keeping `wait` busy, not about doing queued work.
 - Won't do it? Tell the waiter to go on without it (`write agent://<id>`).
 </system-notice>

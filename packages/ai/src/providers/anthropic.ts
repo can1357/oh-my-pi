@@ -4,6 +4,7 @@ import {
 	isOfficialAnthropicApiUrl,
 	resolveAnthropicApiVersion,
 } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { isKimiCodeEndpoint } from "@oh-my-pi/pi-catalog/compat/kimi-code";
 import { hostMatchesUrl, isVertexRawPredictUrl, modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
@@ -11,7 +12,8 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
-import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { parseGitHubCopilotApiKey, resolveCopilotTokenBilling } from "@oh-my-pi/pi-catalog/wire/github-copilot";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import {
 	$env,
 	$flag,
@@ -142,6 +144,7 @@ import {
 	claudeToolPrefix,
 	getClaudeCodeVersion,
 } from "./claude-code-fingerprint";
+import { applyCopilotUsageFrame, markMissingCopilotUsageFrame } from "./github-copilot-billing";
 import {
 	buildCopilotDynamicHeaders,
 	getCachedCopilotIntegrationId,
@@ -439,7 +442,7 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 type AnthropicOpaqueClientAnchor = ProviderSessionState & {
 	stores: WeakMap<AnthropicMessagesClientLike, Map<string, ProviderSessionState>>;
 	/**
-	 * Bumped once per `/fast on` re-arm. Anchored states carry the value they
+	 * Bumped once per fast-mode re-arm. Anchored states carry the value they
 	 * last observed in `fastModeRearmGeneration`; a mismatch is a re-arm they
 	 * have not picked up yet. Never reset by `close()`: the sweep discards the
 	 * states themselves, so a monotone counter needs no second reset path.
@@ -986,12 +989,27 @@ function isEmptyContentDelta(event: AnthropicStreamEvent): boolean {
 }
 
 /**
+ * The HTTP status the Anthropic API answers with for an error type it also
+ * streams in an `error` frame of a 200 response. A rate limit or an overload
+ * reported in the stream is the same refusal as the HTTP 429 or 529 one, so it
+ * carries that status and reads as one downstream (the message's
+ * `errorStatus`, slow mode, turn recovery's rate-limit handling). No other type
+ * is given a status.
+ */
+const ANTHROPIC_STREAM_ERROR_STATUS: Readonly<Record<string, number>> = {
+	rate_limit_error: 429,
+	overloaded_error: 529,
+};
+
+/**
  * In-stream `error` SSE frames carry an Anthropic error envelope:
  * `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`.
  * Surface the structured type, code and message instead of the raw JSON blob;
  * the error type token (e.g. `overloaded_error`, `rate_limit_error`) is kept in
  * the message so `isProviderRetryableError`'s classification keys off the
- * structured type rather than incidental JSON substrings.
+ * structured type rather than incidental JSON substrings. A type in
+ * {@link ANTHROPIC_STREAM_ERROR_STATUS} becomes a {@link AIError.ProviderHttpError}
+ * with that status and the type as its code, as the HTTP response would.
  *
  * `midMessage` marks a frame that lands inside an open message envelope — after
  * `message_start`, before the terminal frame (`message_stop`, or a
@@ -1006,7 +1024,9 @@ function isEmptyContentDelta(event: AnthropicStreamEvent): boolean {
  * Codex native-lane steer rejection uses, so a gateway-cut stream is
  * identifiable after the `Error` instance is gone.
  *
- * Only frame types the provider loop already retries take the truncation path.
+ * Only frame types the provider loop already retries take the truncation path,
+ * and `rate_limit_error` does not: a rate limit is the provider refusing the
+ * request, not a cut wire, so it stays the 429 inside an open message too.
  * A deterministic rejection (`invalid_request_error`, `authentication_error`,
  * `billing_error`, `permission_error`, an account cap) is a decision the
  * provider made about the request, not a cut wire: rewriting it as a truncation
@@ -1027,15 +1047,20 @@ function createAnthropicSseStreamError(data: string, midMessage: boolean): Error
 	const errorType = typeof parsed?.error?.type === "string" ? parsed.error.type : undefined;
 	const errorCode = typeof parsed?.error?.code === "string" ? parsed.error.code : undefined;
 	const message = typeof parsed?.error?.message === "string" ? parsed.error.message : undefined;
-	const rejection = new AIError.ProviderResponseError(
-		message
-			? errorType
-				? `Anthropic stream error (${errorType}): ${message}`
-				: `Anthropic stream error: ${message}`
-			: data,
-		{ provider: "anthropic", kind: "output" },
-	);
-	if (!midMessage || !AIError.isProviderRetryableError(rejection)) {
+	const text = message
+		? errorType
+			? `Anthropic stream error (${errorType}): ${message}`
+			: `Anthropic stream error: ${message}`
+		: data;
+	const httpStatus =
+		errorType !== undefined && Object.hasOwn(ANTHROPIC_STREAM_ERROR_STATUS, errorType)
+			? ANTHROPIC_STREAM_ERROR_STATUS[errorType]
+			: undefined;
+	const rejection =
+		httpStatus === undefined
+			? new AIError.ProviderResponseError(text, { provider: "anthropic", kind: "output" })
+			: new AIError.ProviderHttpError(text, httpStatus, { code: errorType });
+	if (!midMessage || httpStatus === 429 || !AIError.isProviderRetryableError(rejection)) {
 		return rejection;
 	}
 	const fields = [errorType ? `type=${errorType}` : undefined, errorCode ? `code=${errorCode}` : undefined]
@@ -2007,6 +2032,7 @@ const streamAnthropicOnce = (
 						initiatorOverride: options?.initiatorOverride,
 						enterpriseUrl: copilotApiKey.enterpriseUrl,
 						cachedIntegrationId: copilotCached,
+						tokenBasedBilling: resolveCopilotTokenBilling(copilotApiKey),
 					})
 				: undefined;
 			if (copilotDynamicHeaders?.premiumRequests !== undefined) {
@@ -3263,6 +3289,11 @@ const streamAnthropicOnce = (
 								reportAnthropicEnvelopeAnomaly("received message_delta after terminal stop signal");
 								continue;
 							}
+							if (resolveCatalogPolicy(model).reportsAiu === true) {
+								// Copilot reports the per-request charge as a top-level
+								// `copilot_usage` field of `message_delta`, next to `delta` and `usage`.
+								applyCopilotUsageFrame(output.usage, event);
+							}
 							const delta = event.delta;
 							applyReportedInputTransformations(
 								output,
@@ -3924,6 +3955,7 @@ const streamAnthropicOnce = (
 					providerSessionState.cacheControlOptionsUnsupported = true;
 				}
 			}
+			markMissingCopilotUsageFrame(model, output);
 			stream.push({
 				type: "done",
 				reason: output.stopReason,
@@ -3947,6 +3979,7 @@ const streamAnthropicOnce = (
 			output.errorMessage = transport ? result.message : maybeAddReplayUnsignedThinkingHint(model, result.message);
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+			markMissingCopilotUsageFrame(model, output);
 			stream.push({
 				type: "error",
 				reason: output.stopReason,
@@ -4124,6 +4157,57 @@ export function buildAnthropicSystemBlocks(
 	return blocks.length > 0 ? blocks : undefined;
 }
 
+/** Inputs for {@link buildGitHubCopilotAnthropicHeaders}. */
+export interface GitHubCopilotAnthropicHeaderArgs {
+	model: Pick<Model<"anthropic-messages">, "provider" | "providerType" | "headers">;
+	/** Copilot credential: a bare token or the OAuth login's JSON envelope. */
+	apiKey: string;
+	/** Effective endpoint (`resolveAnthropicBaseUrl`); selects the `anthropic-version`. */
+	baseUrl: string | undefined;
+	/** The only betas sent: Copilot's proxy rejects Anthropic's own beta set. */
+	extraBetas?: readonly string[];
+	stream: boolean;
+	/** Caller headers; they override every built header. */
+	headers?: Record<string, string>;
+	/** Per-request Copilot headers (`buildCopilotDynamicHeaders`). */
+	dynamicHeaders?: Record<string, string>;
+	sessionId?: string;
+	parentSessionId?: string;
+	dropPromptCacheBetas?: boolean;
+}
+
+/**
+ * Headers for a GitHub Copilot `/v1/messages` request, shared by streaming
+ * Messages and hosted web search so both reach Copilot's proxy identically.
+ */
+export function buildGitHubCopilotAnthropicHeaders(args: GitHubCopilotAnthropicHeaderArgs): Record<string, string> {
+	const { model, extraBetas = [] } = args;
+	const mergedHeaders = mergeHeaders(
+		{
+			Accept: args.stream ? "text/event-stream" : "application/json",
+			"Content-Type": "application/json",
+			"anthropic-version": resolveAnthropicApiVersion(args.baseUrl),
+			"Anthropic-Dangerous-Direct-Browser-Access": "true",
+			Authorization: `Bearer ${parseGitHubCopilotApiKey(args.apiKey).accessToken}`,
+			...(extraBetas.length > 0 ? { "anthropic-beta": buildBetaHeader([], extraBetas) } : {}),
+		},
+		model.headers,
+		args.dynamicHeaders,
+		args.headers,
+	);
+	// No enforced-key filter: a caller-supplied `anthropic-beta` lands verbatim,
+	// cache betas included unless `dropPromptCacheBetas` strips them.
+	const headers = args.dropPromptCacheBetas ? stripHeaderBetas(mergedHeaders, promptCacheBetas) : mergedHeaders;
+	applyInferenceHeaders(headers, {
+		provider: model.provider,
+		providerType: model.providerType,
+		protocol: "anthropic",
+		sessionId: args.sessionId,
+		parentSessionId: args.parentSessionId,
+	});
+	return headers;
+}
+
 export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): AnthropicClientOptionsResult {
 	const {
 		model,
@@ -4193,36 +4277,19 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// contain it, so there is no need to install the rewriter for those.
 	const cchFetch = oauthToken ? wrapFetchForCch(baseFetch) : baseFetch;
 	if (model.provider === "github-copilot") {
-		const copilotApiKey = parseGitHubCopilotApiKey(apiKey).accessToken;
-		// The GitHub Copilot Anthropic proxy doesn't accept Anthropic beta
-		// features. Forward only caller-supplied betas.
-		const betaFeatures = [...extraBetas];
-		const mergedCopilotHeaders = mergeHeaders(
-			{
-				Accept: stream ? "text/event-stream" : "application/json",
-				"Content-Type": "application/json",
-				"anthropic-version": resolveAnthropicApiVersion(baseUrl),
-				"Anthropic-Dangerous-Direct-Browser-Access": "true",
-				Authorization: `Bearer ${copilotApiKey}`,
-				...(betaFeatures.length > 0 ? { "anthropic-beta": buildBetaHeader([], betaFeatures) } : {}),
-			},
-			model.headers,
-			dynamicHeaders,
+		const defaultHeaders = buildGitHubCopilotAnthropicHeaders({
+			model,
+			apiKey,
+			baseUrl,
+			extraBetas,
+			stream,
 			headers,
-		);
-		// Unlike the generic builder below, this branch has no enforced-key
-		// filter: a caller-supplied `anthropic-beta` lands in the default
-		// headers verbatim, cache betas included.
-		const defaultHeaders = dropPromptCacheBetas
-			? stripHeaderBetas(mergedCopilotHeaders, promptCacheBetas)
-			: mergedCopilotHeaders;
-		applyInferenceHeaders(defaultHeaders, {
-			provider: model.provider,
-			providerType: model.providerType,
-			protocol: "anthropic",
+			dynamicHeaders,
 			sessionId,
 			parentSessionId,
+			dropPromptCacheBetas,
 		});
+		const copilotApiKey = parseGitHubCopilotApiKey(apiKey).accessToken;
 
 		return {
 			isOAuthToken: false,
@@ -5391,8 +5458,9 @@ function buildParams(
 	const metadataUserId = resolveAnthropicMetadataUserId(
 		rebindAnthropicMetadataUserId(
 			readAnthropicMetadataString(options?.metadata, "user_id") ??
-				// Deliberately share the normalized affinity identity across Kimi's two transports.
-				(model.provider === "kimi-code" ? getOpenAIPromptCacheKey(options) : undefined),
+				// Deliberately share the normalized affinity identity across Kimi's two
+				// transports (`kimi-code-endpoint` axis).
+				(isKimiCodeEndpoint(model) ? getOpenAIPromptCacheKey(options) : undefined),
 			isOAuthToken ? servingAccountId : undefined,
 		),
 		isOAuthToken,

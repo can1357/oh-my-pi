@@ -2,6 +2,7 @@ import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { batch, isSettled, type Signal, signal } from "@oh-my-pi/pi-tui";
 import { notifyTerminal } from "@oh-my-pi/pi-tui/driver/session";
 import { formatDuration, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
@@ -31,6 +32,7 @@ import { isReplyWrite, replyDisplayMessage, toolResultReplies } from "../../sess
 import { canonicalizeMessage } from "../../session/transcript/thinking-display";
 import {
 	asyncJobState,
+	followsViewportOnly,
 	isSettledJobFrame,
 	parksAsBackground,
 	readMediaPath,
@@ -54,6 +56,7 @@ import type { TranscriptBlock } from "../../ui/shell";
 import { toolEditMode } from "../../ui/tools/edit";
 import { PREVIEW_LIMITS, previewLine, TRUNCATE_LENGTHS } from "../../utils/render-utils";
 import { type RunFlowStatus, setRunStatus } from "../../utils/run-status";
+import { reportProgramResume } from "../../utils/program-resume";
 import {
 	cfgCompletionNotify,
 	cfgDisplayCacheMissMarker,
@@ -241,6 +244,18 @@ function mergeRules(rules: readonly NotificationRule[], added: readonly Notifica
 	const merged = [...rules];
 	for (const rule of added) if (!merged.some(existing => existing.name === rule.name)) merged.push(rule);
 	return merged;
+}
+
+/**
+ * Human label for a classified account usage/quota limit. Providers often send
+ * these as generic `rate_limit_error` bodies, which read like a transient
+ * throttle; the raw text stays in the transcript message and logs.
+ */
+function usageLimitLabel(errorMessage: string, provider?: string, baseUrl?: string): string {
+	const subject = provider ? `${provider.charAt(0).toUpperCase()}${provider.slice(1)} account` : "Account";
+	const resetMs = extractProviderRetryHint(provider, errorMessage, baseUrl);
+	const reset = resetMs !== undefined && resetMs > 0 ? `; resets in ${formatDuration(resetMs)}` : "";
+	return `${subject} usage limit reached${reset}`;
 }
 
 export class EventController {
@@ -432,6 +447,7 @@ export class EventController {
 						settings: session.settings,
 						registry: session.modelRegistry,
 						getSessionProvider: () => session.model?.provider,
+						getSessionId: () => session.sessionId,
 					}
 				: null,
 		);
@@ -466,7 +482,7 @@ export class EventController {
 			agent_start: e => this.#handleAgentStart(e),
 			agent_pause: e => this.#handleAgentPause(e),
 			agent_end: e => this.#handleAgentEnd(e),
-			turn_start: async () => {},
+			turn_start: async () => this.#handleTurnStart(),
 			turn_end: async e => this.#handleTurnEnd(e),
 			message_start: e => this.#handleMessageStart(e),
 			message_update: e => this.#handleMessageUpdate(e),
@@ -507,6 +523,7 @@ export class EventController {
 			model_changed: async () => {
 				vocalizer.enforceProviderPolicy();
 				this.ctx.statusLine.refresh();
+				this.ctx.showActiveModelNotice();
 			},
 			// Header rebuild is owned by InteractiveMode's own session
 			// subscription (mirrors model_changed); nothing to do here.
@@ -1360,6 +1377,8 @@ export class EventController {
 			this.#turnStartedAt = undefined;
 		}
 		this.#clearApprovalPreviewGates();
+		// A session that started on a plan model has had no switch to announce it.
+		this.ctx.showActiveModelNotice();
 		// A new turn cannot inherit a foreground tool execution. A dropped
 		// agent_end (for example after a renderer exception) otherwise leaves a
 		// live-only tool card without a persisted result; ordered transcript
@@ -1403,6 +1422,7 @@ export class EventController {
 		this.#setTerminalProgress(true);
 		this.ctx.ensureWorkingRow();
 		setRunStatus({ state: "working" });
+		reportProgramResume();
 	}
 
 	async #handleMessageStart(event: Extract<AgentSessionEvent, { type: "message_start" }>): Promise<void> {
@@ -1715,6 +1735,17 @@ export class EventController {
 		} else if (delta.type === "thinking_delta" && mode === "all") {
 			vocalizer.pushDelta(delta.delta);
 		}
+	}
+
+	/**
+	 * A new turn means a fresh model request: drop the previous turn's tool
+	 * intent (e.g. a lone `todo init`) so the row stops naming finished work
+	 * while the provider is still thinking.
+	 */
+	#handleTurnStart(): void {
+		if (this.#lastIntent === undefined || this.#showingAsyncWait) return;
+		this.#lastIntent = undefined;
+		this.ctx.setWorkingMessage();
 	}
 
 	/**
@@ -2144,7 +2175,19 @@ export class EventController {
 				this.#pinnedErrorComponent = lastAssistant;
 				this.#pinnedErrorMessage = event.message;
 				this.#restorePinnedErrorInline = !recoverableEmptyOutput;
-				if (!recoverableEmptyOutput) this.ctx.showPinnedError(event.message.errorMessage);
+				if (!recoverableEmptyOutput) {
+					const usageLimit = AIError.is(AIError.classifyMessage(event.message), AIError.Flag.UsageLimit);
+					const model = this.ctx.viewSession.model;
+					this.ctx.showPinnedError(
+						usageLimit
+							? usageLimitLabel(
+									event.message.errorMessage,
+									event.message.provider,
+									model?.provider === event.message.provider ? model.baseUrl : undefined,
+								)
+							: event.message.errorMessage,
+					);
+				}
 			}
 			this.ctx.statusLine.refresh();
 		}
@@ -2230,13 +2273,22 @@ export class EventController {
 		this.#showToolReplies(event.toolCallId, event.partialResult.details);
 		const component = this.ctx.pendingTools.get(event.toolCallId);
 		if (component) {
+			const parked = this.#backgroundCallIds.has(event.toolCallId);
+			const viewportOnly = parked && followsViewportOnly(event.toolName, this.ctx.shell.native());
+			if (viewportOnly && this.ctx.shell.transcript.contentInHistory(component.block)) {
+				// Its content is in scrollback: later frames would rewrite rows history already holds.
+				component.seal();
+				this.#releasePendingTool(event.toolCallId, component);
+				this.#backgroundCallIds.delete(event.toolCallId);
+				return;
+			}
 			const isFinalAsyncState = isSettledJobFrame(event.partialResult.details);
 			// A final async snapshot is terminal only for a parked background
 			// block (the call already returned and was kept alive for its jobs).
 			// While the call is still executing — a mixed blocking+async task
 			// call whose jobs settle before its blocking subset — treat it as a
 			// partial frame: `tool_execution_end` still owns the terminal result.
-			const isParkedFinal = isFinalAsyncState && this.#backgroundCallIds.has(event.toolCallId);
+			const isParkedFinal = isFinalAsyncState && parked;
 			if (isParkedFinal) {
 				settleWithJobFrame(component, event.partialResult, event.toolCallId);
 				this.#releasePendingTool(event.toolCallId, component);
@@ -2244,7 +2296,7 @@ export class EventController {
 			} else {
 				if (isFinalAsyncState) this.#settledBeforeReturn.set(event.toolCallId, event);
 				const isError = asyncJobState(event.partialResult.details) === "failed";
-				component.updateResult({ ...event.partialResult, isError }, true, event.toolCallId);
+				component.updateResult({ ...event.partialResult, isError }, !viewportOnly, event.toolCallId);
 			}
 		}
 	}
@@ -2302,7 +2354,8 @@ export class EventController {
 	): void {
 		const settled = this.#settledBeforeReturn.get(event.toolCallId)?.partialResult;
 		this.#settledBeforeReturn.delete(event.toolCallId);
-		const parks = parksAsBackground(event.toolName, event.result.details, this.ctx.shell.native());
+		const native = this.ctx.shell.native();
+		const parks = parksAsBackground(event.toolName, event.result.details, native);
 		if (parks && settled) {
 			// The job finished before the call returned: its settled frame, not the
 			// `running` start result, is the card's final state.
@@ -2310,7 +2363,9 @@ export class EventController {
 			this.#releasePendingTool(event.toolCallId, component);
 			return;
 		}
-		component.updateResult({ ...event.result, isError: event.isError }, parks, event.toolCallId);
+		// A viewport-only card draws its frames as static results, so its rows can retire as shown.
+		const partial = parks && !followsViewportOnly(event.toolName, native);
+		component.updateResult({ ...event.result, isError: event.isError }, partial, event.toolCallId);
 		if (parks) {
 			component.parkAsBackground();
 			// The call returned: its card is final for the transcript (a native terminal still
@@ -2507,6 +2562,7 @@ export class EventController {
 			if (!runActive) setRunStatus(this.#settledRunStatus(event));
 			await this.#finishAgentEnd(event);
 		}
+		reportProgramResume();
 		// This run may be extension-started while the main input loop remains
 		// asleep. Do not await session-idle from its own event.
 		if (this.ctx.shutdownRequested) this.ctx.requestShutdown();
@@ -2759,11 +2815,28 @@ export class EventController {
 		// leaves no error in the transcript. The retry row names the reason;
 		// `auto_retry_end` marks the attempt recovered or superseded, or restores
 		// its error when the saga fails without accounting for it.
+		const model = this.ctx.viewSession.model;
+		const provider = this.#pinnedErrorMessage?.provider ?? model?.provider;
 		this.#pinnedErrorComponent = undefined;
 		this.#pinnedErrorMessage = undefined;
 		this.#restorePinnedErrorInline = true;
 		this.ctx.clearPinnedError();
-		const reason = previewLine(sanitizeText(event.errorMessage), TRUNCATE_LENGTHS.CONTENT);
+		const usageLimit =
+			event.errorId !== undefined
+				? AIError.is(event.errorId, AIError.Flag.UsageLimit)
+				: AIError.isUsageLimit(event.errorMessage);
+		const reason = previewLine(
+			sanitizeText(
+				usageLimit
+					? usageLimitLabel(
+							event.errorMessage,
+							provider,
+							model?.provider === provider ? model?.baseUrl : undefined,
+						)
+					: event.errorMessage,
+			),
+			TRUNCATE_LENGTHS.CONTENT,
+		);
 		// Replaces the turn's row with the countdown.
 		this.ctx.showWorking("retry", {
 			label: `Retrying (${event.attempt}/${event.maxAttempts})`,
@@ -2878,7 +2951,7 @@ export class EventController {
 			ttsrBlock(
 				rules,
 				() => this.ctx.toolOutputExpanded,
-				() => !this.ctx.hideToolActivity,
+				() => this.ctx.toolActivity !== "hidden",
 			),
 		);
 		this.#lastTtsrNotification = { block, rules };
@@ -2886,7 +2959,7 @@ export class EventController {
 
 	async #handleTodoReminder(event: Extract<AgentSessionEvent, { type: "todo_reminder" }>): Promise<void> {
 		const { todos, attempt, maxAttempts } = event;
-		this.ctx.present(() => todoReminderBlock(todos, attempt, maxAttempts, () => !this.ctx.hideToolActivity));
+		this.ctx.present(() => todoReminderBlock(todos, attempt, maxAttempts, () => this.ctx.toolActivity !== "hidden"));
 	}
 	async #handleTodoAutoClear(_event: Extract<AgentSessionEvent, { type: "todo_auto_clear" }>): Promise<void> {
 		await this.ctx.reloadTodos();

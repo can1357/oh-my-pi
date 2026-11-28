@@ -64,6 +64,7 @@ import { type EditMode } from "../tools/details/edit";
 import { resolveEditMode, resolveEditToolMode } from "../utils/edit-mode";
 import { attemptEditAutoRepair, type EditAutoRepairOutcome } from "./auto-repair";
 import { type AppliedEditSnapshot, createEditBlackboxRecorder } from "./blackbox";
+import { createCheckoutNotice } from "./checkout-notice";
 import hashlineCompactPrompt from "./hashline-compact.md" with { type: "text" };
 import { MAGIC_EDIT_GRAMMAR, magicEditPaths, runMagicEdit } from "./magic";
 import magicEditDescription from "../prompts/tools/magic-edit.md" with { type: "text" };
@@ -263,7 +264,7 @@ function mergeDiagnosticsWithWarnings(
 	};
 }
 
-function toPerFileResult(file: EditFileOutcome, mode: EditMode): EditToolPerFileResult {
+function toPerFileResult(file: EditFileOutcome, mode: EditMode, checkoutNotice?: string): EditToolPerFileResult {
 	let diagnostics = parseDiagnostics(file.diagnosticsJson);
 	if (mode === "patch" || mode === "apply_patch") {
 		diagnostics = mergeDiagnosticsWithWarnings(diagnostics, file.warnings);
@@ -271,6 +272,7 @@ function toPerFileResult(file: EditFileOutcome, mode: EditMode): EditToolPerFile
 	const resultPath = file.moveTo ?? file.path;
 	return {
 		path: resultPath,
+		checkoutNotice,
 		diff: file.diff,
 		firstChangedLine: file.firstChangedLine,
 		diagnostics,
@@ -286,9 +288,19 @@ function toPerFileResult(file: EditFileOutcome, mode: EditMode): EditToolPerFile
 	};
 }
 
-function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): EditToolDetails | undefined {
+function mutationKey(sourcePath: string, moveTo?: string): string {
+	return `${sourcePath}\0${moveTo ?? ""}`;
+}
+
+function aggregateDetails(
+	files: readonly EditFileOutcome[],
+	mode: EditMode,
+	checkoutNotices: ReadonlyMap<string, string>,
+): EditToolDetails | undefined {
 	if (files.length === 0) return undefined;
-	const perFileResults = files.map(file => toPerFileResult(file, mode));
+	const perFileResults = files.map(file =>
+		toPerFileResult(file, mode, checkoutNotices.get(mutationKey(file.path, file.moveTo))),
+	);
 	if (perFileResults.length === 1) {
 		const [file] = perFileResults;
 		return {
@@ -299,6 +311,7 @@ function aggregateDetails(files: readonly EditFileOutcome[], mode: EditMode): Ed
 			move: file.move,
 			sourcePath: file.sourcePath,
 			path: file.path,
+			checkoutNotice: file.checkoutNotice,
 			oldText: file.oldText,
 			newText: file.newText,
 			snapshotsPruned: file.snapshotsPruned,
@@ -744,6 +757,8 @@ export class EditTool implements AgentTool<TInput> {
 		const current = open;
 		const editSession = open.native;
 		const batch = getLspBatchRequest(context?.toolCall);
+		const resolveCheckoutNotice = createCheckoutNotice(this.session.cwd);
+		const checkoutNotices = new Map<string, string>();
 		let outcome;
 		try {
 			outcome = await editSession.apply(
@@ -754,7 +769,16 @@ export class EditTool implements AgentTool<TInput> {
 							path: request.path,
 						});
 					}
-					return this.#write(request, current, signal);
+					const response = await this.#write(request, current, signal);
+					const notice = resolveCheckoutNotice?.({
+						path: request.path,
+						moveTo: request.moveTo,
+						followSymlinks: request.op !== "delete",
+					});
+					if (notice !== undefined) {
+						checkoutNotices.set(mutationKey(request.path, request.moveTo), notice);
+					}
+					return response;
 				},
 			);
 			if (outcome.isError && batch?.flush) {
@@ -777,13 +801,22 @@ export class EditTool implements AgentTool<TInput> {
 			};
 		}
 
-		const details = aggregateDetails(outcome.files, this.mode);
+		const details = aggregateDetails(outcome.files, this.mode, checkoutNotices);
 		const result: AgentToolResult<EditToolDetails, TInput> = {
 			content: [{ type: "text", text: outcome.text }],
 			...(details ? { details } : {}),
 		};
 		const record = createEditBlackboxRecorder(this.session, this.mode, params);
 		const notes: string[] = [];
+		if (details?.checkoutNotice) notes.push(details.checkoutNotice);
+		for (const file of details?.perFileResults ?? []) {
+			if (file.checkoutNotice) {
+				const label = file.sourcePath
+					? `${path.relative(this.session.cwd, file.sourcePath)} → ${path.relative(this.session.cwd, file.path)}`
+					: path.relative(this.session.cwd, file.path);
+				notes.push(`${file.checkoutNotice} — ${label}`);
+			}
+		}
 		for (const file of outcome.files) {
 			if (!file.parseRegressed || file.oldText === undefined || file.newText === undefined) continue;
 			const snapshot: AppliedEditSnapshot = {

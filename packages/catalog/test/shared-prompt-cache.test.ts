@@ -40,7 +40,6 @@ describe("task sibling prompt-cache opt-in", () => {
 			{ ...muse, provider: "custom-host", providerType: undefined },
 			{ ...muse, api: "openai-completions" },
 			getBundledModel("openai-codex", "gpt-6-luna"),
-			getBundledModel("google-antigravity", "gemini-3.8-flash"),
 		];
 		for (const model of unsupported) {
 			expect(resolveCatalogPolicy(model).sharedPromptCache, `${model.provider}/${model.id}/${model.api}`).not.toBe(

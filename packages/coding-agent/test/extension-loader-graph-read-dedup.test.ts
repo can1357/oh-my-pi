@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, type Mock, spyOn } from "b
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
-import { loadLegacyPiModule } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import {
+	__collectLegacyPiExtensionSourcesForTests,
+	loadLegacyPiModule,
+} from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
 
@@ -98,6 +101,66 @@ export default function(pi) {
 		checkReadCount(entryPath);
 		for (let i = 0; i < numModules; i++) {
 			checkReadCount(path.join(extDir, `mod-${i}.ts`));
+		}
+	});
+
+	it("resolves shared imports once per directory and reuses the CommonJS native-addon scan's source", async () => {
+		const root = fs.realpathSync(tempDir.absolute());
+		const nested = path.join(root, "nested");
+		fs.mkdirSync(nested);
+		fs.writeFileSync(path.join(root, "package.json"), "{}");
+		fs.writeFileSync(path.join(root, "shared.ts"), "export const value = 2;");
+		fs.writeFileSync(path.join(nested, "shared.ts"), "export const value = 5;");
+		for (const name of ["first.ts", "second.ts", "nested/third.ts"]) {
+			fs.writeFileSync(path.join(root, name), `export { value } from "./shared";`);
+		}
+		const bridge = path.join(root, "bridge.js");
+		fs.writeFileSync(bridge, "module.exports = 3;");
+		const entry = path.join(root, "entry.ts");
+		fs.writeFileSync(
+			entry,
+			`import { value as first } from "./first";
+			 import { value as second } from "./second";
+			 import { value as third } from "./nested/third";
+			 export const total = first + second + third + require("./bridge.js");`,
+		);
+
+		const resolve = spyOn(Bun, "resolveSync");
+		try {
+			const mod = (await loadLegacyPiModule(entry)) as { total: number };
+			expect(mod.total).toBe(12);
+			expect(reads.get(bridge)).toBe(1);
+			const sharedDirs = resolve.mock.calls
+				.filter(([specifier]) => specifier === "./shared")
+				.map(([, dir]) => dir);
+			expect(sharedDirs.sort()).toEqual([root, nested].sort());
+		} finally {
+			resolve.mockRestore();
+		}
+	});
+
+	it("reuses the canonical path already found for a symlinked bare dependency", async () => {
+		const root = fs.realpathSync(tempDir.absolute());
+		const packageRoot = path.join(root, "dependency");
+		const nodeModules = path.join(root, "node_modules");
+		fs.mkdirSync(packageRoot);
+		fs.mkdirSync(nodeModules);
+		fs.writeFileSync(path.join(packageRoot, "package.json"), '{"main":"index.ts"}');
+		const target = path.join(packageRoot, "index.ts");
+		fs.writeFileSync(target, "export default 1;");
+		const link = path.join(nodeModules, "test-dep");
+		fs.symlinkSync(packageRoot, link, "junction");
+		const entry = path.join(root, "entry.ts");
+		fs.writeFileSync(entry, 'export { default } from "test-dep";');
+
+		const realpath = spyOn(fs.promises, "realpath");
+		try {
+			const graph = await __collectLegacyPiExtensionSourcesForTests(entry);
+			expect(graph.has(target)).toBe(true);
+			expect(realpath.mock.calls.filter(([probe]) => probe === path.join(link, "index.ts"))).toHaveLength(1);
+			expect(realpath.mock.calls.filter(([probe]) => probe === target)).toHaveLength(0);
+		} finally {
+			realpath.mockRestore();
 		}
 	});
 

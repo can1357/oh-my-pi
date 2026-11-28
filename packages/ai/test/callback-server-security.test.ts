@@ -160,7 +160,13 @@ describe("OAuthCallbackFlow callback security", () => {
 			const response = await fetch(
 				`${redirectUri}?error=access_denied&error_description=User%20denied&state=${encodeURIComponent(state)}`,
 			);
-			expect(response.status).toBe(500);
+			// Declining consent is a choice: the page reads as canceled, not failed.
+			expect(response.status).toBe(200);
+			const { document } = parseHTML(await response.text());
+			expect(JSON.parse(document.getElementById("server-state")?.textContent ?? "")).toMatchObject({
+				ok: false,
+				canceled: true,
+			});
 			await expect(login).rejects.toThrow("Authorization failed: User denied");
 		} finally {
 			abort.abort("test cleanup");

@@ -237,6 +237,97 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find("openai", modelId)?.supportsComputerUse).toBe(true);
 	});
 
+	test("fixed runtime models use provider transport before and after refresh", async () => {
+		const provider = "runtime-gateway";
+		const modelId = "gateway-model";
+		const gatewayUrl = "https://gateway.example.com/v1";
+		registry.registerProvider(
+			provider,
+			{
+				baseUrl: gatewayUrl,
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				transport: "pi-native",
+				models: [{ ...baseModel, id: modelId }],
+			},
+			"ext://runtime",
+		);
+
+		expect(registry.find(provider, modelId)).toMatchObject({
+			baseUrl: gatewayUrl,
+			transport: "pi-native",
+		});
+		await registry.refresh("offline");
+		expect(registry.find(provider, modelId)?.transport).toBe("pi-native");
+	});
+
+	test("fixed gateway re-registration keeps the URL, bearer and roster from the same registration", async () => {
+		const provider = "runtime-gateway";
+		const requests: Array<[string, string | null]> = [];
+		const fetch: FetchImpl = async (input, init) => {
+			const request = new Request(input instanceof Request ? input.url : String(input), init);
+			requests.push([request.url, request.headers.get("Authorization")]);
+			return Response.json({ models: [{ ...baseModel, id: "account-only", provider, api: "openai-completions" }] });
+		};
+		const register = (target: ModelRegistry, baseUrl: string, apiKey: string) =>
+			target.registerProvider(
+				provider,
+				{
+					baseUrl,
+					apiKey,
+					transport: "pi-native",
+					api: "openai-completions",
+					models: [baseModel],
+				},
+				"ext://runtime",
+			);
+
+		const firstUrl = "https://first-gateway.example";
+		const secondUrl = "https://second-gateway.example";
+		const first = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+		register(first, firstUrl, "first-key");
+		register(first, secondUrl, "second-key");
+		const fixed = first.find(provider, baseModel.id);
+		if (!fixed) throw new Error("Expected fixed gateway model");
+		expect(fixed.baseUrl).toBe(secondUrl);
+		expect(await first.getApiKey(fixed)).toBe("second-key");
+		await first.refreshProvider(provider, "online");
+		expect(requests).toEqual([[`${secondUrl}/v1/pi/models`, "Bearer second-key"]]);
+		expect(first.find(provider, "account-only")).toBeDefined();
+
+		const reopened = new ModelRegistry(authStorage, modelsJsonPath, { fetch });
+		register(reopened, secondUrl, "second-key");
+		await reopened.refreshProvider(provider, "offline");
+		expect(reopened.find(provider, "account-only")).toBeDefined();
+		register(reopened, secondUrl, "another-key");
+		await reopened.refreshProvider(provider, "offline");
+		expect(reopened.find(provider, "account-only")).toBeUndefined();
+		expect(requests).toHaveLength(1);
+	});
+
+	test("replacing a fixed gateway with an ordinary registration restores per-model URLs", () => {
+		const provider = "runtime-gateway";
+		const baseUrl = "https://new-provider.example/v1";
+		const modelUrl = "https://model.example/v1";
+		registry.registerProvider(provider, {
+			baseUrl: "https://old-gateway.example",
+			apiKey: "old-key",
+			api: "openai-completions",
+			transport: "pi-native",
+			models: [baseModel],
+		});
+		registry.getAll();
+		registry.registerProvider(provider, {
+			baseUrl,
+			apiKey: "new-key",
+			api: "openai-completions",
+			models: [baseModel, { ...baseModel, id: "special", baseUrl: modelUrl }],
+		});
+		expect(registry.find(provider, baseModel.id)?.baseUrl).toBe(baseUrl);
+		expect(registry.find(provider, "special")?.baseUrl).toBe(modelUrl);
+		expect(registry.find(provider, "special")?.transport).toBeUndefined();
+	});
+
 	test("config.models re-registration rebuilds inferred capability after a saved transport override", () => {
 		const providerName = "openai";
 		const modelId = "gpt-5.4";
@@ -1694,5 +1785,58 @@ describe("ModelRegistry runtime provider registration", () => {
 		// conflict rather than a vacuous assertion.
 		expect(configured.find(providerName, "glm-5.3")?.baseUrl).toBe("https://model-level.example/v1");
 		expect(configured.getProviderBaseUrl(providerName)).toBe("https://gateway.internal");
+	});
+	describe("auth-gated discovery and the model cache", () => {
+		const providerName = "gated-runtime-provider";
+		const fakeKey = "gated-fake-credential-abc123";
+		const gatedModel = { ...baseModel, id: "gated-model", name: "Gated Model" };
+
+		test("provider-scoped online refresh after login re-runs discovery past a fresh empty cache", async () => {
+			registry.registerProvider(
+				providerName,
+				{
+					baseUrl: "https://runtime.example.com/v1",
+					api: "openai-completions",
+					authHeader: true,
+					// Model appears only once the credential exists.
+					fetchDynamicModels: async (apiKey?: string) => (apiKey ? [gatedModel] : []),
+				},
+				"ext://runtime",
+			);
+
+			// Refresh before login: stores an authoritative empty runtime-provider cache
+			// entry with the 24h TTL (fetchDynamicModels returned [] unauthenticated).
+			await registry.refreshRuntimeProviders();
+			expect(registry.find(providerName, "gated-model")).toBeUndefined();
+
+			await authStorage.credentials.set(providerName, { type: "api_key", key: fakeKey });
+
+			// /login, /logout, sign-in, and RPC login run a provider-scoped online
+			// refresh. It must bypass the fresh authoritative empty row and re-invoke
+			// fetchDynamicModels with the new credential.
+			await registry.refreshProvider(providerName, "online");
+			expect(registry.find(providerName, "gated-model")).toBeDefined();
+		});
+
+		test("model cache does not serialize provider credentials", async () => {
+			// Provider config carries a literal credential + authHeader, mirroring an
+			// extension gateway. The dynamic factory itself never returns a credential.
+			registry.registerProvider(
+				providerName,
+				{
+					baseUrl: "https://runtime.example.com/v1",
+					api: "openai-completions",
+					apiKey: fakeKey,
+					authHeader: true,
+					fetchDynamicModels: async () => [gatedModel],
+				},
+				"ext://runtime",
+			);
+			await registry.refreshProvider(providerName, "online");
+
+			// The model cache is a plaintext SQLite file; it must not carry the API key.
+			const raw = fs.readFileSync(path.join(tempDir, "models.db"));
+			expect(raw.includes(fakeKey)).toBe(false);
+		});
 	});
 });

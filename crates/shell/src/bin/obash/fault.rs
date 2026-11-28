@@ -40,7 +40,7 @@ use omp_shell::{
 		Budget, Cx, Engine, EngineConfig, EventMask, ExtError, ExternalizeReport, Lost, MemStore,
 		Platform, RestoreError, RestoreOpts, RunId, Shell, SigSet, Signal, Step, StoreError, Vpid,
 	},
-	process::{NativeHost, no_callouts, wait_runnable},
+	process::{Callouts, NativeHost, wait_runnable},
 	sys::Parker,
 	testkit::Rng,
 };
@@ -566,6 +566,7 @@ impl Injector {
 		let Parts { cfg, mut host, mut store, mut shell, run, mask } = parts;
 		let root = Vpid(cfg.vpid_base);
 		let every_k = self.budget();
+		let mut callouts = Callouts::new(&self.parker);
 		let status = loop {
 			// While a deferred snapshot waits, every op is a safepoint.
 			let budget = if self.pending {
@@ -574,10 +575,16 @@ impl Injector {
 				every_k
 			};
 			NativeHost::dispatch_signals(&shell.control(), root);
+			callouts.poll(&mut shell, &mut host, &mut store);
 			match shell.step(&mut Cx { host: &mut host, store: &mut store }, budget) {
 				Step::Done { run: done, status } if done == run => break status,
-				Step::Call { id, .. } => no_callouts(&mut shell, id),
-				Step::Blocked | Step::Paused => wait_runnable(&mut self.parker, &shell, root),
+				Step::Done { run, status } => callouts.on_done(&shell, run, status),
+				Step::Call { id, call } => {
+					callouts.on_call(&mut shell, &mut host, &mut store, id, call)
+				},
+				Step::Blocked | Step::Paused => {
+					wait_runnable(&mut self.parker, &shell, root, &callouts);
+				},
 				Step::Yield => {
 					// A busy shell never parks: notice background exits here.
 					self.parker.poll_exits();
@@ -596,6 +603,7 @@ impl Injector {
 						Mode::Step => {
 							let ext = match suspend(
 								&mut self.parker,
+								&mut callouts,
 								&mut shell,
 								&mut host,
 								&mut store,
@@ -621,6 +629,9 @@ impl Injector {
 							self.stats.restored += 1;
 							self.log_lost(&report.lost);
 							shell = restored;
+							// The old shell's callouts went with it: dropping
+							// them cancels their utilities.
+							callouts = Callouts::new(&self.parker);
 							host.bind_signals(shell.control(), root);
 							shell.set_event_mask(mask);
 						},
@@ -628,7 +639,13 @@ impl Injector {
 							#[cfg(unix)]
 							{
 								let ext = match self.block_and_suspend(
-									&mut shell, &mut host, &mut store, root, run, budget,
+									&mut callouts,
+									&mut shell,
+									&mut host,
+									&mut store,
+									root,
+									run,
+									budget,
 								)? {
 									Suspended::Ready(ext) => ext,
 									Suspended::Finished(status) => break status,
@@ -644,7 +661,7 @@ impl Injector {
 						},
 					}
 				},
-				Step::Done { .. } | Step::SuspendReady => {},
+				Step::SuspendReady => {},
 				Step::Idle => break 0,
 			}
 		};
@@ -704,6 +721,7 @@ impl Injector {
 	#[cfg(unix)]
 	fn block_and_suspend(
 		&mut self,
+		callouts: &mut Callouts,
 		shell: &mut Shell,
 		host: &mut NativeHost,
 		store: &mut MemStore,
@@ -713,7 +731,7 @@ impl Injector {
 	) -> Result<Suspended, FaultError> {
 		self.held = Some(os::block_signals()?);
 		NativeHost::dispatch_signals(&shell.control(), root);
-		let suspended = suspend(&mut self.parker, shell, host, store, root, run, budget);
+		let suspended = suspend(&mut self.parker, callouts, shell, host, store, root, run, budget);
 		if !matches!(suspended, Ok(Suspended::Ready(_))) {
 			self.unblock()?;
 		}
@@ -840,6 +858,7 @@ enum Suspended {
 /// (`Blocked`).
 fn suspend(
 	parker: &mut Parker,
+	callouts: &mut Callouts,
 	shell: &mut Shell,
 	host: &mut NativeHost,
 	store: &mut MemStore,
@@ -849,13 +868,15 @@ fn suspend(
 ) -> Result<Suspended, FaultError> {
 	shell.control().request_suspend();
 	loop {
+		callouts.poll(shell, host, store);
 		match shell.step(&mut Cx { host: &mut *host, store: &mut *store }, budget) {
 			Step::SuspendReady => break,
 			Step::Done { run: done, status } if done == run => return Ok(Suspended::Finished(status)),
-			Step::Call { id, .. } => no_callouts(shell, id),
-			Step::Blocked => wait_runnable(parker, shell, root),
+			Step::Done { run, status } => callouts.on_done(shell, run, status),
+			Step::Call { id, call } => callouts.on_call(shell, host, store, id, call),
+			Step::Blocked => wait_runnable(parker, shell, root, callouts),
 			Step::Yield => parker.poll_exits(),
-			Step::Done { .. } | Step::Paused | Step::Idle => {},
+			Step::Paused | Step::Idle => {},
 		}
 	}
 	Ok(Suspended::Ready(shell.externalize(&mut Cx { host, store })?))

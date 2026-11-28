@@ -137,6 +137,35 @@ describe("logins an auth broker stores but does not serve", () => {
 		]);
 	});
 
+	test("a full snapshot hides broker rows for empty local routes and adopts a peer's next route", async () => {
+		await brokerStorage.credentials.upsert("fixture-empty", { type: "api_key", key: "remote" });
+		const dbPath = path.join(tempDir, "agent.db");
+		const writer = await SqliteAuthCredentialStore.open(dbPath, { encrypt: false });
+		const device = "fixture-device";
+		writer.markBrokerLocalProvider("fixture-empty");
+		writer.markBrokerLocalProvider(device);
+		await writer.saveApiKey(device, "local-device");
+		const store = new HybridAuthCredentialStore({
+			broker: await brokerClientStore(),
+			local: await SqliteAuthCredentialStore.open(dbPath, { encrypt: false }),
+		});
+		try {
+			const initial = store.listAuthCredentials();
+			expect(initial.map(row => row.provider)).toEqual([device]);
+			expect(initial[0]!.id).toBeLessThan(0);
+			expect(store.listAuthCredentials("fixture-empty")).toEqual([]);
+
+			writer.markBrokerLocalProvider("fixture-peer");
+			await writer.saveApiKey("fixture-peer", "local-peer");
+			expect(store.pollExternalChanges()).toBe(true);
+			expect(store.listAuthCredentials().map(row => row.provider)).toEqual([device, "fixture-peer"]);
+			expect(store.pollExternalChanges()).toBe(false);
+		} finally {
+			store.close();
+			writer.close();
+		}
+	});
+
 	test("logging out of the last local login sends the next login back to the broker", async () => {
 		registerOAuthProvider({
 			id: UNSERVED,

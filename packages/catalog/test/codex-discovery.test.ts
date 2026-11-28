@@ -1293,6 +1293,7 @@ describe("Codex model discovery", () => {
 					},
 				},
 				"online",
+				undefined,
 				controller.signal,
 			);
 
@@ -1457,7 +1458,7 @@ describe("Codex model discovery", () => {
 					const timeout = new Error("model discovery timed out after 15000ms");
 					let settled = false;
 					let refreshError: unknown;
-					void resolveProviderModels(options, "online", controller.signal).then(
+					void resolveProviderModels(options, "online", undefined, controller.signal).then(
 						() => {
 							settled = true;
 						},

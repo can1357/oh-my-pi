@@ -71,8 +71,6 @@ const CODEX_PROXY_MODEL = buildModel({
 	...toModelSpec(CODEX_MODEL),
 	baseUrl: "https://codex-proxy.example/backend-api",
 });
-const ANTIGRAVITY_CLAUDE_MODEL = getBundledModel("google-antigravity", "claude-sonnet-4-6");
-const ANTIGRAVITY_GEMINI_MODEL = getBundledModel("google-antigravity", "gemini-3.7-flash");
 const XAI_MODEL = getBundledModel("xai", "grok-4.7");
 const XAI_OAUTH_MODEL = getBundledModel("xai-oauth", "grok-4.7");
 const CURSOR_CLAUDE_MODEL = getBundledModel("cursor", "claude-opus-5-high");
@@ -290,8 +288,6 @@ describe("provider context image budgets", () => {
 		["an Anthropic proxy", ANTHROPIC_PROXY_MODEL, 90],
 		["the official Codex backend", CODEX_MODEL, 2000],
 		["a Codex proxy", CODEX_PROXY_MODEL, 200],
-		["Claude on Antigravity", ANTIGRAVITY_CLAUDE_MODEL, 20],
-		["Gemini on Antigravity", ANTIGRAVITY_GEMINI_MODEL, 60],
 		["xAI", XAI_MODEL, 60],
 		["xAI OAuth", XAI_OAUTH_MODEL, 60],
 		["Claude on Cursor", CURSOR_CLAUDE_MODEL, 20],
@@ -335,9 +331,6 @@ describe("provider context image budgets", () => {
 	});
 
 	it.each([
-		// Claude's upstream message limit on Antigravity; Gemini there took 64 MB.
-		["Claude on Antigravity", ANTIGRAVITY_CLAUDE_MODEL, 30_000_000],
-		["Gemini on Antigravity", ANTIGRAVITY_GEMINI_MODEL, 64_000_000],
 		// api.x.ai rejects a body over 50 MiB.
 		["xAI", XAI_MODEL, 52_428_800],
 		["xAI OAuth", XAI_OAUTH_MODEL, 52_428_800],
