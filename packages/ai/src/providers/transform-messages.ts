@@ -917,6 +917,22 @@ export function transformMessages<TApi extends Api>(
 	// block errors from LLM providers (e.g. invalid_prompt).
 	messages = redactSensitiveCredentialsInMessages(messages);
 
+	// Defensive normalization: a user/developer message whose `content` is
+	// neither a string nor a block array (e.g. produced by a lossy session
+	// rebuild or a third-party extension) would crash every provider request
+	// build with a bare `for...of`/`.map` over `content`, surfacing as a
+	// mysterious `stopReason: "error"` on the first turn. Degrade such
+	// messages to a harmless placeholder instead of killing the turn.
+	messages = messages.map((msg): Message => {
+		if (msg.role !== "user" && msg.role !== "developer") return msg;
+		const content: unknown = (msg as { content?: unknown }).content;
+		if (typeof content === "string" || Array.isArray(content)) return msg;
+		return {
+			...msg,
+			content: [{ type: "text", text: "[malformed message content omitted]" }],
+		} as Message;
+	});
+
 	// Drop assistant `toolCall` blocks whose id or name the target cannot replay
 	// (and their matched `toolResult` messages) before anything else looks at
 	// the history. Replaying them would 400 the target provider.
