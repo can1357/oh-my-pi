@@ -59,10 +59,10 @@ export function isNewTip(tip: string): boolean {
 }
 
 /** How tip keys read: the key style, and how `{action:…}` placeholders resolve. */
-export interface TipKeyStyle extends KeyStyle {
+export type TipKeyStyle = KeyStyle & {
 	/** The key a keybinding action is bound to, already formatted; undefined keeps the placeholder. */
 	readonly action?: (action: string) => string | undefined;
-}
+};
 
 const MODIFIERS = ["ctrl", "alt", "shift", "super"] as const;
 

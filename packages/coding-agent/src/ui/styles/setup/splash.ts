@@ -80,7 +80,7 @@ export function splashRows(theme: Theme, width: number, height: number, t: numbe
 	const top = Math.max(0, Math.floor(height * 0.15));
 	const hint = theme.fg(
 		"muted",
-		`press ${formatKey("enter", { preset: theme.symbols.preset, platform: process.platform })} to skip`,
+		`press ${formatKey("enter", { symbols: theme.symbols, platform: process.platform })} to skip`,
 	);
 	const rows: string[] = [];
 	for (let y = 0; y < height; y++) {

@@ -8,13 +8,15 @@ import {
 	expandKeyLabel,
 	formatDoubleTap,
 	formatKeyHint,
+	formatKeyHints,
 	formatTooltipDoubleTap,
 	formatTooltipKey,
 	keyHintSpans,
 } from "@oh-my-pi/pi-coding-agent/ui/keys/hints";
-import type { SymbolPreset } from "@oh-my-pi/pi-tui/theme/schema";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import type { SymbolPreset } from "@oh-my-pi/pi-tui/theme/schema";
+import { createTheme } from "@oh-my-pi/pi-tui/theme/theme";
 
 const original = currentTheme();
 const usePreset = (preset: SymbolPreset): void => setCurrentTheme(loadThemeSync("dark", { symbolPreset: preset }));
@@ -115,6 +117,18 @@ describe("formatKeyHint with keycap glyphs", () => {
 		usePreset("nerd");
 		expect(formatKeyHint("shift+tab")).toBe("\u{f0636} \u{f0312}");
 		expect(formatKeyHint("ctrl+shift+c")).toBe("\u{f0634} \u{f0636} C");
+	});
+
+	it("uses theme keycap and joiner overrides without changing unoverridden keys", () => {
+		const { json } = currentTheme();
+		setCurrentTheme(
+			createTheme(
+				{ ...json, symbols: { overrides: { "key.shift": "⇧", "key.joiner": "·" } } },
+				{ symbolPreset: "nerd" },
+			),
+		);
+		expect(formatKeyHints(["shift+tab", "enter"])).toBe("⇧·\u{f0312}/\u{f0311}");
+		expect(formatDoubleTap("shift")).toBe("⇧·⇧");
 	});
 
 	it("spells keys out in the ascii preset", () => {

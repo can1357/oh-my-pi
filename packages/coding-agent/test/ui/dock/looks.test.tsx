@@ -10,6 +10,7 @@ import { type Block, paintNode, staticEnvironment } from "@oh-my-pi/pi-tui/term/
 import { stripEscapes } from "@oh-my-pi/pi-tui/text/ansi";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { createTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import type { DownloadActivity } from "../../../src/downloads/activity";
 import type { ObservableSession } from "../../../src/task/session-observer-registry";
 import {
@@ -38,12 +39,12 @@ const NOW = 1_700_000_000_000;
 const env = staticEnvironment(loadThemeSync("dark"), { now: NOW });
 
 /** Paint what `factory` builds at `width`; plain rows (trailing blanks trimmed) and the block. */
-function paint(factory: () => JSXNode, width = 80): { rows: string[]; block: Block } {
+function paint(factory: () => JSXNode, width = 80, environment = env): { rows: string[]; block: Block } {
 	return createRoot(dispose => {
 		try {
 			const nodes = resolveChildren(factory())();
 			const root: UiNode | undefined = nodes[0];
-			const block = root ? paintNode(env, root, width) : { rows: [] };
+			const block = root ? paintNode(environment, root, width) : { rows: [] };
 			return { rows: block.rows.map(row => stripEscapes(row).trimEnd()), block };
 		} finally {
 			dispose();
@@ -150,6 +151,17 @@ describe("subagents HUD", () => {
 });
 
 describe("status row", () => {
+	test("the Working… interrupt key uses the painter theme's Escape override", () => {
+		const { json } = loadThemeSync("dark");
+		const theme = createTheme({ ...json, symbols: { overrides: { "key.esc": "⎋ " } } }, { symbolPreset: "nerd" });
+		const { rows } = paint(
+			() => <WorkingRow spec={{ label: "Working…", startedAt: NOW, interruptKey: "escape", shimmer: "disabled" }} />,
+			80,
+			staticEnvironment(theme, { now: NOW }),
+		);
+		expect(rows[1]?.trimStart()).toBe("⎋  Working…");
+	});
+
 	test("maintenance rows: spinner, muted line, cancel hint; retry counts down", () => {
 		const compaction = paint(() => (
 			<WorkingRow

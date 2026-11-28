@@ -1,7 +1,7 @@
 /**
  * Key hints in the active theme: every key the UI shows renders through
  * here, so a key reads the same everywhere. Reading the theme subscribes a
- * reactive caller, so hints re-render when the symbol preset changes.
+ * reactive caller, so hints re-render when the theme's symbols change.
  */
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
@@ -12,17 +12,17 @@ import { canonicalKeyId } from "../../config/keybindings/key-id";
 import { appInterruptKeys } from "../../config/keybindings/matchers";
 import { formatKey, formatKeys, formatKeyTwice, type KeyStyle, kbdKeys, keyHintPlatform } from "./format";
 
-/** The active theme's symbol preset on the key-hint platform. */
+/** The active theme's resolved symbols on the key-hint platform. */
 export function activeKeyStyle(): KeyStyle {
-	return { preset: currentTheme().symbols.preset, platform: keyHintPlatform() };
+	return { symbols: currentTheme().symbols, platform: keyHintPlatform() };
 }
 
-/** One key as `theme`'s symbol preset draws it, for painters handed a theme (`alt+up` → `⌥↑` on macOS). */
+/** One key as `theme` draws it, for painters handed a theme (`alt+up` → `⌥↑` on macOS). */
 export function keyLabel(theme: Theme, key: string): string {
-	return formatKey(key, { preset: theme.symbols.preset, platform: keyHintPlatform() });
+	return formatKey(key, { symbols: theme.symbols, platform: keyHintPlatform() });
 }
 
-/** The primary tool expansion key in `theme`'s symbol preset. */
+/** The primary tool expansion key as `theme` draws it. */
 export function expandKeyLabel(theme: Theme, keybindings: KeybindingsManager = getKeybindings()): string {
 	return keyLabel(theme, keybindings.keysFor("app.tools.expand")[0] ?? "ctrl+o");
 }

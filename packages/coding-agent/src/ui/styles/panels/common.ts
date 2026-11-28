@@ -75,9 +75,9 @@ export function selectNavGlyphs(theme?: Theme): string {
 	return `${bindingGlyph("tui.select.up", "up", theme)}/${bindingGlyph("tui.select.down", "down", theme)}`;
 }
 
-/** Preset keycaps for fixed alternative keys, slash-separated. */
+/** Fixed alternative keys in the supplied theme, slash-separated. */
 export function keyLabels(theme: Theme, keys: readonly string[]): string {
-	return formatKeys(keys, { preset: theme.symbols.preset, platform: keyHintPlatform() });
+	return formatKeys(keys, { symbols: theme.symbols, platform: keyHintPlatform() });
 }
 
 /** The glyphs of a `kbd`'s keys (`["alt", "i"]` → `⌥I`). */

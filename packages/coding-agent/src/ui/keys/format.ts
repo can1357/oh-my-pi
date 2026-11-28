@@ -4,17 +4,17 @@
  * Modifiers are platform-aware: macOS reads ⌃ ⌥ ⌘ (`key.*Mac`), other
  * platforms keep `Ctrl`/`Alt`/`Super`, which no PC keycap shows as a glyph.
  *
- * Addon-free (only the preset tables), so CLI help text can format keys
- * without loading the native addon.
+ * Addon-free, so CLI help can select a preset without loading the native addon.
  */
-import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
+import type { SymbolSet } from "@oh-my-pi/pi-tui/theme/contract";
 import type { SymbolPreset } from "@oh-my-pi/pi-tui/theme/schema";
+import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
 
-/** How keys read: the symbol preset and the platform whose modifier keycaps they name. */
-export interface KeyStyle {
-	readonly preset: SymbolPreset;
-	readonly platform: NodeJS.Platform;
-}
+/** How keys read: resolved theme symbols or a standalone preset, and the modifier platform. */
+export type KeyStyle = { readonly platform: NodeJS.Platform } & (
+	| { readonly symbols: SymbolSet }
+	| { readonly preset: SymbolPreset }
+);
 
 /** Modifiers in display order (⌃⌥⇧⌘, as macOS menus list them). */
 const MODIFIERS = ["ctrl", "alt", "shift", "super"] as const;
@@ -58,6 +58,10 @@ function modifierSymbol(modifier: string, mac: boolean): string {
 	return modifier === "shift" ? "key.shift" : `key.${modifier}${mac ? "Mac" : ""}`;
 }
 
+function keySymbol(style: KeyStyle, key: string): string | undefined {
+	return "symbols" in style ? style.symbols.symbol(key) : presetSymbols(style.preset)[key];
+}
+
 /** A chord's parts: modifiers then the key; a trailing `+` is the plus key itself (`+`, `ctrl++`). */
 function chordParts(key: string): string[] {
 	return key.endsWith("+") ? [...key.slice(0, -1).split("+").slice(0, -1), "+"] : key.split("+");
@@ -66,7 +70,7 @@ function chordParts(key: string): string[] {
 /**
  * One key as `style` draws it: `ctrl+shift+c` → `⌃⇧C` (macOS) / `Ctrl+⇧C`,
  * `escape` → `⎋`, `alt+up` → `⌥↑` / `Alt+↑`, a bare modifier `shift` → `⇧`.
- * A glyph modifier is followed by the preset's `key.joiner` (nothing in
+ * A glyph modifier is followed by the style's `key.joiner` (nothing in
  * unicode, a space in nerd, whose icons blur together when adjacent); a word
  * modifier takes a `+`. Modifiers render in canonical order whatever the
  * binding says (`shift+ctrl+p` → `⌃⇧P`). A bare letter stays lowercase (`q`,
@@ -74,7 +78,6 @@ function chordParts(key: string): string[] {
  * capitalized (`f5` → `F5`).
  */
 export function formatKey(key: string, style: KeyStyle): string {
-	const symbols = presetSymbols(style.preset);
 	const mac = style.platform === "darwin";
 	const parts = chordParts(key);
 	const base = parts.pop()!;
@@ -82,12 +85,12 @@ export function formatKey(key: string, style: KeyStyle): string {
 	let out = "";
 	for (const modifier of MODIFIERS) {
 		if (!modifiers.includes(modifier)) continue;
-		const label = symbols[modifierSymbol(modifier, mac)] ?? modifier;
-		out += LETTERS.test(label) ? `${label}+` : label + (symbols["key.joiner"] ?? "");
+		const label = keySymbol(style, modifierSymbol(modifier, mac)) ?? modifier;
+		out += LETTERS.test(label) ? `${label}+` : label + (keySymbol(style, "key.joiner") ?? "");
 	}
 	const lower = base.toLowerCase();
-	if ((MODIFIERS as readonly string[]).includes(lower)) out += symbols[modifierSymbol(lower, mac)] ?? lower;
-	else if (NAMED_KEYS[lower]) out += symbols[NAMED_KEYS[lower]] ?? lower;
+	if ((MODIFIERS as readonly string[]).includes(lower)) out += keySymbol(style, modifierSymbol(lower, mac)) ?? lower;
+	else if (NAMED_KEYS[lower]) out += keySymbol(style, NAMED_KEYS[lower]) ?? lower;
 	else if (WORD_KEYS[lower]) out += WORD_KEYS[lower];
 	else if (base.length === 1) out += parts.length === 0 ? base : base.toUpperCase();
 	else out += base[0]!.toUpperCase() + base.slice(1);
@@ -102,7 +105,7 @@ export function formatKeys(keys: string | readonly string[], style: KeyStyle): s
 /** A double tap of `key`: `←←` with glyphs, `Left Left` with words. */
 export function formatKeyTwice(key: string, style: KeyStyle): string {
 	const label = formatKey(key, style);
-	return `${label}${LETTERS.test(label) ? " " : (presetSymbols(style.preset)["key.joiner"] ?? "")}${label}`;
+	return `${label}${LETTERS.test(label) ? " " : (keySymbol(style, "key.joiner") ?? "")}${label}`;
 }
 
 /** The keycaps of a `kbd` node (`alt+up` → `["alt", "up"]`, `ctrl++` → `["ctrl", "+"]`). */
