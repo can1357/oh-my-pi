@@ -1075,8 +1075,10 @@ type AdvertisedReasoning =
  * (`supported_reasoning_levels: [{ effort }]`, `default_reasoning_level`);
  * other gateways may advertise the same fields top-level, along with
  * `reasoning_effort_map` (where an unserved request lands) and
- * `reasoning_required`. Returns undefined when the row says nothing usable
- * about reasoning.
+ * `reasoning_required`. OpenRouter-style rows carry the ladder as an object,
+ * `reasoning: { supported_efforts, default_effort }`; the flat fields win when
+ * a row sends both. Returns undefined when the row says nothing usable about
+ * reasoning.
  *
  * An explicit non-reasoning declaration is reported as `{ kind: "none" }`
  * rather than `undefined`: the caller must be able to tell "this endpoint says
@@ -1097,13 +1099,17 @@ function extractAdvertisedReasoning(item: {
 	// codex-lb nests every reasoning field under `metadata`; read the denial from
 	// the same place the ladder below comes from, or a nested `reasoning: false`
 	// would keep the reference dial alive.
-	if ((metadata?.reasoning ?? item.reasoning) === false) return { kind: "none" };
-	const raw = metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels;
+	const reasoning = metadata?.reasoning ?? item.reasoning;
+	if (reasoning === false) return { kind: "none" };
+	const reasoningObject = isRecord(reasoning) ? reasoning : undefined;
+	const raw =
+		metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels ?? reasoningObject?.supported_efforts;
 	const efforts = extractReasoningLevels(raw);
 	if (efforts === undefined) {
-		return (metadata?.reasoning ?? item.reasoning) === true ? { kind: "native" } : undefined;
+		return reasoning === true ? { kind: "native" } : undefined;
 	}
-	const rawDefault = metadata?.default_reasoning_level ?? item.default_reasoning_level;
+	const rawDefault =
+		metadata?.default_reasoning_level ?? item.default_reasoning_level ?? reasoningObject?.default_effort;
 	const defaultLevel = advertisedReasoningEffort(rawDefault);
 	const effortMap = extractReasoningEffortMap(metadata?.reasoning_effort_map ?? item.reasoning_effort_map);
 	const requiresEffort = metadata?.reasoning_required ?? item.reasoning_required;

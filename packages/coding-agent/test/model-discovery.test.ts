@@ -3770,6 +3770,77 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(requestPayload?.reasoning_effort).toBe("high");
 	});
 
+	test("openai-models-list discovery reads advertised reasoning ladders from the reasoning object shape", async () => {
+		// OpenRouter-style rows carry the ladder as `reasoning: { supported_efforts,
+		// default_effort }` rather than the flat `supported_reasoning_levels` dialect.
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url.endsWith("/v1/models")) {
+				return Response.json({
+					data: [
+						{
+							id: "acme-object",
+							reasoning: { supported_efforts: ["max", "low", "high"], default_effort: "high" },
+						},
+						{
+							id: "acme-object-nested",
+							metadata: {
+								reasoning: {
+									supported_efforts: [{ effort: "low" }, { effort: "medium" }],
+									default_effort: "medium",
+								},
+							},
+						},
+						{
+							id: "acme-flat-and-object",
+							supported_reasoning_levels: ["low", "high"],
+							default_reasoning_level: "high",
+							reasoning: { supported_efforts: ["medium"], default_effort: "medium" },
+						},
+						{ id: "acme-native", reasoning: true },
+						{ id: "acme-plain", reasoning: false },
+					],
+				});
+			}
+			return new Response(null, { status: 404 });
+		};
+		const models = await discoverOpenAIModelsList(
+			{
+				provider: "custom-discovery",
+				api: "openai-completions",
+				baseUrl: "https://custom.example/v1",
+				discovery: { type: "openai-models-list" },
+			},
+			{ fetch: fetchMock, getBearerApiKeyResolver: async () => undefined },
+		);
+		const find = (id: string) => models.find(model => model.id === id);
+		const object = find("acme-object");
+		expect(object?.reasoning).toBe(true);
+		expect(object?.thinking).toMatchObject({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.High, Effort.Max],
+			defaultLevel: Effort.High,
+		});
+		expect((object?.compat as OpenAICompat | undefined)?.supportsReasoningEffort).toBe(true);
+		expect(find("acme-object-nested")?.thinking).toMatchObject({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium],
+			defaultLevel: Effort.Medium,
+		});
+		// The flat dialect keeps winning when a row sends both shapes.
+		expect(find("acme-flat-and-object")?.thinking).toMatchObject({
+			efforts: [Effort.Low, Effort.High],
+			defaultLevel: Effort.High,
+		});
+		// Booleans are not ladders: `true` stays native, `false` still denies reasoning.
+		const native = find("acme-native");
+		expect(native?.reasoning).toBe(true);
+		expect(native?.thinking?.unverified).not.toBe(true);
+		const plain = find("acme-plain");
+		expect(plain?.reasoning).toBe(false);
+		expect(plain?.thinking).toBeUndefined();
+	});
+
 	test("openai-models-list discovery carries advertised effort aliases and mandatory reasoning", async () => {
 		writeRawModelsJson({
 			"example-gateway": {
