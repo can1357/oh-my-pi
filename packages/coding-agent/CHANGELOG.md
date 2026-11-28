@@ -133,6 +133,7 @@
 
 ### Fixed
 
+- Documented the 13 missing `tui.*` settings in the settings reference, including boxed-prompt IME layout, Kitty OSC 66 text sizing, inline image budget placeholders, and Mermaid text diagrams ([#20863](https://github.com/can1357/oh-my-pi/issues/20863), [#20956](https://github.com/can1357/oh-my-pi/pull/20956) by [@koeria](https://github.com/koeria))
 - Background job results delivered while the agent is idle are freed once delivered, not kept in memory until the whole turn they started ends ([#20886](https://github.com/can1357/oh-my-pi/pull/20886) by [@sjawhar](https://github.com/sjawhar))
 - Kept the prompt at the bottom when `/compact` shortens a long session or a cancelled submission restores the draft and rebuilds the same transcript ([#20912](https://github.com/can1357/oh-my-pi/pull/20912) by [@thebtf](https://github.com/thebtf))
 - In fullscreen mode, the terminal can select and copy text in `/session` info, the background jobs sheet, and command reports (`/context`, `/changelog`, `/tools`, …), which there always open as a full-screen page instead of above the editor.
