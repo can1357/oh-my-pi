@@ -3,7 +3,18 @@
  * styling, symbols.
  */
 import { adjustHsv, mixHex } from "@oh-my-pi/pi-utils/color";
-import { BG_DEFAULT, type ColorDepth, colorHex, FG_DEFAULT, fgSgr, bgSgr, isLightColor, normalizeHex } from "./color";
+import {
+	BG_DEFAULT,
+	type ColorDepth,
+	colorHex,
+	FG_DEFAULT,
+	fgSgr,
+	bgSgr,
+	isLightColor,
+	normalizeHex,
+	UNDERLINE_COLOR_DEFAULT,
+	underlineSgr,
+} from "./color";
 import type { EmojiSupport, Theme } from "./contract";
 import {
 	BACKGROUND_KEYS,
@@ -25,6 +36,8 @@ export interface ThemeOptions {
 	readonly colorBlindMode?: boolean;
 	/** How the terminal draws emoji-capable glyphs; picks their form in the symbol table (default conservative). */
 	readonly emoji?: EmojiSupport;
+	/** The terminal draws styled underlines: `typo` becomes a curly underline in the `error` color (default off). */
+	readonly styledUnderlines?: boolean;
 }
 
 /** TSP tones → the theme color that draws them. */
@@ -64,17 +77,19 @@ const ITALIC: Attribute = { open: "\x1b[3m", close: "\x1b[23m" };
 const UNDERLINE: Attribute = { open: "\x1b[4m", close: "\x1b[24m" };
 const INVERSE: Attribute = { open: "\x1b[7m", close: "\x1b[27m" };
 const STRIKE: Attribute = { open: "\x1b[9m", close: "\x1b[29m" };
+/** Curly underline; the color follows it. Closed by `CSI 24 m`, never `CSI 4:0 m`, which some terminals paint as a bar. */
+const CURLY_UNDERLINE_ON = "\x1b[4:3m";
 
-/** Attribute tokens, innermost first. */
+/** Attribute tokens other than `typo`, which each theme resolves (see {@link ThemeOptions.styledUnderlines}). */
 const ATTRIBUTE_TOKENS: Readonly<Record<string, Attribute>> = {
 	strong: BOLD,
 	em: ITALIC,
 	underline: UNDERLINE,
-	typo: UNDERLINE,
 	strike: STRIKE,
 	inverse: INVERSE,
 	faint: FAINT,
 };
+/** Attributes, innermost first. */
 const ATTRIBUTE_ORDER: readonly Attribute[] = [ITALIC, UNDERLINE, STRIKE, INVERSE, FAINT, BOLD];
 
 /**
@@ -143,6 +158,10 @@ export class ResolvedTheme implements Theme {
 	readonly #fgResolved: Record<string, string> = {};
 	readonly #palette: readonly string[];
 	readonly #paletteHex: readonly (string | undefined)[];
+	/** The `typo` token's attribute: a colored curly underline, or {@link UNDERLINE} where styled ones are unsupported. */
+	readonly #typo: Attribute;
+	/** {@link ATTRIBUTE_ORDER} with a styled {@link #typo} innermost, so a plain underline around it outlives its close. */
+	readonly #attributeOrder: readonly Attribute[];
 
 	constructor(json: ThemeJson, options: ThemeOptions = {}) {
 		const depth = options.depth ?? "truecolor";
@@ -192,6 +211,13 @@ export class ResolvedTheme implements Theme {
 			const value = ansi?.[slot];
 			return value === undefined || value === "" ? undefined : colorHex(value, light);
 		});
+		this.#typo = options.styledUnderlines
+			? {
+					open: `${CURLY_UNDERLINE_ON}${underlineSgr(colors.error ?? "", depth)}`,
+					close: `${UNDERLINE.close}${UNDERLINE_COLOR_DEFAULT}`,
+				}
+			: UNDERLINE;
+		this.#attributeOrder = this.#typo === UNDERLINE ? ATTRIBUTE_ORDER : [this.#typo, ...ATTRIBUTE_ORDER];
 		this.symbols = new ThemeSymbols({
 			preset: options.symbolPreset ?? json.symbols?.preset ?? "unicode",
 			overrides: json.symbols?.overrides,
@@ -275,7 +301,7 @@ export class ResolvedTheme implements Theme {
 		for (const token of tokens.split(" ")) {
 			if (token === "") continue;
 			if (token === "hide") return "";
-			const attribute = ATTRIBUTE_TOKENS[token];
+			const attribute = token === "typo" ? this.#typo : ATTRIBUTE_TOKENS[token];
 			if (attribute !== undefined) (attributes ??= []).push(attribute);
 			else if (this.#fg[token] !== undefined) color = token;
 			else if (TONE_COLORS[token] !== undefined) color = TONE_COLORS[token];
@@ -288,7 +314,7 @@ export class ResolvedTheme implements Theme {
 		}
 		let out = text;
 		if (attributes !== undefined) {
-			for (const attribute of ATTRIBUTE_ORDER)
+			for (const attribute of this.#attributeOrder)
 				if (attributes.includes(attribute)) out = withAttribute(attribute, out);
 		}
 		color ??= semantic?.color;

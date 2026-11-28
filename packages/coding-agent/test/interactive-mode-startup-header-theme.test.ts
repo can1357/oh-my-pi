@@ -33,7 +33,13 @@ const startupChangelog: StartupChangelogSelection = {
 	categoryCounts: { Fixed: 1 },
 };
 
-const DARK_TRUECOLOR = { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI } as const;
+const DARK_TRUECOLOR = {
+	truecolor: true,
+	colors: 16_777_216,
+	dark: true,
+	emoji: CONSERVATIVE_EMOJI,
+	styledUnderlines: false,
+} as const;
 
 /** Opening SGR sequence `fg(color, ...)` emits under the active theme. */
 function fgPrefix(color: "accent" | "warning"): string {

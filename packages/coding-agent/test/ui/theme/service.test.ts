@@ -22,7 +22,13 @@ import {
 import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
-const DARK_TRUECOLOR = { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI } as const;
+const DARK_TRUECOLOR = {
+	truecolor: true,
+	colors: 16_777_216,
+	dark: true,
+	emoji: CONSERVATIVE_EMOJI,
+	styledUnderlines: false,
+} as const;
 
 let changes: ThemeChange[];
 let unsubscribe: () => void;
@@ -56,7 +62,15 @@ describe("theme service", () => {
 		expect(currentTheme().dark).toBe(true);
 		expect(currentTheme().depth).toBe("truecolor");
 
-		initTheme({ capabilities: { truecolor: false, colors: 256, dark: false, emoji: CONSERVATIVE_EMOJI } });
+		initTheme({
+			capabilities: {
+				truecolor: false,
+				colors: 256,
+				dark: false,
+				emoji: CONSERVATIVE_EMOJI,
+				styledUnderlines: false,
+			},
+		});
 		expect(getCurrentThemeName()).toBe("light");
 		expect(currentTheme().dark).toBe(false);
 		expect(currentTheme().depth).toBe("256");

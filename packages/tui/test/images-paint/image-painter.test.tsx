@@ -34,6 +34,7 @@ function capabilities(overrides: Partial<TerminalCapabilities> = {}): TerminalCa
 		textSizing: false,
 		tsp: false,
 		emoji: { vs16Wide: false, bareFits: false },
+		styledUnderlines: false,
 		...overrides,
 	};
 }

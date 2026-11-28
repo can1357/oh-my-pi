@@ -33,6 +33,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	textSizing: false,
 	tsp: false,
 	emoji: { vs16Wide: false, bareFits: false },
+	styledUnderlines: false,
 };
 
 type Listener = (columns: number, rows: number) => void;

@@ -32,6 +32,7 @@ const CAPABILITIES: TerminalCapabilities = {
 	textSizing: false,
 	tsp: false,
 	emoji: { vs16Wide: false, bareFits: false },
+	styledUnderlines: false,
 };
 
 /** Records frames; acknowledges every history batch; history is the concatenation of acknowledged batches. */

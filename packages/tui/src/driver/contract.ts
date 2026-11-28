@@ -55,6 +55,8 @@ export interface TerminalCapabilities {
 	readonly tsp: boolean;
 	/** How emoji-capable glyphs advance and draw (profile, refined by the DECRQM 2027 reply or a width probe). */
 	readonly emoji: EmojiSupport;
+	/** Draws colon-form styled underlines: `CSI 4:3 m` curly plus a `CSI 58` underline color. */
+	readonly styledUnderlines: boolean;
 }
 
 /** Control sequences that must bracket one newly committed history row in the same write. */
