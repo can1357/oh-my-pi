@@ -523,6 +523,29 @@ export function applyProviderReportedCost(model: Pick<Model, "provider">, usage:
 	usage.cost.total = reportedCost;
 }
 
+/**
+ * Cache writes reported by OpenAI Responses-family usage: prefer the scalar
+ * `input_tokens_details.cache_write_tokens`; when absent, sum the TTL
+ * breakdown in `input_tokens_details.cache_write_tokens_details` (the documented
+ * OpenAI shape) or top-level `cache_write_tokens_details` (Codex).
+ */
+function responsesCacheWriteTokens(
+	cacheWriteTokens: number | null | undefined,
+	ttlDetails:
+		| {
+				ttl_30m_tokens?: number | null;
+				ttl_12h_tokens?: number | null;
+		  }
+		| null
+		| undefined,
+): number | undefined {
+	if (typeof cacheWriteTokens === "number") return cacheWriteTokens;
+	if (!ttlDetails) return undefined;
+	const ttl30m = typeof ttlDetails.ttl_30m_tokens === "number" ? ttlDetails.ttl_30m_tokens : 0;
+	const ttl12h = typeof ttlDetails.ttl_12h_tokens === "number" ? ttlDetails.ttl_12h_tokens : 0;
+	return ttl30m + ttl12h > 0 ? ttl30m + ttl12h : undefined;
+}
+
 export interface OpenAIUsageAccountingInput {
 	promptTokens: number;
 	outputTokens: number;
@@ -4543,8 +4566,16 @@ export function populateResponsesUsageFromResponse(
 				input_tokens_details?: {
 					cached_tokens?: number | null;
 					cache_write_tokens?: number | null;
+					cache_write_tokens_details?: {
+						ttl_30m_tokens?: number | null;
+						ttl_12h_tokens?: number | null;
+					} | null;
 					orchestration_input_tokens?: number | null;
 					orchestration_input_cached_tokens?: number | null;
+				} | null;
+				cache_write_tokens_details?: {
+					ttl_30m_tokens?: number | null;
+					ttl_12h_tokens?: number | null;
 				} | null;
 				output_tokens_details?: {
 					reasoning_tokens?: number | null;
@@ -4579,7 +4610,10 @@ export function populateResponsesUsageFromResponse(
 		outputTokens: Math.max(0, reportedOutputTokens - (primaryIncludesOrchestration ? orchestrationOutputTokens : 0)),
 		cachedTokens: Math.max(0, reportedCachedTokens - (primaryIncludesOrchestration ? orchestrationInputCached : 0)),
 		reasoningTokens: outputDetails?.reasoning_tokens ?? 0,
-		cacheWriteOpenRouter: details?.cache_write_tokens ?? undefined,
+		cacheWriteOpenRouter: responsesCacheWriteTokens(
+			details?.cache_write_tokens,
+			details?.cache_write_tokens_details ?? usage.cache_write_tokens_details,
+		),
 		cacheWriteDeepSeek: usage.prompt_cache_miss_tokens ?? undefined,
 		hasDeepSeekCacheHitAndMiss:
 			usage.prompt_cache_hit_tokens !== undefined && usage.prompt_cache_miss_tokens !== undefined,

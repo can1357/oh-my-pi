@@ -2380,6 +2380,78 @@ describe("openai-codex streaming", () => {
 		expect(result.usage.cost.output).toBeCloseTo(0.000012);
 		expect(result.usage.cost.total).toBeCloseTo(0.000022);
 	});
+
+	it.each([
+		{
+			name: "nested input_tokens_details.cache_write_tokens_details",
+			usage: {
+				input_tokens: 200,
+				output_tokens: 50,
+				total_tokens: 300,
+				input_tokens_details: {
+					cached_tokens: 100,
+					cache_write_tokens_details: { ttl_30m_tokens: 60, ttl_12h_tokens: 40 },
+				},
+			},
+		},
+		{
+			name: "top-level cache_write_tokens_details when the scalar is absent",
+			usage: {
+				input_tokens: 200,
+				output_tokens: 50,
+				total_tokens: 300,
+				input_tokens_details: { cached_tokens: 100 },
+				cache_write_tokens_details: { ttl_30m_tokens: 60, ttl_12h_tokens: 40 },
+			},
+		},
+	])(
+		"attributes Codex cache-write TTL buckets from a terminal response.completed event ($name)",
+		async ({ usage }) => {
+			using tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+
+			const payload = Buffer.from(
+				JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
+				"utf8",
+			).toBase64();
+			const token = `aaa.${payload}.bbb`;
+
+			const sse = `${[
+				`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello" }] } })}`,
+				`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage } })}`,
+			].join("\n\n")}\n\n`;
+			const fetchMock: FetchImpl = async () =>
+				new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+
+			const model: Model<"openai-codex-responses"> = buildModel({
+				id: "gpt-5.1-codex",
+				name: "GPT-5.1 Codex",
+				api: "openai-codex-responses",
+				provider: "openai-codex",
+				baseUrl: "https://chatgpt.com/backend-api",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 1 },
+				contextWindow: 400000,
+				maxTokens: 128000,
+			});
+			const context: Context = {
+				systemPrompt: ["You are a helpful assistant."],
+				messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+			};
+
+			const result = await streamOpenAICodexResponses(model, context, {
+				fetch: fetchMock,
+				apiKey: token,
+			}).result();
+			expect(result.stopReason).toBe("stop");
+			expect(result.usage.cacheWrite).toBe(100);
+			expect(result.usage.cacheRead).toBe(100);
+			expect(result.usage.input).toBe(0);
+			expect(result.usage.output).toBe(50);
+		},
+	);
+
 	it("bills priority turns at the Codex provider's baked 2.5x serviceTierCost multiplier", async () => {
 		using tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
