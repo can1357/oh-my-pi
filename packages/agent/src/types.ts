@@ -400,6 +400,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	onDetachedToolUpdate?: (event: Extract<AgentEvent, { type: "tool_execution_update" }>) => void;
 
 	/**
+	 * Interval (ms) between periodic `tool_execution_update` heartbeats emitted
+	 * while a tool runs without producing output. 0 disables the heartbeat.
+	 */
+	toolExecutionHeartbeatMs?: number;
+
+	/**
+	 * Interval (ms) between periodic `tool_execution_update` heartbeats emitted
+	 * while a tool runs without producing output. 0 disables the heartbeat.
+	 */
+	toolExecutionHeartbeatMs?: number;
+
+	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
 	 *
 	 * Called when the agent has no more tool calls and no steering messages.

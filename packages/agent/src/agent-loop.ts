@@ -239,6 +239,9 @@ export const TOOL_INTERRUPT_ABORT_REASON = Symbol.for("pi-agent-core.tool-interr
 
 const STEERING_INTERRUPT_POLL_MS = 250;
 
+/** Default interval between liveness `tool_execution_update` heartbeats while a tool runs silently (#20225). */
+const DEFAULT_TOOL_EXECUTION_HEARTBEAT_MS = 30_000;
+
 class HarmonyLeakInterruption extends Error {
 	constructor(
 		readonly detection: HarmonyDetection,
@@ -3759,6 +3762,28 @@ async function executeToolCalls(
 			intent: toolCall.intent,
 		});
 
+		// While a tool runs silently (a poll loop that prints nothing, a sleep),
+		// no event leaves the process and an RPC supervisor cannot tell a call
+		// running within its own time budget from a hang (#20225). Emit a periodic
+		// liveness update carrying the elapsed time; consumers that already track
+		// real partial results can ignore the marker field.
+		const heartbeatMs = config.toolExecutionHeartbeatMs ?? DEFAULT_TOOL_EXECUTION_HEARTBEAT_MS;
+		let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+		if (heartbeatMs > 0) {
+			const toolStartedAt = Date.now();
+			heartbeatTimer = setInterval(() => {
+				const event: Extract<AgentEvent, { type: "tool_execution_update" }> = {
+					type: "tool_execution_update",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					args: effectiveArgs,
+					partialResult: { heartbeat: true, elapsedMs: Date.now() - toolStartedAt },
+				};
+				if (stream.done) config.onDetachedToolUpdate?.(event);
+				else stream.push(event);
+			}, heartbeatMs);
+		}
+
 		const toolSpan = startExecuteToolSpan(telemetry, {
 			tool,
 			toolName: toolCall.name,
@@ -3924,6 +3949,8 @@ async function executeToolCalls(
 				}
 			}
 		});
+
+		if (heartbeatTimer) clearInterval(heartbeatTimer);
 
 		const interrupted = interruptState.triggered;
 		const perToolAborted = record.signal.aborted;

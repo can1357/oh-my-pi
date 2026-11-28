@@ -8717,3 +8717,79 @@ describe("speculative tool execution", () => {
 		await closing;
 	});
 });
+
+describe("agentLoop tool execution heartbeat (#20225)", () => {
+	it("emits periodic liveness updates while a silent tool runs", async () => {
+		const toolSchema = type({ value: "string" });
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "silent",
+			label: "Silent",
+			description: "Runs silently for a while",
+			parameters: toolSchema,
+			concurrency: "exclusive",
+			async execute(_toolCallId, params) {
+				await new Promise(resolve => setTimeout(resolve, 80));
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: {} };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "silent", arguments: { value: "x" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			toolExecutionHeartbeatMs: 20,
+		};
+
+		const updates: Extract<AgentEvent, { type: "tool_execution_update" }>[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			if (event.type === "tool_execution_update" && event.toolName === "silent") updates.push(event);
+		}
+
+		const heartbeats = updates.filter(update => (update.partialResult as { heartbeat?: boolean })?.heartbeat === true);
+		expect(heartbeats.length).toBeGreaterThan(0);
+		expect(new Set(heartbeats.map(update => update.toolCallId))).toEqual(new Set(["tool-1"]));
+		const elapsed = heartbeats.map(update => (update.partialResult as { elapsedMs?: number }).elapsedMs ?? 0);
+		for (let i = 1; i < elapsed.length; i++) expect(elapsed[i]).toBeGreaterThanOrEqual(elapsed[i - 1]);
+	});
+
+	it("emits no heartbeat when disabled", async () => {
+		const toolSchema = type({ value: "string" });
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "silent",
+			label: "Silent",
+			description: "Runs silently for a while",
+			parameters: toolSchema,
+			concurrency: "exclusive",
+			async execute(_toolCallId, params) {
+				await new Promise(resolve => setTimeout(resolve, 60));
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: {} };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "silent", arguments: { value: "x" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			toolExecutionHeartbeatMs: 0,
+		};
+
+		const updates: Extract<AgentEvent, { type: "tool_execution_update" }>[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			if (event.type === "tool_execution_update" && event.toolName === "silent") updates.push(event);
+		}
+
+		expect(updates).toEqual([]);
+	});
+});
