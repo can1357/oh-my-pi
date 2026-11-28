@@ -814,6 +814,14 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 				result.loginWarning = singleString(child);
 				if (!result.loginWarning.trim()) malformed(child);
 				break;
+			case "login-group": {
+				leaf(child, ["order"]);
+				const [title, label, ...extra] = positionalStrings(child);
+				const order = propInt(child, "order");
+				if (!title?.trim() || !label?.trim() || extra.length || order === undefined || order < 1) malformed(child);
+				result.loginGroup = { title, label, order };
+				break;
+			}
 			case "connected-name":
 				leaf(child, []);
 				result.connectedName = singleString(child);
@@ -829,11 +837,17 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 				result.loginNotice = singleString(child);
 				if (!result.loginNotice.trim()) malformed(child);
 				break;
-			case "manage-url":
-				leaf(child, []);
+			case "manage-url": {
+				leaf(child, ["label"]);
 				result.manageUrl = singleString(child);
 				if (!URL.canParse(result.manageUrl)) malformed(child);
+				const label = propString(child, "label");
+				if (label !== undefined) {
+					if (!label.trim()) malformed(child);
+					result.manageLabel = label;
+				}
 				break;
+			}
 			case "required-scope":
 				leaf(child, []);
 				result.requiredScope = singleString(child);
@@ -853,8 +867,10 @@ function provider(node: KdlNodeView): CompiledAuthProvider {
 				result.deviceBound = singleBool(child);
 				break;
 			case "sign-out": {
-				leaf(child, ["hook"]);
-				result.signOut = { hook: hookName(child, "hook") };
+				leaf(child, ["hook", "label"]);
+				const label = propString(child, "label");
+				if (label !== undefined && !label.trim()) malformed(child);
+				result.signOut = { hook: hookName(child, "hook"), ...(label === undefined ? {} : { label }) };
 				break;
 			}
 			case "api-key-format": {

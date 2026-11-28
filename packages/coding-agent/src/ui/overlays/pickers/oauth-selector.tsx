@@ -25,6 +25,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { TspPickerAction, TspPickerItem, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { connectedProviderName } from "../../../modes/view-model/chrome/format";
+import { providerMark } from "../../../modes/view-model/overlays/model-browser";
 import { fuzzyFilter } from "../../../utils/fuzzy";
 import "../../styles/pickers/oauth";
 import type { OAuthLookTerm, OAuthRowStatus } from "../../styles/pickers/oauth";
@@ -73,6 +74,19 @@ export interface OAuthSelectorProps {
 	onCancel(): void;
 }
 
+type LoginGroup = {
+	readonly id: string;
+	readonly title: string;
+	readonly label: string;
+	readonly members: OAuthProviderInfo[];
+};
+
+type Entry = OAuthProviderInfo | LoginGroup;
+
+function isGroup(entry: Entry): entry is LoginGroup {
+	return "members" in entry;
+}
+
 const MAX_VISIBLE = 10;
 const UNAVAILABLE = "Provider unavailable in this environment.";
 
@@ -91,15 +105,6 @@ function visibleRows(lines: number | undefined): number {
 	const strict = lines - 3;
 	const relaxed = lines - 2;
 	return Math.min(MAX_VISIBLE, Math.max(1, strict, Math.min(relaxed, 3)));
-}
-
-function initials(name: string): string {
-	return name
-		.split(/[^\p{L}\p{N}]+/u)
-		.filter(word => word.length > 0)
-		.slice(0, 2)
-		.map(word => word[0]!.toUpperCase())
-		.join("");
 }
 
 export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
@@ -123,10 +128,42 @@ export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
 				!disabled.has(provider.id) && !(provider.storeCredentialsAs && disabled.has(provider.storeCredentialsAs)),
 		);
 	});
-	// `/login` keeps each provider's sign-in label; `/logout` lists linked accounts under their connected name.
+	const rootEntries = computed((): readonly Entry[] => {
+		if (!login) return providers();
+		const groups = new Map<string, LoginGroup>();
+		const entries: Entry[] = [];
+		for (const provider of providers()) {
+			const group = provider.loginGroup;
+			if (!group) {
+				entries.push(provider);
+				continue;
+			}
+			let entry = groups.get(group.title);
+			if (!entry) {
+				entry = { id: `group:${group.title}`, title: group.title, label: group.label, members: [] };
+				groups.set(group.title, entry);
+				entries.push(entry);
+			}
+			entry.members.push(provider);
+		}
+		for (const group of groups.values()) {
+			group.members.sort((a, b) => a.loginGroup!.order - b.loginGroup!.order);
+		}
+		return entries;
+	});
+	const openGroup = signal<string | null>(null);
+	const group = computed(() => {
+		const id = openGroup();
+		if (id === null) return undefined;
+		return rootEntries().find((entry): entry is LoginGroup => entry.id === id && isGroup(entry));
+	});
+	const entries = computed(() => group()?.members ?? rootEntries());
+
 	const nameOf = (provider: OAuthProviderInfo): string =>
-		login ? provider.name : connectedProviderName(provider.id, provider.name);
-	const searchText = (provider: OAuthProviderInfo): string => {
+		!login || (provider.loginGroup && auth.credentials.has(provider.storeCredentialsAs ?? provider.id))
+			? connectedProviderName(provider.id, provider.name)
+			: provider.name;
+	const providerSearchText = (provider: OAuthProviderInfo): string => {
 		let text = `${nameOf(provider)} ${provider.name} ${provider.id}`;
 		const origin = auth.keys.source(provider.id);
 		if (origin) {
@@ -136,18 +173,21 @@ export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
 		if (!provider.available) text += " unavailable";
 		return text;
 	};
+	const searchText = (entry: Entry): string =>
+		isGroup(entry) ? `${entry.label} ${entry.members.map(providerSearchText).join(" ")}` : providerSearchText(entry);
 
 	const search = signal<LineState>({ text: "", cursor: 0 });
+	let parentSearch: LineState | undefined;
 	const status = signal<string | null>(null);
 	const rows = computed(() => visibleRows(props.maxHeight?.()));
-	const searchable = (): boolean => providers().length > rows();
+	const searchable = (): boolean => entries().length > rows();
 	const showSearch = (): boolean => searchable() || search().text.length > 0;
 	const visible = computed(() => {
 		const query = search().text.trim();
-		const all = providers();
+		const all = entries();
 		return query ? fuzzyFilter([...all], query, searchText) : all;
 	});
-	const selected = signal<string | null>(providers()[0]?.id ?? null);
+	const selected = signal<string | null>(entries()[0]?.id ?? null);
 	const state = (id: string): OAuthAuthState | undefined => props.authState?.().get(id);
 
 	const setQuery = (next: LineState): void =>
@@ -160,12 +200,34 @@ export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
 			selected.set(visible()[0]?.id ?? null);
 		});
 	const confirm = (): void => {
-		const provider = visible().find(p => p.id === selected());
-		if (!provider) return;
-		if (provider.available) {
+		const entry = visible().find(p => p.id === selected());
+		if (!entry) return;
+		if (isGroup(entry)) {
+			parentSearch = search();
+			batch(() => {
+				openGroup.set(entry.id);
+				setQuery({ text: "", cursor: 0 });
+				selected.set(visible()[0]?.id ?? null);
+				status.set(null);
+			});
+		} else if (entry.available) {
 			status.set(null);
-			props.onSelect(provider.id);
+			props.onSelect(entry.id);
 		} else status.set(UNAVAILABLE);
+	};
+	const leave = (): void => {
+		const id = openGroup();
+		if (id === null) {
+			props.onCancel();
+			return;
+		}
+		batch(() => {
+			openGroup.set(null);
+			setQuery(parentSearch ?? { text: "", cursor: 0 });
+			selected.set(id);
+			status.set(null);
+		});
+		parentSearch = undefined;
 	};
 	const pick = (id: string, activate: boolean): void => {
 		if (!visible().some(provider => provider.id === id)) return;
@@ -211,30 +273,42 @@ export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
 			id: provider.id,
 			label: nameOf(provider),
 			detail,
-			mark: { text: initials(provider.name), seed: provider.id },
+			mark: providerMark(provider.storeCredentialsAs ?? provider.id),
 			dot,
 			...(provider.available ? {} : { disabled: "Provider unavailable in this environment" }),
 		};
 	};
 	const items = computed(() => {
 		revision();
-		return providers().map(item);
+		return entries().map(entry =>
+			isGroup(entry)
+				? { id: entry.id, label: entry.label, mark: providerMark(entry.members[0]!.id) }
+				: item(entry),
+		);
 	});
 	const actions = (): TspPickerAction[] => {
 		const sheet = read(props.sheet);
+		const onGroup = login && visible().some(entry => entry.id === selected() && isGroup(entry));
 		return [
 			pickerAction(
 				"confirm",
-				login ? "Sign in" : "Sign out",
+				login ? (onGroup ? "Continue" : "Sign in") : "Sign out",
 				"enter",
 				login ? { primary: true } : { primary: true, danger: true },
 			),
-			sheet ? pickerAction(sheet.leave.id, sheet.leave.label, cancelKbd(), { end: true }) : closeAction(),
+			group()
+				? pickerAction("back", "Back", cancelKbd(), { end: true })
+				: sheet
+					? pickerAction(sheet.leave.id, sheet.leave.label, cancelKbd(), { end: true })
+					: closeAction(),
 		];
 	};
 	const term = (): OAuthLookTerm => {
 		const statuses: Record<string, OAuthRowStatus> = {};
+		const sources: Record<string, string> = {};
+		const unavailable: string[] = [];
 		for (const provider of visible()) {
+			if (isGroup(provider)) continue;
 			const check = state(provider.id);
 			const status: OAuthRowStatus =
 				check === "checking"
@@ -245,28 +319,24 @@ export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
 							? "valid"
 							: "none";
 			statuses[provider.id] = status;
-		}
-		const sources: Record<string, string> = {};
-		for (const provider of visible()) {
 			const source = sourceLabel(provider.id);
 			if (source) sources[provider.id] = source;
+			if (!provider.available) unavailable.push(provider.id);
 		}
 		const query = search();
 		const empty =
 			providers().length === 0
 				? login
-					? "No OAuth providers available"
+					? "No sign-in methods available"
 					: "No stored provider credentials to log out"
 				: "No matching providers";
 		return {
 			look: "omp.oauth",
-			title: login ? "Select provider to login" : "Select provider to logout",
+			title: group()?.title ?? (login ? "Select provider to login" : "Select provider to logout"),
 			maxRows: rows(),
 			statuses,
 			sources,
-			unavailable: visible()
-				.filter(provider => !provider.available)
-				.map(provider => provider.id),
+			unavailable,
 			searchLine: showSearch() ? (query.text.trim() ? query : null) : undefined,
 			empty: visible().length === 0 ? empty : undefined,
 			status: status() ?? undefined,
@@ -280,8 +350,12 @@ export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
 			<picker
 				key={PICKER_KEY}
 				role={() => sheetProp("role")}
-				title={() => sheetProp("title") ?? (login ? "Sign in" : "Sign out")}
-				subtitle={() => sheetProp("subtitle") ?? (login ? "Pick a provider" : "Remove stored credentials")}
+				title={() => group()?.title ?? sheetProp("title") ?? (login ? "Sign in" : "Sign out")}
+				subtitle={() =>
+					group()
+						? "Choose how to connect"
+						: (sheetProp("subtitle") ?? (login ? "Pick a provider" : "Remove stored credentials"))
+				}
 				icon="key-round"
 				noun="providers"
 				size={() => sheetProp("size") ?? "md"}
@@ -293,8 +367,8 @@ export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
 				items={items}
 				order={() => (search().text.length > 0 ? visible().map(provider => provider.id) : undefined)}
 				selected={selected}
-				total={() => providers().length}
-				empty={login ? "No OAuth providers available" : "No stored provider credentials to log out"}
+				total={() => entries().length}
+				empty={login ? "No sign-in methods available" : "No stored provider credentials to log out"}
 				message={() => status() ?? undefined}
 				strip={() => {
 					const label = sheetProp("status");
@@ -312,7 +386,7 @@ export function OAuthSelector(props: OAuthSelectorProps): JSXNode {
 							setQuery({ text: "", cursor: 0 });
 							status.set(null);
 						});
-					} else if (act === "close" || act === "cancel" || act === sheetProp("leave")?.id) props.onCancel();
+					} else if (act === "back" || act === "close" || act === "cancel" || act === sheetProp("leave")?.id) leave();
 				}}
 			/>
 		</col>

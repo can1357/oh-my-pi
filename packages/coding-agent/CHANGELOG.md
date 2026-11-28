@@ -141,6 +141,7 @@
 - `/tan` forks reuse the parent session's prompt cache: their first request no longer re-sends the whole conversation uncached, and Claude and GPT-6.2 keep the parent's earlier reasoning instead of dropping it.
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
+- Sign-in prompts now refer to the address or code shown in your browser instead of authorization jargon.
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Resuming a session after its omp crashed or was killed now reminds about, and at session end reaps, the background processes that omp left running, while a second live omp on the same session still leaves them alone
 - `glob` now returns up to 200 paths instead of rejecting requests for more ([#20893](https://github.com/can1357/oh-my-pi/pull/20893) by [@JustasMasiulis](https://github.com/JustasMasiulis)).

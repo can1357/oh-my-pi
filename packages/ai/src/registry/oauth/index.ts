@@ -7,12 +7,7 @@ import type { OAuthRefreshReason } from "../../auth/types";
 import * as AIError from "../../error";
 import { jwtExpiryMs, NEVER_EXPIRES } from "../engine/common";
 import { getProviderDefinition, PROVIDER_REGISTRY } from "../registry";
-import type {
-	OAuthCredentials,
-	OAuthProviderId,
-	OAuthProviderInfo,
-	OAuthProviderInterface,
-} from "./types";
+import type { OAuthCredentials, OAuthProviderId, OAuthProviderInfo, OAuthProviderInterface } from "./types";
 
 export * from "./anthropic";
 export * from "./device-code";
@@ -23,12 +18,16 @@ export type * from "./types";
 // since the end user may opt back in (see setUnpausedProviders).
 const builtInOAuthProviders: OAuthProviderInfo[] = PROVIDER_REGISTRY.filter(
 	provider => provider.login && provider.showInLoginList !== false,
-).map(provider => ({
-	id: provider.id,
-	name: providerLoginWarning(provider.id) === undefined ? provider.name : `${provider.name} (at your own risk)`,
-	available: provider.available ?? true,
-	storeCredentialsAs: provider.storeCredentialsAs,
-}));
+).map(provider => {
+	const policy = authPolicyFor(provider.id);
+	return {
+		id: provider.id,
+		name: policy?.loginWarning === undefined ? provider.name : `${provider.name} (at your own risk)`,
+		available: provider.available ?? true,
+		storeCredentialsAs: provider.storeCredentialsAs,
+		...(policy?.loginGroup ? { loginGroup: policy.loginGroup } : {}),
+	};
+});
 
 const customOAuthProviders = new Map<string, OAuthProviderInterface>();
 

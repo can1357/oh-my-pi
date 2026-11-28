@@ -1,5 +1,5 @@
 /**
- * The sign-in flow in the terminal: a box titled `Login to <provider>` with
+ * The sign-in flow in the terminal: a titled box with
  * the flow as it happened — the sign-in link (accented, every wrapped row a
  * link to it), how to open it, instructions, prompts with their fields and
  * answers, waits and progress (dim).
@@ -24,7 +24,9 @@ defineRolePainter("col", "omp.login", (node, cx): Block => {
 				content.push("");
 				break;
 			case "url":
-				for (const row of wrap(piece.url, inner)) content.push(theme.fg("accent", link(piece.url, row)));
+				for (const row of wrap((cx.hyperlinks ? piece.label : undefined) ?? piece.url, inner)) {
+					content.push(theme.fg("accent", link(piece.url, row)));
+				}
 				break;
 			case "text": {
 				for (const row of wrap(

@@ -1,14 +1,15 @@
 import { getOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
-import { providerAccessOff } from "@oh-my-pi/pi-catalog/compat/auth";
+import { authPolicyFor, providerAccessOff } from "@oh-my-pi/pi-catalog/compat/auth";
 import { connectedProviderName } from "../../modes/view-model/chrome/format";
 import type { AgentSession } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity, StoredAuthCredential } from "../../session/auth-storage";
 
-import type { LogoutAccount } from "../../modes/view-model/overlays/logout-account-selector";
+import type { LogoutAccount, LogoutAccountAction } from "../../modes/view-model/overlays/logout-account-selector";
 
 interface LogoutAccountOptions {
 	activeIdentity?: OAuthAccountIdentity;
 	activeApiKey?: boolean;
+	loginProvider?: string;
 }
 
 function nonEmpty(value: string | undefined): string | undefined {
@@ -88,20 +89,41 @@ export function toLogoutAccounts(
 	credentials: StoredAuthCredential[],
 	options: LogoutAccountOptions = {},
 ): LogoutAccount[] {
+	const loginProvider = options.loginProvider ?? provider;
+	const policy = authPolicyFor(loginProvider);
+	const disconnectLabel = policy?.signOut?.label;
+	const connection: LogoutAccount["connection"] =
+		disconnectLabel === undefined
+			? undefined
+			: {
+					disconnectLabel,
+					...(policy?.manageUrl
+						? { manage: { label: policy.manageLabel ?? "Manage access", url: policy.manageUrl } }
+						: {}),
+				};
 	return credentials
 		.map(row => {
-			const label = oauthLabel(row);
+			const credential = row.credential;
+			const linked = credential.type === "oauth" && connection !== undefined;
+			const label = linked ? (nonEmpty(credential.email) ?? "Account") : oauthLabel(row);
+			const detail =
+				linked
+					? providerAccessOff(loginProvider, credential.scope)
+						? `Connected · ${connectedProviderName(loginProvider)} off`
+						: "Connected"
+					: oauthDetail(provider, row, label);
 			const active =
-				row.credential.type === "oauth"
+				credential.type === "oauth"
 					? oauthMatchesActiveIdentity(row, options.activeIdentity)
 					: options.activeApiKey === true;
 			return {
 				credentialId: row.id,
 				provider,
 				label,
-				detail: oauthDetail(provider, row, label),
-				type: row.credential.type,
+				detail,
+				type: credential.type,
 				active,
+				...(linked ? { connection } : {}),
 			} satisfies LogoutAccount;
 		})
 		.sort((left, right) => {
@@ -121,28 +143,35 @@ export async function listLogoutAccounts(
 	return toLogoutAccounts(provider, authStorage.credentials.list(provider), {
 		activeIdentity: authStorage.oauth.identity(provider, sessionId),
 		activeApiKey: authStorage.keys.source(provider)?.kind === "api_key",
+		loginProvider,
 	});
 }
 
 /**
- * Removes one stored credential (its provider forgets the account's secrets on
- * this machine and revokes its grant upstream) and refreshes the provider's
- * models. `removed: false` means the credential was already gone;
+ * Removes one stored credential and refreshes the provider's models. The
+ * default also revokes the upstream grant where supported; `sign-out-local`
+ * only removes the stored credential. `removed: false` means it was already gone;
  * `remainingSource` names the auth source that still authenticates the
  * provider, if any; `signOutError` says why the provider's sign-out failed
  * (the credential is removed regardless).
  */
 export async function logoutCredential(
-	session: Pick<AgentSession, "modelRegistry" | "sessionId" | "refreshScopedModels">,
+	session: Pick<AgentSession, "sessionId" | "refreshScopedModels"> & {
+		modelRegistry: Pick<AgentSession["modelRegistry"], "authStorage" | "refreshProvider">;
+	},
 	loginProvider: string,
 	credentialId: number,
+	action: LogoutAccountAction = "disconnect",
 ): Promise<{ removed: boolean; remainingSource?: string; signOutError?: string }> {
 	const provider = getOAuthCredentialProvider(loginProvider);
 	const modelRegistry = session.modelRegistry;
 	const authStorage = modelRegistry.authStorage;
 	// Reload so an id stored by another process is found, not reported missing.
 	await authStorage.credentials.reload();
-	const { removed, signOutError } = await authStorage.oauth.signOut(provider, credentialId);
+	const { removed, signOutError } =
+		action === "sign-out-local"
+			? { removed: await authStorage.credentials.removeById(provider, credentialId), signOutError: undefined }
+			: await authStorage.oauth.signOut(provider, credentialId);
 	if (!removed) return { removed: false };
 	// Provider-scoped online refresh so the removed credential's stale
 	// endpoint/deployment models are invalidated deterministically; the

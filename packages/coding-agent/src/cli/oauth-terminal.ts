@@ -189,7 +189,7 @@ export async function runTerminalOAuthLogin(
 		...(usesManualInput
 			? {
 					onManualCodeInput(signal) {
-						return ask("Paste the authorization code (or full redirect URL):", signal);
+						return ask("Paste the address from your browser (or the code it shows):", signal);
 					},
 				}
 			: undefined),

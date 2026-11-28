@@ -50,7 +50,15 @@ pickerSuite({
 		const [provider, accounts] =
 			caseName === "few" ? ["Anthropic", FEW] : caseName === "many" ? ["Very\tLong  Provider", MANY] : ["", []];
 		return {
-			view: () => <LogoutAccountSelector provider={provider} accounts={accounts} onSelect={noop} onCancel={noop} />,
+			view: () => (
+				<LogoutAccountSelector
+					provider={provider}
+					accounts={accounts}
+					onSelect={noop}
+					onOpenConnection={noop}
+					onCancel={noop}
+				/>
+			),
 			steps: {
 				"picker select": ev({ type: "select", key: "picker", item: "3" }),
 				"picker select many": ev({ type: "select", key: "picker", item: "20" }),

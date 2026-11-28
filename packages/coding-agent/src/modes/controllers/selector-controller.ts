@@ -66,7 +66,7 @@ import { loadPinnedSessionIds, setSessionPinned } from "../../session/session-pi
 import { FileSessionStorage } from "../../session/session-storage";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import { connectedProviderName } from "../view-model/chrome/format";
-import type { LogoutAccount } from "../view-model/overlays/logout-account-selector";
+import type { LogoutAccount, LogoutAccountAction } from "../view-model/overlays/logout-account-selector";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import {
@@ -2352,8 +2352,9 @@ export class SelectorController {
 	 * comes back at once. Returns true when credentials were stored.
 	 */
 	async #handleOAuthLogin(providerId: string): Promise<boolean> {
-		this.ctx.showStatus(`Logging in to ${providerId}…`);
-		const { getOAuthCredentialProvider, PASTE_CODE_LOGIN_PROVIDERS } = await loadProviderAuthUi();
+		const { getOAuthCredentialProvider, getOAuthProviders, PASTE_CODE_LOGIN_PROVIDERS } = await loadProviderAuthUi();
+		const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
+		this.ctx.showStatus(provider ? `Starting sign-in: ${provider.name}…` : "Starting sign-in…");
 		const useManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(providerId);
 		const restoreEditor = () => handle.close();
 		const dialog = new LoginDialogState(
@@ -2388,7 +2389,7 @@ export class SelectorController {
 				onManualCodeInput: useManualInput
 					? signal =>
 							dialog.showManualInput(
-								`Paste the authorization code (or full redirect URL), then press ${formatKeyHint("enter")}:`,
+								`If sign-in didn’t finish, paste the address from your browser (or the code it shows), then press ${formatKeyHint("enter")}:`,
 								signal,
 							)
 					: undefined,
@@ -2442,7 +2443,7 @@ export class SelectorController {
 		}
 	}
 
-	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
+	async #handleCredentialLogout(providerId: string, account: LogoutAccount, action: LogoutAccountAction): Promise<void> {
 		const providerName = connectedProviderName(providerId);
 		try {
 			// Before the logout: removing a broker-unserved provider's last local login hands it back to the broker.
@@ -2451,18 +2452,37 @@ export class SelectorController {
 				this.ctx.session,
 				providerId,
 				account.credentialId,
+				action,
 			);
 			if (!removed) {
 				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerName}.`);
 				return;
 			}
 
+			const signedOut = account.connection
+				? action === "sign-out-local" || signOutError !== undefined
+					? `Signed out ${account.label} on this device`
+					: `Disconnected ${account.label} from ${providerName}`
+				: `Successfully logged out ${account.label} from ${providerName}`;
 			const lines: [string, string][] = [
-				["success", successText(`Successfully logged out ${account.label} from ${providerName}`)],
+				["success", successText(signedOut)],
 				["dim", `Credential removed from ${source}`],
 			];
-			if (signOutError) lines.push(["warning", signOutError]);
-			if (remainingSource) lines.push(["warning", `${providerName} is still authenticated via ${remainingSource}`]);
+			if (signOutError !== undefined) {
+				const manage = account.connection?.manage;
+				lines.push([
+					"warning",
+					manage ? `Could not disconnect the account. Finish at ${manage.label}: ${manage.url}` : signOutError,
+				]);
+			}
+			if (remainingSource) {
+				lines.push([
+					"warning",
+					account.connection
+						? `${providerName} is still available through another sign-in or key.`
+						: `${providerName} is still authenticated via ${remainingSource}`,
+				]);
+			}
 			this.ctx.present(() => outcomeLinesView(lines));
 		} catch (error: unknown) {
 			this.ctx.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -2482,24 +2502,26 @@ export class SelectorController {
 		}
 		const { getOAuthProviders } = await loadProviderAuthUi();
 		const provider = getOAuthProviders().find(candidate => candidate.id === providerId);
+		const providerName = connectedProviderName(providerId, provider?.name ?? providerId);
 		if (accounts.length === 0) {
 			const source = authStorage.keys.describe(
 				provider?.storeCredentialsAs ?? providerId,
 				this.ctx.session.sessionId,
 			);
 			const suffix = source ? ` Current auth comes from ${source}; remove that source to log out.` : "";
-			this.ctx.showError(`Logout skipped: no stored credentials for ${providerId}.${suffix}`);
+			this.ctx.showError(`Logout skipped: no stored credentials for ${providerName}.${suffix}`);
 			return;
 		}
 
 		this.#showInEditorArea(done =>
 			LogoutAccountSelector({
-				provider: connectedProviderName(providerId, provider?.name ?? providerId),
+				provider: providerName,
 				accounts,
-				onSelect: account => {
+				onSelect: (account, action) => {
 					done();
-					void this.#handleCredentialLogout(providerId, account);
+					void this.#handleCredentialLogout(providerId, account, action);
 				},
+				onOpenConnection: openPath,
 				onCancel: done,
 			}),
 		);

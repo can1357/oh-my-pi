@@ -366,6 +366,18 @@ describe("auth grammar", () => {
 		).toThrow(/auth\/x\.kdl:3/);
 	});
 
+	test("login-group carries a submenu title, a parent row label, and a positive order", () => {
+		const compileGroup = (value: string) =>
+			compileAuth([{ file: "auth/x.kdl", text: `auth "x" {\n\tname "X"\n\tlogin-group ${value}\n}` }, order()]);
+		expect(compileGroup('"X" "Choose how to connect to X" order=2').providers[0]?.loginGroup).toEqual({
+			title: "X",
+			label: "Choose how to connect to X",
+			order: 2,
+		});
+		expect(() => compileGroup('"X" " " order=1')).toThrow(/auth\/x\.kdl:3/);
+		expect(() => compileGroup('"X" "X methods" order=0')).toThrow(/auth\/x\.kdl:3/);
+	});
+
 	test("connected-name and active-notice compile into auth policy; blank text is rejected", () => {
 		const compiled = compileAuth([
 			{
@@ -385,6 +397,22 @@ describe("auth grammar", () => {
 		expect(() =>
 			compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tactive-notice ""\n}' }, order()]),
 		).toThrow(/auth\/x\.kdl:3/);
+	});
+
+	test("account management and disconnect labels compile into auth policy", () => {
+		const policy = (directives: string) =>
+			compileAuth([{ file: "auth/x.kdl", text: `auth "x" {\n\tname "X"\n${directives}\n}` }, order()]);
+		expect(
+			policy(
+				'\tmanage-url "https://x.example/connections" label="X Account Connections"\n\tsign-out hook="x" label="Disconnect X Account"',
+			).providers[0],
+		).toMatchObject({
+			manageUrl: "https://x.example/connections",
+			manageLabel: "X Account Connections",
+			signOut: { hook: "x", label: "Disconnect X Account" },
+		});
+		expect(() => policy('\tmanage-url "https://x.example/connections" label=" "')).toThrow(/auth\/x\.kdl:3/);
+		expect(() => policy('\tsign-out hook="x" label=""')).toThrow(/auth\/x\.kdl:3/);
 	});
 
 	test("auth identity and OAuth env policy preserve explicit false and reject empty token lists", () => {
