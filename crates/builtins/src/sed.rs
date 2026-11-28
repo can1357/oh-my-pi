@@ -645,7 +645,7 @@ use crate::sed::{
 		ScriptLocation, compilation_error, compilation_error_before, compilation_error_through_newline,
 		invalid_reference, newline_delimiter_error, semantic_error,
 	},
-	fast_regex::Regex,
+	fast_regex::{Regex, holds_equivalence_class},
 	named_writer::NamedWriter,
 	script_char_provider::ScriptCharProvider,
 	script_line_provider::{ScriptLineProvider, ScriptValue},
@@ -1183,6 +1183,8 @@ fn compile_regex(
 	if pattern.is_empty() {
 		return Ok(None);
 	}
+	// The translation reads `[[=a=]]` as `[a]`, so tell it here.
+	let equivalence_class = holds_equivalence_class(pattern);
 
 	let translated = if context.regex_extended {
 		crate::bre::ere_to_rust(pattern, false)
@@ -1219,7 +1221,7 @@ fn compile_regex(
 		_ => e.to_string(),
 	})?;
 
-	Ok(Some(compiled))
+	Ok(Some(if equivalence_class { compiled.stepping_whole_characters() } else { compiled }))
 }
 
 /// Adds `\n` to every negated bracket class of a translated pattern: under
@@ -6581,7 +6583,7 @@ pub mod fast_regex {
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use std::{borrow::Cow, cell::OnceCell, error::Error, ops::ControlFlow};
+use std::{borrow::Cow, cell::OnceCell, error::Error, iter::Peekable, ops::ControlFlow, str::Chars};
 
 use fancy_regex::{Captures as FancyCaptures, Regex as FancyRegex};
 use memchr::memmem;
@@ -6619,6 +6621,143 @@ fn needs_regex(pattern: &str) -> bool {
 			_ => true,
 		}
 	})
+}
+
+/// Whether GNU's regex searches `pattern`, in the engine's syntax (see
+/// `crate::bre`), a byte at a time in a UTF-8 locale, so that an empty match
+/// falls inside a character of several bytes: `sed 's/x*/-/g'` on `é` prints
+/// `-\303-\251-`. glibc does so unless the pattern is read without case or
+/// holds `\w`, `\W`, `\s`, `\S`, a word anchor, or a bracket expression that
+/// negates or holds a class, a range or a character outside ASCII: such a
+/// pattern it searches a character at a time (`sed 's/[a-z]*/-/g'` on `éa`
+/// prints `-é-`). An atom repeated zero times it drops before it decides.
+///
+/// An alternation, a repeated group (a quantifier on another quantifier, such
+/// as `x*\?`, among them), a back-reference, `\p` and `\P`, which the engines
+/// read as a Unicode class (`\pL`) and GNU reads as the letter `p`, and a
+/// buffer anchor (`\A` and `\z`, sed's `` \` `` and `\'`) keep a
+/// whole-character step, even where glibc searches them a byte at a time:
+/// there the engines' first match can differ from GNU's longest, and a step
+/// of one byte after it would count matches GNU never reaches
+/// (`sed 's/x*\|a/-/4'` on `éa` changes nothing, and GNU's buffer anchor with
+/// a quantifier matches nowhere).
+/// So does a pattern with a character outside ASCII, which the engines read
+/// as one character where GNU in the C locale reads its bytes, so that a
+/// quantifier repeats only the last one (`é\{0\}` is the byte `\303` there).
+fn searched_by_byte(pattern: &str) -> bool {
+	if pattern.contains('|') || !pattern.is_ascii() || needs_backreferences(pattern) {
+		return false;
+	}
+	byte_atoms(&mut pattern.chars().peekable())
+}
+
+/// Reads atoms up to the end of the pattern or the `)` that closes their
+/// group, and answers whether glibc searches each of them a byte at a time.
+fn byte_atoms(chars: &mut Peekable<Chars<'_>>) -> bool {
+	let mut by_byte = true;
+	while let Some(c) = chars.next() {
+		let atom = match c {
+			')' => break,
+			'\\' => !matches!(
+				chars.next(),
+				Some('w' | 'W' | 's' | 'S' | 'b' | 'B' | '<' | '>' | 'p' | 'P' | 'A' | 'z')
+			),
+			'[' => plain_bracket(chars),
+			'(' => {
+				let mut icase = false;
+				let mut flags_only = false;
+				if chars.next_if_eq(&'?').is_some() {
+					while let Some(flag) = chars.next_if(|&flag| flag != ')' && flag != ':') {
+						icase |= flag == 'i';
+					}
+					flags_only = chars.next() == Some(')');
+				}
+				let group = flags_only || byte_atoms(chars);
+				// A group with its own repetition keeps the whole-character step;
+				// one repeated zero times is dropped below, as glibc drops it.
+				let repeated = !flags_only && matches!(chars.peek(), Some('*' | '+' | '?' | '{'));
+				group && !icase && !repeated
+			},
+			_ => true,
+		};
+		by_byte &= atom || zero_count_follows(chars);
+	}
+	by_byte
+}
+
+/// Whether the bracket expression whose `[` is already read lists ASCII
+/// characters alone, which glibc reads as a set of bytes. Reads past its `]`.
+/// The translation escapes every literal `-` and `[`, so one that is not
+/// escaped makes a range or opens a class.
+fn plain_bracket(chars: &mut Peekable<Chars<'_>>) -> bool {
+	let mut plain = chars.next_if_eq(&'^').is_none();
+	while let Some(c) = chars.next() {
+		match c {
+			']' => break,
+			'\\' => plain &= chars.next().is_some_and(|c| c.is_ascii()),
+			'[' => {
+				plain = false;
+				while let Some(c) = chars.next() {
+					if c == ':' && chars.next_if_eq(&']').is_some() {
+						break;
+					}
+				}
+			},
+			'-' => plain = false,
+			c => plain &= c.is_ascii(),
+		}
+	}
+	plain
+}
+
+/// Whether an interval that repeats the atom just read at most zero times
+/// comes next: `{0}` or `{0,0}`.
+fn zero_count_follows(chars: &Peekable<Chars<'_>>) -> bool {
+	let mut ahead = chars.clone();
+	if ahead.next() != Some('{') {
+		return false;
+	}
+	let interval: String = ahead.take_while(|&c| c != '}').collect();
+	let most = interval.rsplit(',').next().unwrap_or_default();
+	!most.is_empty() && most.bytes().all(|digit| digit == b'0')
+}
+
+/// Whether `pattern`, as the script wrote it, holds an equivalence class such
+/// as `[[=a=]]`. The translation reads one as its character, but in a locale
+/// with collation rules, such as `en_US.UTF-8`, glibc searches a pattern that
+/// holds one a character at a time.
+pub fn holds_equivalence_class(pattern: &str) -> bool {
+	let mut chars = pattern.chars().peekable();
+	while let Some(c) = chars.next() {
+		if c == '\\' {
+			chars.next();
+			continue;
+		}
+		if c != '[' {
+			continue;
+		}
+		// A bracket expression: a `]` right after its `[` or `[^` is a member.
+		chars.next_if_eq(&'^');
+		chars.next_if_eq(&']');
+		while let Some(c) = chars.next() {
+			match c {
+				']' => break,
+				'[' => match chars.next_if(|&marker| matches!(marker, ':' | '.' | '=')) {
+					Some('=') => return true,
+					Some(marker) => {
+						while let Some(c) = chars.next() {
+							if c == marker && chars.next_if_eq(&']').is_some() {
+								break;
+							}
+						}
+					},
+					None => {},
+				},
+				_ => {},
+			}
+		}
+	}
+	false
 }
 
 #[derive(Clone, Debug)]
@@ -6749,14 +6888,43 @@ pub enum Regex {
 }
 
 #[derive(Debug)]
+/// What the engines of a line that is UTF-8 leave to other readings of a
+/// pattern: a line that is not UTF-8, and an empty match inside a character.
 pub struct RawRegex {
 	pattern: Box<str>,
 	compiled: OnceCell<Result<onig::Regex, onig::Error>>,
+	/// Where GNU searches the pattern a byte at a time (see
+	/// [`searched_by_byte`]), the groups that take part in the empty match it
+	/// finds inside a character, if it finds one; read on first use.
+	inside_chars: Option<OnceCell<Option<Box<[bool]>>>>,
 }
 
 impl RawRegex {
 	fn new(pattern: String) -> Self {
-		Self { pattern: pattern.into_boxed_str(), compiled: OnceCell::new() }
+		Self {
+			inside_chars: searched_by_byte(&pattern).then(OnceCell::new),
+			pattern: pattern.into_boxed_str(),
+			compiled: OnceCell::new(),
+		}
+	}
+
+	/// The groups of the empty match GNU finds inside each character of
+	/// several bytes in `text`, a line that is UTF-8; `None` where it finds
+	/// none there.
+	fn empty_inside_chars(&self, text: &str) -> Option<&[bool]> {
+		let cell = self.inside_chars.as_ref()?;
+		if matches!(cell.get(), Some(None)) || text.is_ascii() {
+			return None;
+		}
+		cell.get_or_init(|| {
+			// Inside a character neither `^` nor `$` holds, and no atom reads
+			// the byte that follows, so the pattern matches there what it
+			// matches between `a` and `b` when made to match nothing.
+			let probe = FancyRegex::new(&format!(r"\A(?s:.)(?:{})(?s:.)\z", self.pattern)).ok()?;
+			let caps = probe.captures("ab").ok()??;
+			Some((0..caps.len()).map(|i| caps.get(i).is_some()).collect())
+		})
+		.as_deref()
 	}
 
 	fn compiled(&self) -> SedResult<&onig::Regex> {
@@ -6770,6 +6938,41 @@ impl RawRegex {
 			)
 		}).as_ref().map_err(|e| SedError::new(4, e))
 	}
+}
+
+/// Visit the matches in `text`, a line that is UTF-8, of a pattern GNU
+/// searches a byte at a time and that matches empty inside a character, with
+/// `groups` taking part: after an empty match the search goes on at the next
+/// byte, where inside a character it finds that empty match, and elsewhere
+/// `search` finds the first match from there.
+fn visit_by_bytes<'t>(
+	text: &'t str,
+	groups: &'t [bool],
+	mut search: impl FnMut(usize) -> SedResult<Option<Captures<'t>>>,
+	mut visit: impl FnMut(Captures<'t>) -> SedResult<ControlFlow<()>>,
+) -> SedResult<()> {
+	let mut at = 0;
+	let mut previous_end = None;
+	while at <= text.len() {
+		let caps = if !text.is_char_boundary(at) {
+			Captures::Empty { at, groups }
+		} else if let Some(caps) = search(at)? {
+			caps
+		} else {
+			break;
+		};
+		let matched = caps.get(0).unwrap();
+		let (start, end) = (matched.start(), matched.end());
+		at = end + usize::from(start == end);
+		if start == end && previous_end == Some(end) {
+			continue;
+		}
+		previous_end = Some(end);
+		if visit(caps)?.is_break() {
+			break;
+		}
+	}
+	Ok(())
 }
 
 fn raw_search(
@@ -6820,6 +7023,16 @@ impl Regex {
 		} else {
 			Ok(Self::Literal(LiteralMatcher::new(&remove_escapes(pattern))))
 		}
+	}
+
+	/// Step a whole character after an empty match, as glibc does for a
+	/// pattern it searches a character at a time for a reason the translated
+	/// pattern no longer shows (see [`holds_equivalence_class`]).
+	pub fn stepping_whole_characters(mut self) -> Self {
+		if let Self::Unicode(_, raw) | Self::Fancy(_, raw) = &mut self {
+			raw.inside_chars = None;
+		}
+		self
 	}
 
 	fn raw_for(&self, chunk: &IOChunk) -> SedResult<Option<&onig::Regex>> {
@@ -6878,8 +7091,13 @@ impl Regex {
 					}
 				}
 			},
-			Self::Unicode(re, _) => {
-				for caps in re.captures_iter(chunk.as_str().unwrap()) {
+			Self::Unicode(re, raw) => {
+				let text = chunk.as_str().unwrap();
+				if let Some(groups) = raw.empty_inside_chars(text) {
+					let search = |at| Ok(re.captures_at(text, at).map(Captures::Unicode));
+					return visit_by_bytes(text, groups, search, visit);
+				}
+				for caps in re.captures_iter(text) {
 					if visit(Captures::Unicode(caps))?.is_break() {
 						break;
 					}
@@ -6974,6 +7192,8 @@ pub enum Captures<'t> {
 	Unicode(UnicodeCaptures<'t>),
 	Fancy(FancyCaptures<'t, str>),
 	Raw(Cow<'t, Region>, &'t [u8]),
+	/// An empty match inside a character, and which groups take part in it.
+	Empty { at: usize, groups: &'t [bool] },
 }
 
 impl<'t> Captures<'t> {
@@ -6987,6 +7207,8 @@ impl<'t> Captures<'t> {
 				.map(|m| Match { start: m.start(), end: m.end(), text: m.as_str().as_bytes() }),
 			Self::Raw(region, bytes) => region.pos(i)
 				.map(|(start, end)| Match { start, end, text: &bytes[start..end] }),
+			Self::Empty { at, groups } => (groups.get(i) == Some(&true))
+				.then_some(Match { start: *at, end: *at, text: &[] }),
 		}
 	}
 }
@@ -10183,10 +10405,75 @@ mod tests {
 	fn builtin_substitutes_empty_matches_around_multibyte_characters() {
 		let (code, capture) = crate::host::run_util::<Sed>(&["s/ */_/g"], "café au lait\n", "/");
 		assert_eq!(code, 0, "{}", capture.err());
-		assert_eq!(capture.out(), "_c_a_f_é_a_u_l_a_i_t_\n");
+		assert_eq!(capture.stdout(), b"_c_a_f_\xc3_\xa9_a_u_l_a_i_t_\n");
 		let (code, capture) = crate::host::run_util::<Sed>(&["s/x*/-/2"], "éa\n", "/");
 		assert_eq!(code, 0, "{}", capture.err());
-		assert_eq!(capture.out(), "é-a\n");
+		assert_eq!(capture.stdout(), b"\xc3-\xa9a\n");
+	}
+
+	#[test]
+	fn an_empty_match_inside_a_character_steps_one_byte() {
+		// GNU sed 4.9 searches a pattern a byte at a time unless it is read without
+		// case or holds a word anchor, `\w`, `\s` or a bracket expression with a
+		// class, a range, a negation or a character outside ASCII. After an empty
+		// match such a search steps one byte, so an empty match falls inside a
+		// character too; each expectation is GNU's output in C.UTF-8.
+		for (args, stdin, expected) in [
+			(&["s/x*/-/g"][..], "café\n", &b"-c-a-f-\xc3-\xa9-\n"[..]),
+			(&[r"s/\(x*\)/<\1>/g"], "café\n", b"<>c<>a<>f<>\xc3<>\xa9<>\n"),
+			// The fourth match follows the `a`; the line is UTF-8 again for `.`.
+			(&["s/x*/-/4;s/./X/g"], "éa\n", b"XXX\n"),
+			// A list of ASCII characters is searched a byte at a time, and so is a
+			// class repeated zero times, which glibc drops before it decides.
+			(&["s/[x]*/-/g"], "éa\n", b"-\xc3-\xa9-a-\n"),
+			(&[r"s/[[:alpha:]]\{0\}/-/g"], "éa\n", b"-\xc3-\xa9-a-\n"),
+			(&["-E", r"s/\w{0}/-/g"], "éa\n", b"-\xc3-\xa9-a-\n"),
+			// A range or the `I` flag makes the search go a character at a time, and the
+			// anchored `^x*` has no empty match inside a character.
+			(&["s/[a-z]*/-/g"], "éa\n", "-é-\n".as_bytes()),
+			(&["s/x*/-/Ig"], "éa\n", "-é-a-\n".as_bytes()),
+			(&["s/^x*/-/g"], "é\n", "-é\n".as_bytes()),
+			// An alternation, a repeated group, a back-reference, `\p` and `\P`, which
+			// the engines read as a Unicode class (`\pL`) and GNU reads as the letter
+			// `p`, and a repeated buffer anchor step a whole character: there the
+			// engines' first match can differ from GNU's longest, and a step of one byte
+			// would count a match GNU never reaches. GNU's buffer anchor with a
+			// quantifier matches nowhere.
+			// The five alternations take the same path; they stay as guards, so that a
+			// rule that stepped a byte for some alternations would fail them.
+			(&[r"s/x*\|é/-/3"], "é\n", "é\n".as_bytes()),
+			(&["-E", "s/x*|./-/3"], "é\n", "é\n".as_bytes()),
+			(&[r"s/x*\|a/-/4;t;s/^/no:/"], "éa\n", "no:éa\n".as_bytes()),
+			(&["-E", "s/a*|b/-/4"], "éb\n", "éb\n".as_bytes()),
+			(&[r"s/ab\|abc\|x*/-/4;t;s/^/no:/"], "éabc\n", "no:éabc\n".as_bytes()),
+			(&[r"s/\(a*\)\(ab\)\{0,1\}/-/4;t;s/^/no:/"], "éaab\n", "no:éaab\n".as_bytes()),
+			(&["-E", r"s/a?(a*)\1/-/3"], "aaé\n", "aaé-\n".as_bytes()),
+			(&[r"s/\(a*\)[ab]*\1/-/4"], "éaab\n", "éaab\n".as_bytes()),
+			(&[r"s/\pL*/-/3"], "€\n", "€\n".as_bytes()),
+			(&[r"s/\`*/-/3"], "€\n", "€\n".as_bytes()),
+		] {
+			let (mut host, capture) = Host::for_test("sed", stdin, "/");
+			host.set_test_var("LC_ALL", "C.UTF-8");
+			let status = Sed { matches: test_matches(args) }.run(&mut host);
+			assert_eq!(status, 0, "{args:?}: {}", capture.err());
+			assert_eq!(capture.stdout(), expected, "{args:?}");
+			assert_eq!(capture.err(), "", "{args:?}");
+		}
+		// In a locale with collation rules glibc searches a pattern that holds an
+		// equivalence class a character at a time: GNU's output in en_US.UTF-8.
+		let (mut host, capture) = Host::for_test("sed", "éa\n", "/");
+		host.set_test_var("LC_ALL", "en_US.UTF-8");
+		let status = Sed { matches: test_matches(&["s/[[=a=]]*/-/g"]) }.run(&mut host);
+		assert_eq!(status, 0, "{}", capture.err());
+		assert_eq!(capture.stdout(), "-é-\n".as_bytes());
+		// In the C locale GNU reads `é` in a pattern as its two bytes, and a
+		// quantifier after it repeats only the second: a pattern with a character
+		// outside ASCII steps a whole character. GNU's output in C.
+		let (mut host, capture) = Host::for_test("sed", "éa\n", "/");
+		host.set_test_var("LC_ALL", "C");
+		let status = Sed { matches: test_matches(&[r"s/é\{0\}/-/4"]) }.run(&mut host);
+		assert_eq!(status, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "éa\n");
 	}
 
 	#[test]
