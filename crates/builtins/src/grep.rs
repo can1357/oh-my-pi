@@ -749,6 +749,9 @@ fn build_default_matcher<P: AsRef<str>, F: AsRef<str>>(
 	debug_assert_eq!(patterns.len(), fallbacks.len());
 	let error = match builder.build_many(patterns) {
 		Ok(matcher) => return Ok(matcher),
+		// Every pattern parsed, so none falls back, and built again they are
+		// no smaller.
+		Err(error) if exceeds_size_limit(&error) => return Err(engine_error_message(&error)),
 		Err(error) => error,
 	};
 	let sanitized: Vec<String> = patterns
@@ -779,6 +782,12 @@ fn has_backreference(pattern: &str) -> bool {
 	false
 }
 
+/// Whether the engine refused a program bigger than its size limit, which
+/// `grep-regex` reports in a line of its own, never with a pattern's text.
+fn exceeds_size_limit(error: &grep_regex::Error) -> bool {
+	error.to_string().starts_with("compiled regex exceeds size limit")
+}
+
 /// One line for an error the regex engine raised after translation: GNU's
 /// wording where glibc has a counterpart, else the engine's own final line,
 /// never its multi-line excerpt of the internal `(?:…)` wrapper.
@@ -793,6 +802,43 @@ fn engine_error_message(error: &grep_regex::Error) -> String {
 	} else {
 		line.to_owned()
 	}
+}
+
+/// The most memory, in bytes, that each automaton the engine compiles from
+/// the patterns of one search (`-e` and `-f` together) may take while they
+/// hold the letter classes of a UTF-8 locale (see
+/// [`bre::utf8_letter_classes`]); the engine's own limit is 100 MiB. Each
+/// such class compiles to tens of KiB, where an ASCII one takes tens of
+/// bytes, and every copy a repeat makes counts in full, so a pattern that
+/// repeats one built slowly: `[[:alpha:]]\{1,2000\}` took 0.7 s, and
+/// `\{1,5000\}` passed the engine's limit after 1.9 s. The bound admits 42
+/// copies of `[[:alpha:]]` or `[[:alnum:]]`, 74 of `[[:lower:]]` and 77 of
+/// `[[:upper:]]` (42 of each under `-i`), built within 10 ms; a bigger build
+/// stops at the bound as soon, and every pattern of the search is built with
+/// the engine's ASCII classes, as before.
+const UTF8_CLASSES_SIZE_LIMIT: usize = 2 << 20;
+
+/// `patterns`, translated to the engine's syntax, with the letter classes of
+/// a UTF-8 locale, or `None` where that changes none of them.
+fn utf8_letter_patterns<P: AsRef<str>>(patterns: &[P], ignore_case: bool) -> Option<Vec<String>> {
+	let mut changed = false;
+	let written = patterns
+		.iter()
+		.map(|pattern| {
+			let pattern = pattern.as_ref();
+			let written = bre::utf8_letter_classes(pattern.into(), ignore_case);
+			changed |= written != pattern;
+			written.into_owned()
+		})
+		.collect();
+	changed.then_some(written)
+}
+
+/// `builder`, refusing a program bigger than [`UTF8_CLASSES_SIZE_LIMIT`].
+fn utf8_classes_builder(builder: &RegexMatcherBuilder) -> RegexMatcherBuilder {
+	let mut bounded = builder.clone();
+	bounded.size_limit(UTF8_CLASSES_SIZE_LIMIT);
+	bounded
 }
 
 /// Compile all patterns using the last-selected matcher mode.
@@ -834,7 +880,10 @@ fn build_matcher(
 			.map_err(|error| engine_error_message(&error));
 	}
 
-	// In a UTF-8 locale the letter classes hold the letters that are not ASCII.
+	// In a UTF-8 locale the letter classes hold the letters that are not
+	// ASCII, where the patterns of the search (`-e` and `-f`) build with them
+	// together within `UTF8_CLASSES_SIZE_LIMIT`; elsewhere every pattern is
+	// built as before, with the engine's ASCII classes.
 	let utf8 = crate::locale::ctype_is_utf8(host);
 
 	if mode == MatchMode::Default {
@@ -850,22 +899,29 @@ fn build_matcher(
 		// this translation step existed.
 		let translated: Vec<String> = patterns
 			.iter()
-			.map(|pattern| {
-				let ere = bre::bre_to_ere(pattern, bre::Backrefs::Unsupported, bre::StackedRepeats::Allowed)?;
-				Ok(if utf8 { bre::utf8_letter_classes(ere.into(), ignore_case).into_owned() } else { ere })
-			})
-			.collect::<Result<_, bre::BreError>>()
-			.map_err(|error| error.gnu_message().to_owned())?;
+			.map(|pattern| bre::bre_to_ere(pattern, bre::Backrefs::Unsupported, bre::StackedRepeats::Allowed))
+			.collect::<Result<_, _>>()
+			.map_err(|error: bre::BreError| error.gnu_message().to_owned())?;
+		if utf8
+			&& let Some(letters) = utf8_letter_patterns(&translated, ignore_case)
+			&& let Ok(matcher) =
+				build_default_matcher(&utf8_classes_builder(&builder), &letters, patterns)
+		{
+			return Ok(Engine::Rust(matcher));
+		}
 		return build_default_matcher(&builder, &translated, patterns).map(Engine::Rust);
 	}
 
 	let patterns = patterns
 		.iter()
-		.map(|pattern| {
-			let ere = bre::ere_to_rust(pattern, true).map_err(|error| error.gnu_message().to_owned())?;
-			Ok(if utf8 { bre::utf8_letter_classes(ere, ignore_case) } else { ere })
-		})
-		.collect::<Result<Vec<_>, String>>()?;
+		.map(|pattern| bre::ere_to_rust(pattern, true).map_err(|error| error.gnu_message().to_owned()))
+		.collect::<Result<Vec<_>, _>>()?;
+	if utf8
+		&& let Some(letters) = utf8_letter_patterns(&patterns, ignore_case)
+		&& let Ok(matcher) = utf8_classes_builder(&builder).build_many(&letters)
+	{
+		return Ok(Engine::Rust(matcher));
+	}
 
 	builder
 		.build_many(&patterns)
@@ -2878,6 +2934,53 @@ mod tests {
 			let code = run_parsed(args, &mut host).await;
 			assert_eq!((code, capture.out().as_str()), (0, expected), "grep {args:?}: {}", capture.err());
 		}
+	}
+
+	/// A letter class of a UTF-8 locale holds thousands of characters, and the
+	/// engine compiles each copy a repeat makes in full, so the patterns of a
+	/// search get those classes only while they fit in
+	/// `UTF8_CLASSES_SIZE_LIMIT` together, and past it the engine's ASCII
+	/// classes, as on `main`. The bound admits 42 copies of `[[:alpha:]]`, and
+	/// 42 of `[[:upper:]]` under `-i`, where it is `[[:alpha:]]`: on the line
+	/// `é` GNU grep 3.11 counts 1 with 42 copies and with 43, and this grep
+	/// counts 1 with 42 and 0 with 43, as `main` does. A search past the
+	/// engine's own limit matches `a`, as in GNU grep. Regressed: it exited 2,
+	/// "Regular expression too big".
+	#[tokio::test(flavor = "multi_thread")]
+	async fn repeated_letter_classes_past_the_size_bound_are_ascii() {
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("classes"), "[[:alpha:]]\\{1,40\\}\n".repeat(100)).unwrap();
+		let mut failed = Vec::new();
+		for (args, stdin, expected) in [
+			// Just inside the bound, and just past it.
+			(&["-c", r"[[:alpha:]]\{1,42\}"][..], "é\n", (0, "1\n")),
+			(&["-c", r"[[:alpha:]]\{1,43\}"], "é\n", (1, "0\n")),
+			(&["-ci", r"[[:upper:]]\{1,42\}"], "é\n", (0, "1\n")),
+			(&["-ci", r"[[:upper:]]\{1,43\}"], "é\n", (1, "0\n")),
+			// Past the engine's limit, a BRE: the bounded build refuses the
+			// whole list at once.
+			(&["-c", r"[[:alpha:]]\{1,5000\}"], "a\n", (0, "1\n")),
+			// An ERE, built without the literal fallback.
+			(&["-cE", "[[:alpha:]]{1,5000}"], "a\n", (0, "1\n")),
+			// Beside a back-reference the list does not parse, and the
+			// bounded build refuses the class in its own pattern.
+			(&["-c", "-e", r"[[:alpha:]]\{1,5000\}", "-e", r"\(b\)\1"], "a\n", (0, "1\n")),
+			// 100 patterns that each fit in the bound, counted together.
+			(&["-c", "-f", "classes"], "a\n", (0, "1\n")),
+		] {
+			let (mut host, capture) = Host::for_test_async("grep", stdin, tree.path());
+			host.set_test_var("LC_ALL", "C.UTF-8");
+			if !crate::locale::ctype_is_utf8(&host) {
+				eprintln!("skipping: the C.UTF-8 locale is not installed");
+				return;
+			}
+			let code = run_parsed(args, &mut host).await;
+			let (out, err) = (capture.out(), capture.err());
+			if (code, out.as_str()) != expected {
+				failed.push(format!("grep {args:?} on {stdin:?}: {code}, {out:?}: {err}"));
+			}
+		}
+		assert!(failed.is_empty(), "{failed:#?}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
