@@ -70,6 +70,12 @@ import type { ToolSession } from ".";
 import { owningSessionId } from "./session-id";
 import { canToolAllowAvoidPrompt, truncateForPrompt } from "./approval";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
+import {
+	bashResultReachesModelWhole,
+	findBashSeenLines,
+	formatBashSeenLinesFooter,
+	recordBashSeenLines,
+} from "./bash-seen-lines";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { applyPatchShellInput } from "./bash-apply-patch";
 import { hostCommandUrls, urlBacking } from "./bash-host-urls";
@@ -131,6 +137,7 @@ import { cfgDisplayShellVisualization } from "../modes/settings";
 import { cfgSkillful } from "../session/settings";
 import { cfgWorktreeClone, ovnfsCommand } from "../task/settings";
 import { sessionShellSpeech } from "../tts/shell-speech";
+import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { nativeShapingOff, shapeToolText, shapingExperiment } from "../spotlight";
 import { SPOTLIGHT_FULL_OUTPUT_MAX_BYTES } from "../spotlight/types";
 import type { SpotlightDetails } from "./details/spotlight";
@@ -1499,7 +1506,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 
 		// No-op for already-bounded output; see `inlineCap` above.
 		const cappedOutputText = await enforceInlineByteCap(outputText, inlineCap);
-
 		const resultBuilder = toolResult(details)
 			.content([{ type: "text", text: cappedOutputText }, ...(result.images ?? [])])
 			.minimized("minimized" in result ? result.minimized : undefined);
@@ -1507,6 +1513,48 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (!shaped?.whole) resultBuilder.truncationFromSummary(result, { direction: "tail" });
 		if (failedExit) resultBuilder.error();
 		return resultBuilder.done();
+	}
+
+	/**
+	 * Credits the rows a completed result shows with their line numbers as displayed for the edit guard and appends
+	 * their tag footer; returns the result unchanged when nothing is credited.
+	 *
+	 * Invariant: apply only to a result handed straight back as the call's own tool result, and only when the model
+	 * (not a program: `ctx.programmatic`) reads it. A managed job's text reaches the model later through async
+	 * delivery, so crediting it in the job would let an edit emitted meanwhile anchor rows the model has not
+	 * received; a footer without a record is no answer either, since the guard accepts any edit under a tag with no
+	 * retained snapshot. Timed-out results are never credited.
+	 */
+	async #creditSeenLines(
+		built: AgentToolResult<BashToolDetails>,
+		options: { command: string; cwd: string },
+	): Promise<AgentToolResult<BashToolDetails>> {
+		if (built.details?.timedOut) return built;
+		const first = built.content[0];
+		if (first?.type !== "text") return built;
+		const outputText = first.text;
+		// Rows the result shows with their line numbers count as displayed for the edit guard, but only when the
+		// result reaches the model uncut: a later spill would drop credited rows. The tag footer goes after the
+		// inline cap so the cap can never cut it.
+		const seenFiles = resolveFileDisplayMode(this.session).hashLines
+			? await findBashSeenLines(options.command, options.cwd, outputText)
+			: [];
+		if (seenFiles.length === 0) return built;
+		// Only trailing newlines go: trailing spaces may belong to the last credited row.
+		const body = outputText.replace(/\n+$/, "");
+		const withTags = (tags: readonly string[]) => `${body}\n\n${tags.join("\n")}`;
+		const candidateTags = formatBashSeenLinesFooter(seenFiles, this.session.cwd);
+		if (!bashResultReachesModelWhole(withTags(candidateTags), this.session.settings)) return built;
+		// A file the store failed to record drops out of the footer, which only shortens the checked text.
+		const recorded = recordBashSeenLines(this.session, seenFiles);
+		if (recorded.length === 0) return built;
+		const editTags =
+			recorded.length === seenFiles.length ? candidateTags : formatBashSeenLinesFooter(recorded, this.session.cwd);
+		return {
+			...built,
+			content: [{ type: "text", text: withTags(editTags) }, ...built.content.slice(1)],
+			details: { ...built.details, editTags },
+		};
 	}
 
 	/**
@@ -1816,8 +1864,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 						...(images.length > 0 ? { images } : {}),
 					};
 					// Hand the detailed result to the foreground auto-background
-					// waiter (which renders it, footer included) before deciding
-					// the job's terminal state.
+					// waiter (which credits its seen lines when it returns it as the
+					// tool result) before deciding the job's terminal state.
 					completion.resolve({ kind: "completed", result: finalResult });
 					if (finalResult.isError === true) {
 						// A non-zero exit is a completed command that failed. Re-enter
@@ -2255,7 +2303,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			);
 			if (waitResult.kind === "completed") {
 				autoBgManager.releaseForegroundJob(job.jobId);
-				return waitResult.result;
+				if (ctx?.programmatic === true) return waitResult.result;
+				return this.#creditSeenLines(waitResult.result, { command, cwd: commandCwd });
 			}
 			if (waitResult.kind === "failed") {
 				autoBgManager.releaseForegroundJob(job.jobId);
@@ -2577,7 +2626,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				if (finalOutput.truncated) bridgeNotices.push("[output truncated]");
 				for (const notice of pendingNotices) bridgeNotices.push(notice);
 
-				return this.#buildCompletedResult(bridgeResult, timeoutSec, {
+				const bridgeBuilt = await this.#buildCompletedResult(bridgeResult, timeoutSec, {
 					command,
 					cwd: commandCwd,
 					requestedTimeoutSec,
@@ -2585,6 +2634,8 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
 					toolCallId,
 				});
+				if (ctx?.programmatic === true) return bridgeBuilt;
+				return this.#creditSeenLines(bridgeBuilt, { command, cwd: commandCwd });
 			} finally {
 				clearTimeout(timeoutTimer);
 				signal?.removeEventListener("abort", onAbortSignal);
@@ -2702,7 +2753,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 				throw new ToolError(message);
 			}
 		}
-		return this.#buildCompletedResult(result, timeoutSec, {
+		const built = await this.#buildCompletedResult(result, timeoutSec, {
 			command,
 			cwd: commandCwd,
 			requestedTimeoutSec,
@@ -2712,5 +2763,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			toolCommands: toolCommandRecorder.list(),
 			toolCallId,
 		});
+		if (ctx?.programmatic === true) return built;
+		return this.#creditSeenLines(built, { command, cwd: commandCwd });
 	}
 }

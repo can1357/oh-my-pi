@@ -46,6 +46,7 @@ export interface BashDetails {
 	readonly cwd?: string;
 	readonly cdSeparator?: ";";
 	readonly toolCommands?: readonly ToolCommandDispatch[];
+	readonly editTags?: readonly string[];
 	readonly service?: {
 		readonly name: string;
 		readonly state: string;
@@ -236,7 +237,7 @@ function callIntent(args: unknown): string | undefined {
 	return typeof value === "string" ? toolIntentLabel(value).replace(/\s+/g, " ").trim() || undefined : undefined;
 }
 
-/** Output with the LLM-facing notices (background, exit, wall time, artifact, truncation) removed. */
+/** Output with the LLM-facing notices (background, edit tags, exit, wall time, artifact, truncation) removed. */
 function stripNotices(raw: string, details: BashDetails | undefined): { text: string; artifactId?: string } {
 	const job = details?.async;
 	let text =
@@ -247,6 +248,8 @@ function stripNotices(raw: string, details: BashDetails | undefined): { text: st
 				})
 			: raw;
 	text = stripOutputNotice(text, details?.meta);
+	// The edit tags follow every notice the bash tool writes; drop them first so the notices below end the text again.
+	if (details?.editTags?.length) text = stripTrailingNotice(text, details.editTags.join("\n"));
 	if (details?.exitCode !== undefined) text = stripTrailingNotice(text, formatExitCodeNotice(details.exitCode));
 	if (details?.wallTimeMs !== undefined && details.wallTimeNoticeEmitted !== false)
 		text = stripTrailingNotice(text, formatWallTimeNotice(details.wallTimeMs));
