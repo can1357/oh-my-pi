@@ -3836,14 +3836,19 @@ export class SessionManager {
 	 * @param model Model in "provider/modelId" format
 	 * @param role Optional role (default: "default")
 	 * @param options.fallback Why a retry fallback selected this model; it marks the entry `resolvedModelIsFallback`
+	 * @param options.resolvedModelIsFallback Carry an existing fallback route without recording a new fallback cause.
 	 */
-	appendModelChange(model: string, role?: string, options?: { fallback?: ModelFallbackCause }): string {
+	appendModelChange(
+		model: string,
+		role?: string,
+		options?: { fallback?: ModelFallbackCause; resolvedModelIsFallback?: boolean },
+	): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			...this.#freshEntryFields(),
 			model,
 			role,
-			resolvedModelIsFallback: options?.fallback !== undefined,
+			resolvedModelIsFallback: options?.fallback !== undefined || options?.resolvedModelIsFallback === true,
 			fallback: options?.fallback,
 		};
 		this.#recordEntry(entry);

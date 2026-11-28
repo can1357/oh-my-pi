@@ -52,6 +52,7 @@ describe("subagent context window after a model swap", () => {
 			const recovery = new TurnRecovery({
 				model: () => activeModel,
 				thinkingLevel: () => undefined,
+				sessionGeneration: () => 0,
 				sessionManager: { getSessionId: () => "context-window-swap" },
 				settings: Settings.isolated({}),
 				modelRegistry: {},

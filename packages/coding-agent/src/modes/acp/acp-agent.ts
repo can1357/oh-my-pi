@@ -2145,6 +2145,7 @@ export class AcpAgent implements Agent {
 				promptTurn.errorTextDelivery = prior ? Promise.all([prior, outcome]).then(([a, b]) => a || b) : outcome;
 			}
 			await delivery;
+			if (record.promptTurn !== promptTurn || promptTurn.settled) return;
 		}
 		if (event.type === "tool_execution_end") {
 			record.toolArgsById.delete(event.toolCallId);
@@ -2153,12 +2154,14 @@ export class AcpAgent implements Agent {
 
 		if (event.type === "agent_end") {
 			await this.#flushMissedFinalAssistantText(record, event);
+			if (record.promptTurn !== promptTurn || promptTurn.settled) return;
 			await this.#flushUnreportedTurnError(record, event);
+			if (record.promptTurn !== promptTurn || promptTurn.settled) return;
 			await this.#emitEndOfTurnUpdates(record);
 			await this.#waitForAcpPromptIdle(record, promptTurn);
 			// A follow-up turn's `agent_end` handler can settle the prompt first; this
 			// handler must not then reset or settle the next prompt's state.
-			if (promptTurn.settled) return;
+			if (record.promptTurn !== promptTurn || promptTurn.settled) return;
 			record.liveMessageId = undefined;
 			record.liveMessageProgress = undefined;
 			this.#finishPrompt(record, {
@@ -2254,7 +2257,8 @@ export class AcpAgent implements Agent {
 	async #waitForAcpPromptIdle(record: ManagedSessionRecord, promptTurn: PromptTurnState): Promise<void> {
 		for (let pass = 0; pass < ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES; pass++) {
 			await record.session.waitForIdle();
-			if (promptTurn.settled) return;
+			// A follow-up can settle this client prompt while an older output handler is awaiting delivery.
+			if (record.promptTurn !== promptTurn || promptTurn.settled || promptTurn.cancelRequested) return;
 			const delivered = await record.session.drainAsyncJobDeliveriesForAcp({
 				timeoutMs: ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS,
 			});

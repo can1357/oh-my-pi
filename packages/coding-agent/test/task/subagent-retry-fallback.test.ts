@@ -129,6 +129,7 @@ describe("subagent runtime model resolution", () => {
 				const recovery = new TurnRecovery({
 					model: () => activeModel,
 					thinkingLevel: () => activeLevel,
+					sessionGeneration: () => 0,
 					sessionManager: { getSessionId: () => "literal-model" },
 					settings: Settings.isolated({}),
 					modelRegistry: {},
@@ -191,6 +192,7 @@ describe("subagent runtime model resolution", () => {
 			const recovery = new TurnRecovery({
 				model: () => primary,
 				thinkingLevel: () => undefined,
+				sessionGeneration: () => 0,
 				sessionManager: options.sessionManager,
 				settings: options.settings,
 				modelRegistry: {
