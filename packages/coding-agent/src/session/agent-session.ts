@@ -55,6 +55,7 @@ import {
 	generateBranchSummary,
 	getMessageFromEntry,
 	type ShakeConfig,
+	messageEstimateVersion,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	AnthropicFallbackCreditHandle,
@@ -840,6 +841,18 @@ interface PromptCacheShape {
 	tools: string;
 	systemPrompt: number | bigint;
 	retention: string;
+}
+
+/**
+ * Sum of the in-place rewrite versions of `messages[0..length)` (see
+ * `invalidateMessageCache`). Versions only grow, so over the same objects a
+ * changed sum means one of them was rewritten; the prompt-cache warmer checks
+ * it to stop replaying a prefix that shake, prune or image drops changed.
+ */
+function historyRevision(messages: readonly AgentMessage[], length: number): number {
+	let revision = 0;
+	for (let index = 0; index < length; index++) revision += messageEstimateVersion(messages[index]);
+	return revision;
 }
 
 /** What a branch says about the prompt cache its newest cached reply left. */
@@ -6600,6 +6613,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#promptCacheArmSessionId = sessionId;
 		// A copy: `/clear` truncates the live array in place, which an alias would follow.
 		const armMessages = this.messages.slice();
+		const armRevision = historyRevision(armMessages, armMessages.length);
 		const retentionSetting = cfgProvidersCacheRetention.get(this.settings);
 		const warmingOptions = {
 			...options,
@@ -6607,7 +6621,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		};
 		const armShape = this.#promptCacheShape(model);
 		const dispatched = warmer.start({ model, context, options: warmingOptions }, () =>
-			this.#promptCacheChange(armShape, armMessages),
+			this.#promptCacheChange(armShape, armMessages, armRevision),
 		);
 		this.#promptCacheDispatch.set(context, dispatched);
 	}
@@ -6623,10 +6637,14 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 
 	/**
 	 * What the next request would send differently from the one armed with
-	 * `arm` and `armMessages`; undefined while it would read the same prefix.
-	 * Replaying the old shape would keep an entry nobody reads.
+	 * `arm`, `armMessages` and their `armRevision`; undefined while it would read
+	 * the same prefix. Replaying the old shape would keep an entry nobody reads.
 	 */
-	#promptCacheChange(arm: PromptCacheShape, armMessages: readonly AgentMessage[]): PromptCacheChange | undefined {
+	#promptCacheChange(
+		arm: PromptCacheShape,
+		armMessages: readonly AgentMessage[],
+		armRevision: number,
+	): PromptCacheChange | undefined {
 		const next = this.#promptCacheShape(this.model);
 		if (next.model !== arm.model) return { kind: "model", from: arm.modelName, to: next.modelName };
 		if (next.thinkingLevel !== arm.thinkingLevel) {
@@ -6644,6 +6662,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		for (let index = 0; index < armMessages.length; index++) {
 			if (current[index] !== armMessages[index]) return { kind: "history" };
 		}
+		// Shake, prune and image drops rewrite content under the same identity.
+		if (historyRevision(current, armMessages.length) !== armRevision) return { kind: "history" };
 		return undefined;
 	}
 

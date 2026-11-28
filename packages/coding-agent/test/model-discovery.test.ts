@@ -5512,7 +5512,10 @@ describe("ModelRegistry runtime discovery", () => {
 
 		await registry.hydrateCredentialScopedModelCaches(new Set(["CuRsOr"]));
 
-		expect(peek.mock.calls).toEqual([["cursor", undefined], ["cursor", { includeExpired: true }]]);
+		expect(peek.mock.calls).toEqual([
+			["cursor", undefined],
+			["cursor", { includeExpired: true }],
+		]);
 		expect(registry.find("cursor", "claude-opus-5-5-1m")?.contextWindow).toBe(1_000_000);
 	});
 

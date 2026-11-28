@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Model, StopReason, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Message, Model, StopReason, Usage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -274,6 +274,47 @@ describe("AgentSession prompt-cache status", () => {
 			await drain();
 
 			expect(refreshes().map(entry => entry.cacheRefresh)).toEqual([undefined, undefined]);
+		});
+
+		// Both rewrite the sent message under its own identity, so the live array still holds the armed objects.
+		it.each([
+			{
+				name: "/drop-images",
+				message: (): Message => ({
+					role: "user",
+					content: [
+						{ type: "text", text: "look" },
+						{ type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+					],
+					timestamp: Date.now(),
+				}),
+				rewrite: () => session.dropImages(),
+			},
+			{
+				name: "a thinking shake",
+				message: (): Message => ({
+					...reply(model, usage({ cacheWrite: 50_000 })),
+					content: [
+						{ type: "thinking", thinking: "plan", thinkingSignature: "sig" },
+						{ type: "text", text: "done" },
+					],
+				}),
+				rewrite: () => session.shake("thinking"),
+			},
+		])("stops refreshing the sent prefix after $name rewrites it in place", async ({ message, rewrite }) => {
+			session.setCacheWarmingMode("idle");
+			session.sessionManager.appendMessage(message());
+			session.replaceMessagesFromSessionContext(session.buildDisplaySessionContext().messages);
+			send();
+			await rewrite();
+
+			expect(session.cacheWarmingStatus).toMatchObject({
+				state: "inactive",
+				reason: "conversation context changed",
+			});
+			vi.advanceTimersByTime(REFRESH_DELAY_MS);
+			await drain();
+			expect(session.sessionManager.getEntries().some(entry => entry.type === "model_usage")).toBe(false);
 		});
 
 		it("counts the lifetime and the next refresh from when the provider sent the request, past a slot wait", () => {
