@@ -456,8 +456,8 @@ impl crate::bash::Host for NativeHost {
 	}
 
 	fn umask(&self) -> u32 {
-		// The spawner read it at creation: externals then match the process
-		// mask and take the `posix_spawn` path.
+		// The spawner read it at creation. On macOS, matching this mask
+		// allows it to use `posix_spawn`.
 		self.spawner.umask().unwrap_or(0o022)
 	}
 

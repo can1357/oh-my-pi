@@ -23,6 +23,7 @@ import { formatTimeoutNotice } from "../tools/details/bash";
 import { formatRawOutputNotice } from "../tools/output-meta-format";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
+import { toolShellScript } from "@oh-my-pi/pi-utils/oom-score";
 import { Settings } from "../config/settings";
 import type { MinimizedMeta } from "../tools/output-meta-format";
 import { type ArtifactAllocator, OutputSink, type OutputSummary } from "../tools/streaming-output";
@@ -710,10 +711,13 @@ async function executeUserShellPty(run: {
 }): Promise<BashResult> {
 	const session = new PtySession();
 	const newlines = new StreamNewlineNormalizer();
+	// A tool process: the command first sets the shell's OOM adjustment, which what it starts inherits.
+	// The user's rc files run before it, and processes they start keep this process's value.
+	const command = toolShellScript(run.command, shellBasename(run.shell).includes("fish") ? "fish" : "posix");
 	const result = await session.startArgv(
 		{
 			application: run.shell,
-			args: [...ensureInteractiveShellArgs(run.shell, run.args), run.command],
+			args: [...ensureInteractiveShellArgs(run.shell, run.args), command],
 			cwd: run.cwd,
 			env: run.env,
 			timeoutMs: run.timeoutMs,

@@ -154,6 +154,8 @@ export async function installJsPackages(options: InstallJsPackagesOptions): Prom
 					signal: options.signal,
 					allowNonZero: true,
 					stderr: "full",
+					// A tool process: the installer and what it starts run with OOM adjustment 1000.
+					toolOomScore: true,
 				})
 				.catch((error: unknown) => {
 					tracker.fail(error);

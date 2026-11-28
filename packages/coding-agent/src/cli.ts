@@ -28,6 +28,7 @@ import {
 } from "@oh-my-pi/pi-utils/dirs";
 
 import { materializeDatalessFiles } from "@oh-my-pi/pi-utils/dataless-files";
+import { setToolOomScore } from "@oh-my-pi/pi-utils/oom-score";
 import { raiseInteractiveQos } from "@oh-my-pi/pi-utils/process-qos";
 import {
 	declareWorkerHostEntry,
@@ -274,6 +275,8 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		return true;
 	}
 	if (arg === JS_EVAL_PROCESS_ARG) {
+		// A tool process (`spawnJsProcess`): what its cells start inherits the OOM adjustment.
+		setToolOomScore();
 		// This selector is the synchronous bootstrap boundary: keep the evaluator
 		// runtime and postmortem/inspector graph out of ordinary startup without
 		// putting an await ahead of the subprocess message handler.
@@ -465,6 +468,8 @@ export async function runCli(argv: string[]): Promise<void> {
 	// selector is its own, its command's flags included, so it dispatches
 	// before anything reads flags out of it.
 	if (argv[0] === SHELL_PROCESS_SELECTOR) {
+		// A tool process: its externals and what they start inherit the OOM adjustment.
+		setToolOomScore();
 		// Command boundary: only shell processes load the engine entry here.
 		const { runShellProcess } = await import("./exec/shell-process-worker");
 		await runShellProcess(argv.slice(1));

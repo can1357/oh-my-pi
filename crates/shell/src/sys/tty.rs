@@ -360,6 +360,9 @@ mod unix {
 	/// Make `pgid` the foreground process group of terminal `fd`
 	/// (`tcsetpgrp`) with `SIGTTOU` blocked on this thread, so a caller in
 	/// a background group is not stopped by it.
+	///
+	/// The mask goes back through `crate::sys::restore_mask`, which keeps a
+	/// block of glibc's signals 32 and 33.
 	pub fn set_foreground(fd: RawFd, pgid: i32) -> io::Result<()> {
 		// SAFETY: the sets are initialized by sigemptyset before use; the
 		// mask is restored before returning.
@@ -371,7 +374,7 @@ mod unix {
 			libc::pthread_sigmask(libc::SIG_BLOCK, block.as_ptr(), old.as_mut_ptr());
 			let rc = libc::tcsetpgrp(fd, pgid);
 			let err = io::Error::last_os_error();
-			libc::pthread_sigmask(libc::SIG_SETMASK, old.as_ptr(), ptr::null_mut());
+			crate::sys::restore_mask(old.assume_init_ref());
 			if rc == -1 { Err(err) } else { Ok(()) }
 		}
 	}
@@ -689,6 +692,47 @@ mod unix {
 			before.set(TermFlag::Pendin, false);
 			assert_eq!(encode(&to_os(&after)), encode(&to_os(&before)));
 			assert!(dup_high(s.as_raw_fd()).unwrap().as_raw_fd() >= 10);
+		}
+
+		/// Change this thread's mask by `how` with `set` (null: only read it)
+		/// through the system call on the kernel's 64-signal set, which takes
+		/// glibc's signals 32 and 33 too; the mask it had.
+		#[cfg(all(target_os = "linux", target_env = "gnu"))]
+		fn change_mask(how: libc::c_int, set: *const u64) -> u64 {
+			let mut old = 0u64;
+			// SAFETY: `set` is null or the kernel's 64-signal set; `old` is
+			// writable.
+			let rc = unsafe {
+				libc::syscall(libc::SYS_rt_sigprocmask, how, set, &raw mut old, size_of::<u64>())
+			};
+			assert_eq!(rc, 0, "{}", io::Error::last_os_error());
+			old
+		}
+
+		/// Failure mode: the mask goes back through glibc's `pthread_sigmask`,
+		/// which leaves glibc's own signals 32 and 33 out of a set it sets: a
+		/// thread that blocks them through the system call has them
+		/// unblocked after a handover. glibc only: musl's `pthread_sigmask`
+		/// takes 32 to 34 out of the mask it reads, so no restore of that
+		/// mask can keep them blocked.
+		#[cfg(all(target_os = "linux", target_env = "gnu"))]
+		#[test]
+		fn set_foreground_keeps_the_threads_block_on_signals_32_and_33() {
+			const GLIBC_SIGNALS: u64 = (1 << (32 - 1)) | (1 << (33 - 1));
+			let (before, after) = std::thread::spawn(|| {
+				change_mask(libc::SIG_BLOCK, &GLIBC_SIGNALS);
+				let before = change_mask(libc::SIG_BLOCK, ptr::null());
+				// Any descriptor serves: the handover (`tcsetpgrp`) then fails,
+				// harmlessly, between the mask's block and its restore.
+				let null = std::fs::File::open("/dev/null").unwrap();
+				// SAFETY: plain syscall without arguments.
+				let _ = set_foreground(null.as_raw_fd(), unsafe { libc::getpgrp() });
+				(before, change_mask(libc::SIG_BLOCK, ptr::null()))
+			})
+			.join()
+			.unwrap();
+			assert_eq!(before & GLIBC_SIGNALS, GLIBC_SIGNALS, "the raw block took: {before:#x}");
+			assert_eq!(after & GLIBC_SIGNALS, GLIBC_SIGNALS, "the thread's mask: {after:#x}");
 		}
 	}
 }

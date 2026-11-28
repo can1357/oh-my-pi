@@ -9,6 +9,7 @@ import {
 	type ShellRunOptions,
 	shellReservedCommandNames,
 } from "../native/index.js";
+import { BELOW_TOOL_SCORE, BELOW_TOOL_SCORE_TIMEOUT_MS, belowToolScore } from "../../utils/test/helpers/tool-process";
 
 type Handler = (request: ShellCommandRequest) => Promise<ShellCommandResult>;
 
@@ -39,7 +40,29 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	}
 }
 
+const SCORE = "/proc/self/oom_score_adj";
+
 describe("Shell session commands", () => {
+	// Failure mode: an external command the shell runs, its child included, keeps Oh My Pi's OOM adjustment, so the
+	// kernel, picking one process to kill for lack of memory, may kill Oh My Pi in its place; or the spawn changes Oh
+	// My Pi's own value.
+	const EXTERNAL_SCORE = "sets the score of an external command and its child, not the host";
+	it.skipIf(!BELOW_TOOL_SCORE)(
+		EXTERNAL_SCORE,
+		async () => {
+			await belowToolScore(import.meta.path, EXTERNAL_SCORE, async before => {
+				const { result, output } = await run(
+					new Shell(),
+					`/bin/cat ${SCORE}; /bin/sh -c 'read -r score < ${SCORE}; printf "%s\\n" "$score"; /bin/cat ${SCORE}; :'`,
+				);
+				expect(await Bun.file(SCORE).text()).toBe(before);
+				expect(result.exitCode).toBe(0);
+				expect(output).toBe("1000\n1000\n1000\n");
+			});
+		},
+		BELOW_TOOL_SCORE_TIMEOUT_MS,
+	);
+
 	it("passes name, argv, cwd and dash-requested stdin through the handler", async () => {
 		await withTempDir(async root => {
 			const cwd = path.join(root, "nested");

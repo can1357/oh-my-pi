@@ -20,7 +20,10 @@ import { TIER_RANK } from "../tools/approval";
 import { quotePosixArgument } from "../utils/shell-quote";
 import { type ShellProcessSpec, shellProcessArgs } from "./shell-process-protocol";
 
-/** The program and arguments that run `spec` as a shell process of this build. */
+/**
+ * The program and arguments that run `spec` as a shell process of this build: a tool process,
+ * whose entry (`cli.ts`) sets its OOM adjustment first.
+ */
 export function shellProcessCommand(spec: ShellProcessSpec): { application: string; args: string[] } {
 	const [application, ...entry] = resolveCliEntryCmd();
 	return { application, args: [...entry, SHELL_PROCESS_SELECTOR, ...shellProcessArgs(spec)] };

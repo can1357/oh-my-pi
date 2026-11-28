@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getSafeProjectCwd, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { toolShellScript } from "@oh-my-pi/pi-utils/oom-score";
 import { quotePosixArgument } from "./shell-quote";
 import fnEnvHelper from "./shell-snapshot-fn-env.sh" with { type: "text" };
 
@@ -295,7 +296,9 @@ async function createSnapshot(
 				spawnEnv[key] = value;
 			}
 		}
-		const child = Bun.spawn([shell, "-c", script], {
+		// The user's shell runs their rc files for the bash tool: a tool process, whose script first sets
+		// its OOM adjustment.
+		const child = Bun.spawn([shell, "-c", toolShellScript(script)], {
 			cwd: getSafeProjectCwd(),
 			env: spawnEnv,
 			stdin: "ignore",

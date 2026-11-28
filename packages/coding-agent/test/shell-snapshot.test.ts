@@ -3,9 +3,10 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { procmgr } from "@oh-my-pi/pi-utils";
+import { procmgr, TempDir } from "@oh-my-pi/pi-utils";
 import { getOrCreateSnapshot } from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import fnEnvHelper from "../src/utils/shell-snapshot-fn-env.sh" with { type: "text" };
+import { BELOW_TOOL_SCORE, BELOW_TOOL_SCORE_TIMEOUT_MS, belowToolScore } from "../../utils/test/helpers/tool-process";
 
 // macOS ships bash at `/bin/bash`, not `/usr/bin/bash`; resolve a real bash the
 // same way `bash-executor.test.ts` does so these e2e tests stay portable. The
@@ -341,6 +342,43 @@ describe("getOrCreateSnapshot", () => {
 		await replay.exited;
 		expect(stdout).toBe("file\nalias\n");
 	});
+
+	// Failure mode: the shell that sources the user's rc files for the snapshot, or what they start, keeps Oh My Pi's
+	// OOM adjustment, so Linux, picking one process to kill for lack of memory, may kill Oh My Pi in its place; or the
+	// spawn changes Oh My Pi's value.
+	const RC_SCORE = "runs the rc files in a shell and child with OOM score 1000 without changing the host";
+	it.skipIf(!BELOW_TOOL_SCORE || !existsSync(REAL_BASH))(
+		RC_SCORE,
+		async () => {
+			await belowToolScore(import.meta.path, RC_SCORE, async before => {
+				using home = TempDir.createSync("@omp-snap-oom-");
+				await fs.writeFile(
+					home.join(".bashrc"),
+					[
+						"read -r score < /proc/self/oom_score_adj",
+						'alias omp_shell_score="echo $score"',
+						'alias omp_child_score="echo $(/bin/cat /proc/self/oom_score_adj)"',
+						"",
+					].join("\n"),
+				);
+				const shellLink = home.join("bash-omp-oom");
+				await fs.symlink(REAL_BASH, shellLink);
+				let snapshotPath: string | null = null;
+				try {
+					snapshotPath = await getOrCreateSnapshot(shellLink, { ...process.env, HOME: home.path() });
+					expect(await Bun.file("/proc/self/oom_score_adj").text()).toBe(before);
+					expect(snapshotPath).not.toBeNull();
+					const content = await fs.readFile(snapshotPath!, "utf8");
+					// bash on Ubuntu 24.04 lists `alias -- name='…'`; older versions leave out the `--`.
+					expect(content).toMatch(/^alias (-- )?omp_shell_score='echo 1000'$/m);
+					expect(content).toMatch(/^alias (-- )?omp_child_score='echo 1000'$/m);
+				} finally {
+					if (snapshotPath) await fs.rm(snapshotPath, { force: true });
+				}
+			});
+		},
+		BELOW_TOOL_SCORE_TIMEOUT_MS,
+	);
 	it("cleans up the empty snapshot file when the shell exits with a non-zero code", async () => {
 		const testRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-snap-fail-"));
 		const originalTmpDir = process.env.TMPDIR;

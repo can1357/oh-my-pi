@@ -3,20 +3,23 @@
 //!
 //! At `execve` the kernel folds the replaced address space's high-water
 //! mark into the process's `ru_maxrss`, and no later exec lowers it. A child
-//! spawned from the host execs from the host's address space (`posix_spawn`
-//! shares it, `fork` copies its resident pages), so its peak is at least the
-//! host's. The helper is exec'd from the host and keeps that figure for
-//! itself; it `vfork`s the program from its own address space of a page or
-//! two, so the program is a new process whose peak is its own. As GNU time
-//! does, it stays the program's parent: it waits for it, hands its `rusage`
-//! to the spawner and exits as the program did.
+//! spawned from the host execs from the host's address space (the spawn
+//! path's vfork child shares it, a `fork` copies its resident pages), so its
+//! peak is at least the host's. The helper is exec'd from the host and
+//! keeps that figure for itself; it `vfork`s the program from its own
+//! address space of a page or two, so the program is a new process whose
+//! peak is its own. As GNU time does, it stays the program's parent: it
+//! waits for it, hands its `rusage` to the spawner and exits as the program
+//! did.
 //!
 //! The helper is raw-syscall machine code assembled into this library
 //! ([`global_asm!`]; `x86_64` and `aarch64`), wrapped at runtime in a minimal
 //! ELF image in a sealed memfd, and exec'd through `/proc/self/fd` by the
-//! regular spawn paths. Where that is not possible (no such architecture,
-//! no `/proc`, memfds not executable, a seccomp policy refusing the exec)
-//! the program is spawned directly, its peak then including the host's.
+//! regular spawn path ([`launch`]), whose child sets the helper's OOM
+//! adjustment before the exec, as for any external; the program inherits it.
+//! Where the helper cannot run (no such architecture, no `/proc`, memfds
+//! not executable, a seccomp policy refusing the exec) the program is
+//! spawned directly, its peak then including the host's.
 //!
 //! **Protocol.** The spawner execs the helper with `time FD PATH ARGV...`
 //! (`FD` in decimal), the program's environment, and the program's fds,
@@ -627,9 +630,12 @@ impl Report {
 	/// Spawn `prog` under the helper with `fds` (the write end last, taken
 	/// out once the helper runs); the pid and placement of the helper and
 	/// the pipe to read its `rusage` from after the exit. When the helper
-	/// cannot be exec'd, `direct` spawns the program with its own fds
-	/// instead, without a pipe. A program the helper failed to exec fails
-	/// the spawn with the exec's error, as a direct spawn would.
+	/// did not exec (it cannot be exec'd, or a step before its exec failed),
+	/// `direct` spawns the program with its own fds instead, without a pipe;
+	/// a spawn that failed after the helper exec'd fails with that error, the
+	/// program never started twice ([`super::vfork::program_ran`]). A program
+	/// the helper failed to exec fails the spawn with the exec's error, as a
+	/// direct spawn would.
 	pub(super) fn launch(
 		self,
 		state: &State,
@@ -653,8 +659,11 @@ impl Report {
 		let launched = launch(state, &wrapped, fds, place);
 		// Only the helper holds the write end now: its exit ends the pipe.
 		fds.pop();
-		let Ok((pid, place)) = launched else {
-			return (direct(fds), None);
+		let (pid, place) = match launched {
+			Ok(launched) => launched,
+			// The helper exec'd: it may have started the program.
+			Err(err) if super::vfork::program_ran(&err) => return (Err(err), None),
+			Err(_) => return (direct(fds), None),
 		};
 		let mut errno = [0; 4];
 		// End of file: the helper died before the exec; its status tells.

@@ -61,17 +61,19 @@ use crate::{
 
 /// Tell the spawners that the process changed a signal's disposition.
 ///
-/// They read which signals the host ignores once per change (`sigaction`,
-/// `signal`), not per spawn, to reset those in the child. Everything that
-/// changes a disposition while spawners may run calls it (the shell's trap
-/// table, an embedding runtime's reset); a change it misses leaves a newly
-/// ignored signal ignored in later children.
+/// On macOS they read which signals the host ignores once per change
+/// (`sigaction`, `signal`), not per spawn, to reset those in the child of
+/// `posix_spawn`. Everything that changes a disposition while spawners may
+/// run calls it (the shell's trap table, an embedding runtime's reset); a
+/// change it misses leaves a newly ignored signal ignored in later
+/// children. Elsewhere the child sets every disposition itself, and this
+/// does nothing.
 #[cfg_attr(
-	not(unix),
-	expect(clippy::missing_const_for_fn, reason = "the unix body re-reads signal dispositions")
+	not(target_os = "macos"),
+	expect(clippy::missing_const_for_fn, reason = "the macOS body re-reads signal dispositions")
 )]
 pub fn dispositions_changed() {
-	#[cfg(unix)]
+	#[cfg(target_os = "macos")]
 	imp::dispositions_changed();
 }
 
@@ -97,8 +99,8 @@ pub struct SpawnConfig {
 	pub exits:    Exits,
 	/// The process umask, when the host knows it (Unix): `None` makes the
 	/// spawner read it itself, from `/proc/self/status` on Linux or via a
-	/// forked probe on other Unix systems. Externals asking for exactly this
-	/// mask take the `posix_spawn` path, which cannot set one.
+	/// forked probe on other Unix systems. On macOS, `posix_spawn` can only
+	/// use this mask.
 	pub umask:    Option<u32>,
 }
 
@@ -270,8 +272,7 @@ impl NativeSpawner {
 
 	/// The process umask read when the spawner was created (Unix; `None`
 	/// elsewhere or when it could not be read). A host gives its shells
-	/// this mask: externals spawned with it take the `posix_spawn` path,
-	/// which cannot set another.
+	/// this mask. On macOS it is required for `posix_spawn`.
 	#[cfg_attr(
 		not(unix),
 		expect(clippy::missing_const_for_fn, reason = "the Unix version reads the spawner's state")

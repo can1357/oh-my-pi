@@ -916,6 +916,7 @@ mod os {
 	}
 
 	/// The set of signals whose bits (n - 1) are set in `bits`.
+	#[cfg(not(any(target_os = "linux", target_os = "android")))]
 	fn set_of(bits: u64) -> libc::sigset_t {
 		// SAFETY: sigset_t is plain data; sigemptyset initializes it.
 		let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -948,14 +949,42 @@ mod os {
 	}
 
 	/// Set this thread's signal mask to the signals in `bits`.
+	///
+	/// On Linux with the system call on the kernel's 64-signal set, which
+	/// `bits` is: glibc's `sigaddset` refuses its internal signals 32 and 33
+	/// and its `pthread_sigmask` leaves them out of a set it sets, so either
+	/// would drop a block of them that [`block_signals`] read.
 	pub fn set_signal_mask(bits: u64) -> io::Result<()> {
-		let set = set_of(bits);
-		// SAFETY: the set is valid; the old mask is not wanted.
-		let rc = unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const set, ptr::null_mut()) };
-		if rc == 0 {
-			Ok(())
-		} else {
-			Err(io::Error::from_raw_os_error(rc))
+		#[cfg(any(target_os = "linux", target_os = "android"))]
+		{
+			// SAFETY: the kernel only reads the set; the old mask is not
+			// wanted.
+			let rc = unsafe {
+				libc::syscall(
+					libc::SYS_rt_sigprocmask,
+					libc::SIG_SETMASK,
+					&raw const bits,
+					ptr::null_mut::<u64>(),
+					size_of::<u64>(),
+				)
+			};
+			if rc == 0 {
+				Ok(())
+			} else {
+				Err(io::Error::last_os_error())
+			}
+		}
+		#[cfg(not(any(target_os = "linux", target_os = "android")))]
+		{
+			let set = set_of(bits);
+			// SAFETY: the set is valid; the old mask is not wanted.
+			let rc =
+				unsafe { libc::pthread_sigmask(libc::SIG_SETMASK, &raw const set, ptr::null_mut()) };
+			if rc == 0 {
+				Ok(())
+			} else {
+				Err(io::Error::from_raw_os_error(rc))
+			}
 		}
 	}
 
@@ -1145,5 +1174,43 @@ mod tests {
 			(stats.skipped, stats.skipped_ext, stats.skipped_task, stats.skipped_fd),
 			(2, 1, 1, 1)
 		);
+	}
+
+	/// Change this thread's mask by `how` with `set` (null: only read it)
+	/// through the system call on the kernel's 64-signal set, which takes
+	/// glibc's signals 32 and 33 too; the mask it had.
+	#[cfg(all(target_os = "linux", target_env = "gnu"))]
+	fn change_mask(how: libc::c_int, set: *const u64) -> u64 {
+		let mut old = 0u64;
+		// SAFETY: `set` is null or the kernel's 64-signal set; `old` is
+		// writable.
+		let rc = unsafe {
+			libc::syscall(libc::SYS_rt_sigprocmask, how, set, &raw mut old, size_of::<u64>())
+		};
+		assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
+		old
+	}
+
+	/// Failure mode: fault mode puts the mask it held back through glibc's
+	/// `sigaddset` and `pthread_sigmask`, which leave glibc's own signals 32
+	/// and 33 out: a thread that blocks them through the system call has
+	/// them unblocked once its traps are back. glibc only: musl's
+	/// `pthread_sigmask` takes 32 to 34 out of the mask it reads, so the
+	/// mask fault mode holds never has them.
+	#[cfg(all(target_os = "linux", target_env = "gnu"))]
+	#[test]
+	fn a_held_mask_comes_back_with_signals_32_and_33_blocked() {
+		const GLIBC_SIGNALS: u64 = (1 << (32 - 1)) | (1 << (33 - 1));
+		let (before, after) = std::thread::spawn(|| {
+			change_mask(libc::SIG_BLOCK, &GLIBC_SIGNALS);
+			let before = change_mask(libc::SIG_BLOCK, std::ptr::null());
+			let held = super::os::block_signals().unwrap();
+			super::os::set_signal_mask(held).unwrap();
+			(before, change_mask(libc::SIG_BLOCK, std::ptr::null()))
+		})
+		.join()
+		.unwrap();
+		assert_eq!(before & GLIBC_SIGNALS, GLIBC_SIGNALS, "the raw block took: {before:#x}");
+		assert_eq!(after & GLIBC_SIGNALS, GLIBC_SIGNALS, "the thread's mask: {after:#x}");
 	}
 }
