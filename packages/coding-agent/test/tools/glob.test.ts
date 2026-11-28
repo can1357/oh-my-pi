@@ -7,6 +7,7 @@ import type { ToolSession } from "../../src/tools";
 import { GlobTool, type GlobToolInput } from "../../src/tools/glob";
 import type { GlobToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/glob";
 import { findUniqueWorkspaceSuffixWithGlobForTest } from "../../src/tools/path-utils";
+import { DEFAULT_MAX_BYTES } from "../../src/tools/streaming-output";
 import { ToolAbortError } from "../../src/tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { formatOutputNotice, type OutputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta-format";
@@ -19,6 +20,11 @@ function createSession(cwd = process.cwd()): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => null,
 	};
+}
+
+function textOf(result: AgentToolResult<GlobToolDetails>): string {
+	const first = result.content[0];
+	return first?.type === "text" && first.text !== undefined ? first.text : "";
 }
 
 async function expectRootSearchRejected(searchPath: string): Promise<void> {
@@ -208,12 +214,18 @@ describe("GlobTool.execute", () => {
 describe("GlobTool hard-cap limit notice", () => {
 	const files230 = Array.from({ length: 230 }, (_, i) => `file-${String(i).padStart(3, "0")}.txt`);
 
-	function globToolWith(files: string[]): GlobTool {
+	/** Native scan that, like the real one, returns at most `maxResults` matches; records each budget it was given. */
+	function globToolWith(files: string[], scanBudgets: (number | undefined)[] = []): GlobTool {
 		return new GlobTool(createSession(), {
-			nativeGlob: async () => ({
-				matches: files.map(file => ({ path: file, mtime: 0, fileType: FileType.File })),
-				totalMatches: files.length,
-			}),
+			nativeGlob: async options => {
+				scanBudgets.push(options.maxResults);
+				return {
+					matches: files
+						.slice(0, options.maxResults)
+						.map(file => ({ path: file, mtime: 0, fileType: FileType.File })),
+					totalMatches: files.length,
+				};
+			},
 		});
 	}
 
@@ -223,19 +235,64 @@ describe("GlobTool hard-cap limit notice", () => {
 		return formatOutputNotice((result.details as { meta?: OutputMeta } | undefined)?.meta);
 	}
 
-	test("rejects a limit above the schema's maximum and an undeclared argument instead of dropping them", async () => {
+	/** Lines reporting a clamped `limit`, so assertions check what they say rather than how. */
+	function clampLines(result: GlobExecuteResult): string[] {
+		return textOf(result)
+			.split("\n")
+			.filter(line => /clamp/i.test(line));
+	}
+
+	/** A clamp report naming the requested 400 and the effective 200, in that order. */
+	const clampedFrom400 = expect.stringMatching(/\b400\b.*\b200\b/);
+
+	test("rejects an undeclared argument instead of dropping it", async () => {
 		const tool = globToolWith(files230);
-		await expect(tool.execute("glob-over-cap", { path: ".", limit: 1000 })).rejects.toThrow("at most 200");
 		await expect(tool.execute("glob-glob-arg", { path: ".", glob: "*.ts" } as GlobToolInput)).rejects.toThrow(
 			"glob has no `glob` argument; put the glob in `path`",
 		);
 	});
 
-	test("the default limit sitting on the cap keeps the reached notice without doomed advice", async () => {
-		const result = await globToolWith(files230).execute("glob-cap-default", { path: ".", gitignore: false });
+	test.each<{ name: string; options: { limit?: number }; clamp: string[] }>([
+		{ name: "the default limit", options: {}, clamp: [] },
+		{ name: "limit 400", options: { limit: 400 }, clamp: [clampedFrom400] },
+	])("caps a scan with $name at 200 without suggesting a larger limit", async ({ options, clamp }) => {
+		const scanBudgets: (number | undefined)[] = [];
+		const result = await globToolWith(files230, scanBudgets).execute("glob-cap", { path: ".", ...options });
 
+		expect(scanBudgets).toEqual([200]);
+		expect(result.details?.files).toHaveLength(200);
 		expect(limitNotice(result)).toContain("200 results limit reached");
 		expect(limitNotice(result)).not.toContain("Use limit=");
+		expect(clampLines(result)).toEqual(clamp);
+	});
+
+	test("does not disclose a clamp the results never reached", async () => {
+		const result = await globToolWith(files230.slice(0, 50)).execute("glob-clamp-uncut", { path: ".", limit: 400 });
+
+		expect(result.details?.files).toHaveLength(50);
+		expect(clampLines(result)).toEqual([]);
+	});
+
+	test("keeps the clamp notice when long paths fill the output byte budget", async () => {
+		const longNames = files230.map(file => `${"x".repeat(300)}-${file}`);
+		const result = await globToolWith(longNames).execute("glob-clamp-long", { path: ".", limit: 400 });
+
+		expect(result.details?.truncation?.truncated).toBe(true);
+		expect(Buffer.byteLength(textOf(result))).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+		expect(clampLines(result)).toEqual([clampedFrom400]);
+	});
+
+	test("stays within the byte cap when skipped paths alone exceed it", async () => {
+		const missing = Array.from({ length: 600 }, (_, i) => `missing-${String(i).padStart(3, "0")}-${"y".repeat(90)}`);
+		const result = await globToolWith(files230).execute("glob-missing-flood", {
+			path: [".", ...missing].join(";"),
+			limit: 400,
+		});
+
+		expect(result.details?.missingPaths).toHaveLength(600);
+		expect(Buffer.byteLength(textOf(result))).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
+		expect(textOf(result)).toContain("file-000.txt");
+		expect(clampLines(result)).toEqual([clampedFrom400]);
 	});
 
 	test("below the cap the doubled suggestion is capped at the hard limit and stays usable", async () => {
@@ -250,11 +307,6 @@ describe("GlobTool custom backend contract", () => {
 
 	function detailsOf(result: GlobExecuteResult): GlobToolDetails {
 		return result.details ?? {};
-	}
-
-	function textOf(result: GlobExecuteResult): string {
-		const first = result.content[0];
-		return first?.type === "text" && first.text !== undefined ? first.text : "";
 	}
 
 	test("stops reporting at the tool deadline when a custom backend never settles", async () => {
