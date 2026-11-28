@@ -279,13 +279,18 @@ export class YieldQueue {
 
 	#attachEntrySettlement(built: BuiltMessage): void {
 		const { message } = built;
-		// The message stays in the agent's context for the session's life. Once it settles, neither
-		// the message nor these hooks may keep the entries reachable: an entry's value can hold a
-		// finished job and everything that job references.
+		// The message stays in the agent's context for the session's life, and an idle flush holds
+		// `built` until the whole turn its injection started has ended. Once the message settles, the
+		// message, `built` and these hooks must no longer reach the entries: an entry's value can hold
+		// a finished job and everything that job references.
 		let pending: StoredEntry[] | undefined = built.entries;
 		const settle = (): StoredEntry[] | undefined => {
 			const entries = pending;
+			// Settled already. A saved hook called again must leave alone the hooks a later delivery of
+			// the same message object attached.
+			if (!entries) return undefined;
 			pending = undefined;
+			built.entries = [];
 			Reflect.deleteProperty(message, ASIDE_MESSAGE_COMMIT);
 			Reflect.deleteProperty(message, ASIDE_MESSAGE_DISCARD);
 			return entries;
