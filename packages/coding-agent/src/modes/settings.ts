@@ -1,28 +1,27 @@
 import { combine, effect, register, type Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { MOTION_MODES, MOTION_PRESETS } from "../config/motion-presets";
-import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
-import { TREE_FILTER_MODES } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import { TREE_FILTER_MODES } from "./view-model/overlays/tree-selector";
 import {
 	CONTEXT_LINE_MODE_VALUES,
 	CUSTOM_STATUS_LINE_DEFAULTS,
 	STATUS_LINE_PRESET_VALUES,
 	STATUS_LINE_SEGMENT_IDS,
 	STATUS_LINE_SEPARATOR_VALUES,
-} from "@oh-my-pi/pi-tui/status-line/schema";
-import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
-import { setEditorGapComposerShape } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
-import { setEmojiAutocompleteEnabled } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
-import { WORD_COMPLETION_METHODS } from "@oh-my-pi/pi-tui/prompt/word-completion";
-import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
-import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
-import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
-import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
-import { DEFAULT_MAX_FPS, parseMaxFps, setMaxFps } from "@oh-my-pi/pi-tui/frame-rate";
-import { setMotionEffects } from "@oh-my-pi/pi-tui/motion-effects";
-import { parseSpinnerInterval, setSpinnerInterval } from "@oh-my-pi/pi-tui/spinner-clock";
+} from "../config/status-line-schema";
+import { WORD_COMPLETION_METHODS } from "./view-model/prompt/word-completion";
+import { DEFAULT_MAX_FPS, parseMaxFps } from "../config/frame-rate";
+import { parseSpinnerInterval } from "../config/spinner-interval";
+import { formatKeyHint, formatKeyHints } from "../ui/keys/hints";
+import { setTightLayout } from "../ui/styles/terminal-padding";
+import { setColorBlindMode, setSymbolPreset, setThemeSlot } from "../ui/theme/service";
+import {
+	DEFAULT_INLINE_IMAGE_COLUMNS,
+	DEFAULT_INLINE_IMAGE_ROWS,
+	setInlineImageLimits,
+} from "../ui/transcript/messages/image";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
@@ -56,6 +55,20 @@ export const cfgGitEnabled = register({
 	},
 });
 
+/** Whether a cwd outside any repository adopts its single direct-child checkout as the active repo. */
+export const cfgGitChildRepoDiscovery = register({
+	id: "git.childRepoDiscovery",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Git",
+		label: "Discover Child Repository",
+		description:
+			"Outside a repository, scan direct child directories and adopt a single child checkout for the status line, git/PR lookup, and prompt context.",
+	},
+});
+
 // ────────────────────────────────────────────────────────────────────────
 // Appearance
 // ────────────────────────────────────────────────────────────────────────
@@ -63,6 +76,7 @@ export const cfgGitEnabled = register({
 // Theme
 export const cfgThemeDark = register({
 	id: "theme.dark",
+	prepaint: true,
 	type: "string",
 	default: "titanium",
 	ui: {
@@ -73,10 +87,11 @@ export const cfgThemeDark = register({
 		options: "runtime",
 	},
 });
-effect(cfgThemeDark, name => setAutoThemeMapping("dark", name));
+effect(cfgThemeDark, name => setThemeSlot("dark", name));
 
 export const cfgThemeLight = register({
 	id: "theme.light",
+	prepaint: true,
 	type: "string",
 	default: "light",
 	ui: {
@@ -87,10 +102,11 @@ export const cfgThemeLight = register({
 		options: "runtime",
 	},
 });
-effect(cfgThemeLight, name => setAutoThemeMapping("light", name));
+effect(cfgThemeLight, name => setThemeSlot("light", name));
 
 export const cfgSymbolPreset = register({
 	id: "symbolPreset",
+	prepaint: true,
 	type: "enum",
 	values: ["unicode", "nerd", "ascii"] as const,
 	default: "unicode",
@@ -114,6 +130,7 @@ effect(cfgSymbolPreset, setSymbolPreset);
 
 export const cfgColorBlindMode = register({
 	id: "colorBlindMode",
+	prepaint: true,
 	type: "boolean",
 	default: false,
 	ui: {
@@ -128,6 +145,7 @@ effect(cfgColorBlindMode, setColorBlindMode);
 // Composer
 export const cfgComposerShape = register({
 	id: "composer.shape",
+	prepaint: true,
 	type: "string",
 	default: "band",
 	ui: {
@@ -138,7 +156,6 @@ export const cfgComposerShape = register({
 		options: "runtime",
 	},
 });
-effect(cfgComposerShape, setEditorGapComposerShape);
 
 export const cfgComposerTokenRate = register({
 	id: "composer.tokenRate",
@@ -337,23 +354,23 @@ export const cfgImagesBlockImages = register({
 	},
 });
 
+/** The width limit for transcript images, in columns. */
 export const cfgTuiMaxInlineImageColumns = register({
 	id: "tui.maxInlineImageColumns",
 	type: "number",
-	default: 100,
-	description:
-		"Maximum width in terminal columns for inline images (default 100). Set to 0 for unlimited (bounded only by terminal width).",
+	default: DEFAULT_INLINE_IMAGE_COLUMNS,
+	description: `Maximum width in terminal columns for inline images (default ${DEFAULT_INLINE_IMAGE_COLUMNS}). Set to 0 for unlimited (bounded only by terminal width).`,
 });
-effect(cfgTuiMaxInlineImageColumns, setInlineImageMaxColumns);
 
+/** The height limit for transcript images, in rows. */
 export const cfgTuiMaxInlineImageRows = register({
 	id: "tui.maxInlineImageRows",
 	type: "number",
-	default: 20,
-	description:
-		"Maximum height in terminal rows for inline images (default 20). Set to 0 to use only the viewport-based limit (60% of terminal height).",
+	default: DEFAULT_INLINE_IMAGE_ROWS,
+	description: `Maximum height in terminal rows for inline images (default ${DEFAULT_INLINE_IMAGE_ROWS}). Set to 0 to use only the viewport-based limit (60% of terminal height).`,
 });
-effect(cfgTuiMaxInlineImageRows, setInlineImageMaxRows);
+
+effect(combine({ columns: cfgTuiMaxInlineImageColumns, rows: cfgTuiMaxInlineImageRows }), setInlineImageLimits);
 
 export const cfgTuiMaxInlineImages = register({
 	id: "tui.maxInlineImages",
@@ -365,6 +382,7 @@ export const cfgTuiMaxInlineImages = register({
 
 export const cfgTuiResizeScrollback = register({
 	id: "tui.resizeScrollback",
+	prepaint: true,
 	type: "enum",
 	values: ["append", "rebuild", "preserve"] as const,
 	default: "rebuild",
@@ -390,6 +408,97 @@ export const cfgTuiResizeScrollback = register({
 				description: "Repaint only the viewport and keep history wrapped at its old width",
 			},
 		],
+	},
+});
+
+export const cfgTuiScreen = register({
+	id: "tui.screen",
+	prepaint: true,
+	type: "enum",
+	values: ["inline", "fullscreen"] as const,
+	default: "inline",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Screen",
+		get description() {
+			const shift = formatKeyHint("shift");
+			return `Where the session draws in a plain terminal (Tern draws its own): inline keeps the transcript in terminal scrollback; fullscreen uses the alternate screen with the composer pinned to the bottom and the transcript scrolled in omp (PgUp/PgDn, Ctrl+Home/Ctrl+End, mouse wheel), written to the terminal on exit unless Fullscreen Exit Transcript is off. Drag to select text; double-click selects a word, triple-click a line. ${shift}+drag (Option+drag in iTerm2) bypasses omp selection`;
+		},
+		options: [
+			{
+				value: "inline",
+				label: "Inline",
+				description: "Draw below the shell prompt; settled output goes into terminal scrollback",
+			},
+			{
+				value: "fullscreen",
+				label: "Fullscreen",
+				description: "Alternate screen, composer pinned to the bottom, transcript scrolled in omp",
+			},
+		],
+	},
+});
+
+export const cfgTuiCopyOnSelect = register({
+	id: "tui.copyOnSelect",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Copy on Select",
+		description: "Copy a fullscreen text selection on release (default true).",
+	},
+});
+
+export const cfgTuiWheelLines = register({
+	id: "tui.wheelLines",
+	type: "number",
+	default: 0,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Wheel Lines",
+		description: "Fullscreen wheel rows per report; zero follows gesture velocity.",
+	},
+});
+
+export const cfgTuiFullscreenMouse = register({
+	id: "tui.fullscreenMouse",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Mouse",
+		description:
+			"Use the mouse for transcript selection, scrollbar and wheel. Off leaves selection to the terminal; use keyboard scrolling instead.",
+	},
+});
+
+export const cfgTuiExitTranscript = register({
+	id: "tui.exitTranscript",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Exit Transcript",
+		description:
+			"Write the transcript to the normal screen on exit. Off restores the original screen without appending it.",
+	},
+});
+
+export const cfgTuiScrollbar = register({
+	id: "tui.scrollbar",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Fullscreen Scrollbar",
+		description: "Show the fullscreen scrollbar when there is overflow (default true).",
 	},
 });
 
@@ -558,16 +667,21 @@ export const cfgTuiTitleState = register({
 export const cfgTuiTitleSpinner = register({
 	id: "tui.titleSpinner",
 	type: "enum",
-	values: ["braille", "pulse", "dots", "line"] as const,
-	default: "braille",
+	values: ["braille", "centered", "pulse", "dots", "line"] as const,
+	default: "centered",
 	ui: {
 		tab: "appearance",
 		group: "Display",
 		label: "Terminal Title Spinner",
 		description:
-			"Glyph set for the working-state spinner in the terminal title — braille sweep, filling moon, single-dot cycle, or ASCII-safe line",
+			"Glyph set for the working-state spinner in the terminal title — centered braille sweep, classic braille sweep, filling moon, single-dot cycle, or ASCII-safe line",
 		options: [
-			{ value: "braille", label: "Braille", description: "Classic ⠋⠙⠹ sweep (default)" },
+			{
+				value: "centered",
+				label: "Centered",
+				description: "Three-dot ⠙⠸⢰⣠ snake around the full cell, centered on the title (default)",
+			},
+			{ value: "braille", label: "Braille", description: "Classic ⠋⠙⠹ sweep, sitting high beside the title" },
 			{ value: "pulse", label: "Pulse", description: "Moon filling ○◑● then emptying" },
 			{ value: "dots", label: "Dots", description: "Single braille dots cycling" },
 			{ value: "line", label: "Line", description: "ASCII - \\ | / for fonts without braille coverage" },
@@ -623,7 +737,19 @@ export const cfgTuiMaxFps = register({
 		],
 	},
 });
-effect(cfgTuiMaxFps, setMaxFps);
+
+export const cfgTuiShowLinkUrl = register({
+	id: "tui.showLinkUrl",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Link URLs",
+		description:
+			"Show the target URL in parentheses after named markdown links; off only hides it where terminal hyperlinks make the label clickable",
+	},
+});
 
 export const cfgTuiHyperlinks = register({
 	id: "tui.hyperlinks",
@@ -638,9 +764,6 @@ export const cfgTuiHyperlinks = register({
 			"Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
 	},
 });
-// Also re-applied when a project-scoped reload (`/move`, cross-project resume, rollback) changes the
-// effective value, so pi-tui renderers gating on the shared flag track it the same instant path links do.
-effect(cfgTuiHyperlinks, applyHyperlinkSetting);
 
 export const cfgTuiMouse = register({
 	id: "tui.mouse",
@@ -652,11 +775,12 @@ export const cfgTuiMouse = register({
 		label: "Mouse Click-to-Focus",
 		get description() {
 			const shift = formatKeyHint("shift");
-			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on extension-owned links reach their extension (the link-hint key picks them without the mouse). Native text selection becomes ${shift}+drag while on, and mouse capture stops wheel scrolling — the terminal reports wheel ticks to omp instead — so scroll with the terminal's keyboard scrollback keys, or turn this off`;
+			return `Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target, and clicks on extension-owned links reach their extension (the link-hint key picks them without the mouse). Native text selection becomes ${shift}+drag while on, and in inline mode mouse capture stops native wheel scrolling — the terminal reports wheel ticks to omp instead — so scroll with the terminal's keyboard scrollback keys, or turn this off`;
 		},
 	},
 });
 
+/** Whether terminal output removes a cell of horizontal padding on each side. */
 export const cfgTuiTight = register({
 	id: "tui.tight",
 	type: "boolean",
@@ -665,9 +789,12 @@ export const cfgTuiTight = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Tight Layout",
-		description: "Remove the 1-character horizontal padding from the left and right of the terminal output",
+		description:
+			"Remove the standard one-cell horizontal inset from terminal output; message bubbles and tool frames keep their padding",
 	},
 });
+
+effect(cfgTuiTight, setTightLayout);
 
 export const cfgDisplayShimmer = register({
 	id: "display.shimmer",
@@ -714,16 +841,12 @@ export const cfgMotionResolved = combine(
 		const preset = MOTION_PRESETS[mode];
 		return {
 			spinnerInterval: spinnerInterval ?? preset.spinnerInterval,
+			titleSpinnerInterval: spinnerInterval ?? preset.titleSpinnerInterval,
 			shimmer: preset.effects ? shimmer : ("disabled" as const),
 			effects: preset.effects,
 		};
 	},
 );
-effect(cfgMotionResolved, motion => {
-	setSpinnerInterval(motion.spinnerInterval);
-	setShimmerMode(motion.shimmer);
-	setMotionEffects(motion.effects);
-});
 
 export const cfgDisplayPinnedAgents = register({
 	id: "display.pinnedAgents",
@@ -769,17 +892,34 @@ export const cfgDisplaySmoothStreaming = register({
 	},
 });
 
-export const cfgDisplayHideToolActivity = register({
-	id: "display.hideToolActivity",
-	type: "boolean",
-	default: false,
+/** How the transcript shows model-initiated tool calls, in `app.tools.toggleVisibility` cycle order. */
+export const TOOL_ACTIVITY_MODES = ["detailed", "concise", "hidden"] as const;
+
+export const cfgDisplayToolActivity = register({
+	id: "display.toolActivity",
+	type: "enum",
+	values: TOOL_ACTIVITY_MODES,
+	default: "detailed",
 	ui: {
 		tab: "appearance",
 		group: "Display",
-		label: "Hide Tool Activity",
-		description: "Hide model-initiated tool calls and results from the transcript",
+		label: "Tool Activity",
+		description:
+			"How model-initiated tool calls show in the transcript (concise draws one status row per call; the tool-output toggle opens the full card)",
+		options: [
+			{ value: "detailed", label: "Detailed", description: "Full tool cards with arguments and output previews" },
+			{
+				value: "concise",
+				label: "Concise",
+				description: "One row per call: time, status, tool and intent; no arguments or output",
+			},
+			{ value: "hidden", label: "Hidden", description: "Hide tool calls and results from the transcript" },
+		],
 	},
 });
+
+/** {@link cfgDisplayToolActivity}'s value. */
+export type ToolActivityMode = (typeof TOOL_ACTIVITY_MODES)[number];
 
 export const cfgDisplayShowTokenUsage = register({
 	id: "display.showTokenUsage",
@@ -848,19 +988,17 @@ export const cfgDisplayAdvisorCollapsedLines = register({
 		],
 	},
 });
-effect(
-	combine({
-		hideToolActivity: cfgDisplayHideToolActivity,
-		shellVisualization: cfgDisplayShellVisualization,
-		readToolResultPreview: cfgReadToolResultPreview,
-		showImages: cfgTerminalShowImages,
-		cacheMissMarker: cfgDisplayCacheMissMarker,
-		showTokenUsage: cfgDisplayShowTokenUsage,
-		showTurnTime: cfgDisplayShowTurnTime,
-		advisorCollapsedLines: cfgDisplayAdvisorCollapsedLines,
-	}),
-	setChatTranscriptDisplayPreferences,
-);
+/** Transcript display preferences the shell applies to its tool, message and image blocks. */
+export const cfgTranscriptDisplay = combine({
+	toolActivity: cfgDisplayToolActivity,
+	shellVisualization: cfgDisplayShellVisualization,
+	readToolResultPreview: cfgReadToolResultPreview,
+	showImages: cfgTerminalShowImages,
+	cacheMissMarker: cfgDisplayCacheMissMarker,
+	showTokenUsage: cfgDisplayShowTokenUsage,
+	showTurnTime: cfgDisplayShowTurnTime,
+	advisorCollapsedLines: cfgDisplayAdvisorCollapsedLines,
+});
 
 export const cfgDisplayCollapseCompacted = register({
 	id: "display.collapseCompacted",
@@ -889,13 +1027,15 @@ export const cfgShowHardwareCursor = register({
 
 export const cfgTuiImeSafeCursor = register({
 	id: "tui.imeSafeCursor",
+	prepaint: true,
 	type: "boolean",
 	default: false,
 	ui: {
 		tab: "appearance",
 		group: "Display",
 		label: "IME-Safe Prompt Layout",
-		description: "Move the prompt's bottom border to a separate row so macOS IME preedit cannot displace it",
+		description:
+			"Move the prompt's bottom border to a separate row so macOS IME preedit cannot displace it. Requires Show Hardware Cursor.",
 	},
 });
 
@@ -958,6 +1098,7 @@ export const cfgBtwInject = register({
 
 export const cfgTuiVimMode = register({
 	id: "tui.vimMode",
+	prepaint: true,
 	type: "boolean",
 	default: false,
 	ui: {
@@ -1155,6 +1296,7 @@ export const cfgTreeFilterMode = register({
 
 export const cfgAutocompleteMaxVisible = register({
 	id: "autocompleteMaxVisible",
+	prepaint: true,
 	type: "number",
 	default: 10,
 	ui: {
@@ -1271,7 +1413,6 @@ export const cfgEmojiAutocomplete = register({
 		description: "Suggest emojis from `:name:` shortcodes and expand text emoticons like `:D` or `:-)`",
 	},
 });
-effect(cfgEmojiAutocomplete, setEmojiAutocompleteEnabled);
 
 export const cfgPasteLargeMenuThreshold = register({
 	id: "paste.largeMenuThreshold",
@@ -1282,7 +1423,7 @@ export const cfgPasteLargeMenuThreshold = register({
 		group: "Input",
 		label: "Large Paste Menu",
 		description:
-			"When a paste reaches this many lines, offer a menu to wrap it in a code block, wrap it in XML tags, or save it to a file. 0 disables the menu (large pastes still collapse to a [Paste] marker).",
+			"When a paste reaches this many lines, offer a menu to wrap it in a code block, wrap it in XML tags, or save it to a file. 0 disables the menu (large pastes still collapse to a chip).",
 		options: [
 			{ value: "0", label: "Off" },
 			{ value: "100", label: "100 lines" },
@@ -1295,6 +1436,7 @@ export const cfgPasteLargeMenuThreshold = register({
 
 export const cfgStartupQuiet = register({
 	id: "startup.quiet",
+	prepaint: true,
 	type: "boolean",
 	default: false,
 	ui: {
@@ -1460,7 +1602,7 @@ export const cfgCompletionNotify = register({
 		tab: "interaction",
 		group: "Notifications",
 		label: "Completion Notification",
-		description: "Notify when the agent finishes a turn",
+		description: "Notify when the agent finishes a turn or a plan is ready for approval",
 	},
 });
 

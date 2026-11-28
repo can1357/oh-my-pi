@@ -38,6 +38,7 @@ import {
 import { installSqliteLockShim } from "@oh-my-pi/pi-natives/sqlite-locks";
 import { isNativeShell, runNativeShell } from "./cli/native-shell";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
+import { scanPrepaintArgv } from "./cli/prepaint";
 import {
 	AUTO_UPDATE_WORKER_ARG,
 	COMPUTER_WORKER_ARG,
@@ -48,9 +49,15 @@ import {
 } from "./cli/worker-selectors";
 import { DAEMON_WORKER_ARG } from "./daemon/protocol";
 import { MNEMOPI_EMBED_WORKER_ARG } from "./mnemopi/embed-protocol";
+import { stopPendingStartupComposer } from "./modes/startup-frame";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { startParentWatchdog } from "./subprocess/parent-watchdog";
+import { captureProgramResumeToken } from "./utils/program-resume-token";
+
+// Capture OSC7577_TOKEN into memory and remove it from process.env before any
+// subprocess, worker, or tool can inherit it.
+captureProgramResumeToken();
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -86,49 +93,19 @@ function getWorkerParentPort(): MessagePort | null {
 }
 
 /**
- * Launch flags that only switch off discovery or persistence. An argv made of
- * these still enters interactive mode, so the speculative first frame is
- * valid; anything else (subcommands, `-p`, model/session selectors) skips it.
+ * Start the speculative first frame when `--prepaint` and the launch allow it: `force` always, `off`
+ * never, and the default `on` for prepaint-safe flags whose config overlays leave the cached frame
+ * valid. Returns whether it started.
  */
-const PREPAINT_SAFE_FLAGS: Record<string, true> = {
-	"--no-session": true,
-	"--no-extensions": true,
-	"--no-skills": true,
-	"--no-rules": true,
-	"--no-context-files": true,
-	"--no-tools": true,
-	"--no-judge": true,
-	"--no-spotlight": true,
-	"--offline": true,
-	"--no-lsp": true,
-	"--no-title": true,
-	"--no-prewalk": true,
-	"--no-pty": true,
-	// `-e`/`--extension` only registers a local extension path; the extension
-	// loads later, so the speculative first frame stays valid (issue #20158).
-	// These take a value, so they are handled by `isPrepaintSafeArgv`.
-};
-
-/**
- * Flags in `PREPAINT_SAFE_FLAGS` whose single value follows as the next argv
- * token. `--extension=value` needs no special handling: it is one token that
- * matches the flag directly.
- */
-const PREPAINT_SAFE_VALUE_FLAGS: ReadonlySet<string> = new Set(["-e", "--extension"]);
-
-/** True when every token in `argv` still yields a valid speculative first frame. */
-export function isPrepaintSafeArgv(argv: readonly string[]): boolean {
-	for (let index = 0; index < argv.length; index++) {
-		const arg = argv[index]!;
-		if (PREPAINT_SAFE_VALUE_FLAGS.has(arg)) {
-			// The path value belongs to the flag; skip it. A missing value is
-			// a usage error the regular parse reports later.
-			index++;
-			continue;
-		}
-		if (PREPAINT_SAFE_VALUE_FLAGS.has(arg.split("=", 1)[0]!)) continue;
-		if (PREPAINT_SAFE_FLAGS[arg] !== true) return false;
-	}
+async function beginPrepaint(argv: readonly string[]): Promise<boolean> {
+	const { mode, safe, overlays } = scanPrepaintArgv(argv);
+	if (mode === "off" || (mode === "on" && !safe)) return false;
+	// Intentional exception to the static-import convention: this latency boundary
+	// keeps the TUI graph out of worker, subcommand, help, and version launches.
+	// Loading it statically would erase the measured cold-start improvement.
+	const composer = await import("./modes/startup-composer");
+	if (mode === "on" && !(await composer.overlaysKeepPrepaint(overlays))) return false;
+	composer.beginStartupComposer({ version: VERSION });
 	return true;
 }
 
@@ -166,8 +143,7 @@ async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
 	}
 }
 /**
- * Smoke-test entry. Spawns bundled workers, serves the stats dashboard once,
- * pings everything, then exits.
+ * Smoke-test entry. Exercises bundled workers and serves the stats dashboard once.
  *
  * Purpose: catch the silent worker-load and bundled-asset regressions that hit
  * compiled binaries and the npm CLI bundle. Version/help paths do not spawn
@@ -529,29 +505,23 @@ export async function runCli(argv: string[]): Promise<void> {
 		return;
 	}
 
-	// Declare this module as the worker-host entry now that the active profile
-	// is resolved. The worker-host module is side-effect-free; importing
-	// `@oh-my-pi/pi-utils/env` here would snapshot the wrong agent `.env`.
-	// Gated on `isProcessEntry`: only the real CLI process entry is a valid
-	// worker host. Worker-thread re-entry has `!Bun.isMainThread` (isProcessEntry === false),
-	// and importers (`runCli` in profile-CLI tests, SDK embedding) have `import.meta.main === false`
-	// — declaring there would poison `workerHostEntry()` for the whole test process, forcing eval/stats/
-	// browser workers onto the same-realm inline fallback.
-	// This must run before worker selector dispatch so that worker subprocesses
-	// (e.g. stats activity) are registered as hosts and can themselves spawn worker threads.
-	if (isProcessEntry) declareWorkerHostEntry();
+	const workerSelector = resolvedArgv[0];
+	const isWorker = isWorkerHostSelector(workerSelector);
+	// A worker thread re-entering the CLI still hosts nested workers, even
+	// though Bun reports import.meta.main as false. SDK importers are not hosts.
+	if (isProcessEntry || (!Bun.isMainThread && isWorker)) declareWorkerHostEntry();
 
 	// Worker-thread entry dispatch must run before the first `await`: the
 	// stats sync worker's buffering onmessage handler is installed in the
 	// synchronous prefix of `runWorkerEntrypoint`, and Bun flushes the
 	// worker's parked initial messages as soon as the entry module's
 	// top-level evaluation finishes.
-	if (isWorkerHostSelector(resolvedArgv[0])) {
+	if (isWorker) {
 		// Invoke dispatch first so its inbox is installed before asynchronous
 		// process-name setup yields; neither dependency belongs in prepaint.
-		const [dispatched] = await Promise.all([runWorkerEntrypoint(resolvedArgv[0]), setFullProcessName()]);
+		const [dispatched] = await Promise.all([runWorkerEntrypoint(workerSelector), setFullProcessName()]);
 		if (!dispatched) {
-			process.stderr.write(`Error: unknown worker selector: ${resolvedArgv[0]}\n`);
+			process.stderr.write(`Error: unknown worker selector: ${workerSelector}\n`);
 			process.exitCode = 1;
 		}
 		return;
@@ -588,13 +558,8 @@ export async function runCli(argv: string[]): Promise<void> {
 		!process.env.PI_TIMING &&
 		process.stdin.isTTY === true &&
 		process.stdout.isTTY === true &&
-		isPrepaintSafeArgv(resolvedArgv)
+		(await beginPrepaint(resolvedArgv))
 	) {
-		// Intentional exception to the static-import convention: this latency boundary
-		// keeps the TUI graph out of worker, subcommand, help, and version launches.
-		// Loading it statically would erase the measured cold-start improvement.
-		const { beginStartupComposer, stopPendingStartupComposer } = await import("./modes/startup-composer");
-		beginStartupComposer({ version: VERSION });
 		stopStartupComposer = stopPendingStartupComposer;
 	}
 

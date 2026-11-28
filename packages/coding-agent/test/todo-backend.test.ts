@@ -2,6 +2,9 @@
  * An extension's todo backend mirrors the main session's todo list: omp commits a change as it
  * always did, then hands the selected backend the whole list.
  */
+import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -13,20 +16,62 @@ import {
 	testSetExtensionHandlerTimeoutMs,
 	testSetSessionShutdownHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ExtensionFactory, TodoBackendDefinition } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type {
+	ExtensionFactory,
+	ExtensionUIContext,
+	TodoBackendChange,
+	TodoBackendDefinition,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { type CreateAgentSessionOptions, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgTodoBackend } from "@oh-my-pi/pi-coding-agent/tools/settings";
-import { USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
-import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
-import { SettingsSelectorComponent } from "@oh-my-pi/pi-tui/overlays/settings-selector";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { TodoTool, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { createRoot } from "@oh-my-pi/pi-tui";
+import { jsx } from "@oh-my-pi/pi-tui/jsx-runtime";
+import * as themeLoader from "@oh-my-pi/pi-tui/theme/loader";
+import * as settingsWindowModule from "../src/ui/overlays/settings/settings";
+import type { TodoPhase, TodoToolDetails } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
+
+/** The settings window `/settings` opens for `session`: what it was given and how it reports changes. */
+async function openSettings(session: AgentSession, settings: Settings) {
+	spyOn(themeLoader, "listThemes").mockResolvedValue(["dark"]);
+	const opened = Promise.withResolvers<{
+		context: settingsWindowModule.SettingsContext;
+		callbacks: settingsWindowModule.SettingsCallbacks;
+	}>();
+	spyOn(settingsWindowModule, "SettingsWindow").mockImplementation(props => {
+		opened.resolve(props);
+		return jsx("prefs", {});
+	});
+	const ctx = {
+		session,
+		settings,
+		statusLine: createInteractiveModeContext().statusLine,
+		shell: {
+			focus: () => {},
+			overlays: {
+				show: (factory: () => unknown) => {
+					createRoot(factory);
+					return { node: jsx("col", {}), closed: false, close: () => {} };
+				},
+			},
+		},
+	} as unknown as InteractiveModeContext;
+	new SelectorController(ctx).showSettingsSelector();
+	const window = await opened.promise;
+	/** Pick `value` for setting `path` as the window does: store it, then report the change. */
+	return (path: string, value: string): void => {
+		window.context.settings.set(path, value);
+		window.callbacks.onChange(path, value);
+	};
+}
 
 interface Tracker {
 	calls: Array<{ phases: TodoPhase[]; sessionId: string }>;
@@ -36,13 +81,22 @@ interface Tracker {
 	entered(): Promise<void>;
 	/** Thrown by `replace` after `hold`. */
 	error?: Error;
+	/** The changes `apply` was asked about; only a tracker made with `withApply` has one. */
+	asked: TodoBackendChange[];
+	/** Awaited by `apply` once it is recorded. */
+	applyHold?: Promise<void>;
+	/** Returned by `apply` as `{ block: true, reason }` after `applyHold`; without it `apply` returns `{ block: false }`. */
+	refusal?: string;
+	/** Thrown by `apply` after `applyHold`. */
+	applyError?: Error;
 	extension: ExtensionFactory;
 }
 
-function tracker(id = "tracker"): Tracker {
+function tracker(id = "tracker", withApply = false): Tracker {
 	const waiting: Array<() => void> = [];
 	const self: Tracker = {
 		calls: [],
+		asked: [],
 		entered() {
 			const { promise, resolve } = Promise.withResolvers<void>();
 			waiting.push(resolve);
@@ -51,6 +105,15 @@ function tracker(id = "tracker"): Tracker {
 		extension: pi => {
 			pi.registerTodoBackend({
 				id,
+				apply: withApply
+					? async change => {
+							self.asked.push(change);
+							for (const resolve of waiting.splice(0)) resolve();
+							await self.applyHold;
+							if (self.applyError) throw self.applyError;
+							return { block: self.refusal !== undefined, reason: self.refusal };
+						}
+					: undefined,
 				async replace(phases, ctx) {
 					self.calls.push({ phases, sessionId: ctx.sessionManager.getSessionId() });
 					for (const resolve of waiting.splice(0)) resolve();
@@ -122,7 +185,7 @@ describe("todo backend", () => {
 		sessions.push(session);
 		const errors: string[] = [];
 		session.extensionRunner?.onError(error => {
-			if (error.event === "todo_backend") errors.push(error.error);
+			if (error.event.startsWith("todo_backend")) errors.push(error.error);
 		});
 		if (start !== false) await session.extensionRunner?.emit({ type: "session_start" });
 		return { session, errors };
@@ -309,22 +372,8 @@ describe("todo backend", () => {
 		const settings = await Settings.init({ inMemory: true });
 		const { session } = await open([backend.extension], undefined, { settings });
 		session.commitTodoPhases(list("before"));
-		await themeModule.initTheme(false);
-		const themes = Promise.resolve(["dark"]);
-		spyOn(themeModule, "getAvailableThemes").mockReturnValue(themes);
-		const overlays: Component[] = [];
-		const showOverlay = (component: Component): OverlayHandle => {
-			overlays.push(component);
-			return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
-		};
-		const ui = { showOverlay, setFocus: () => {} };
-
-		new SelectorController(createInteractiveModeContext({ session, settings, ui })).showSettingsSelector();
-		await themes;
-		const panel = overlays[0];
-		if (!(panel instanceof SettingsSelectorComponent)) throw new Error("the settings menu did not open");
-		panel.handleNativeEvent({ type: "action", key: "", act: "page", value: "tools", mods: [] });
-		panel.handleNativeEvent({ type: "change", key: "", item: cfgTodoBackend.id, value: "tracker" });
+		const pick = await openSettings(session, settings);
+		pick(cfgTodoBackend.id, "tracker");
 		await settled(session);
 
 		expect(backend.calls).toEqual([{ phases: list("before"), sessionId: session.sessionManager.getSessionId() }]);
@@ -338,21 +387,8 @@ describe("todo backend", () => {
 		const { session } = await open([picked.extension, kept.extension], undefined, { settings });
 		session.commitTodoPhases(list("before"));
 		await settled(session);
-		await themeModule.initTheme(false);
-		spyOn(themeModule, "getAvailableThemes").mockResolvedValue(["dark"]);
-		const opened = Promise.withResolvers<Component>();
-		const showOverlay = (component: Component): OverlayHandle => {
-			opened.resolve(component);
-			return { hide: () => {}, setHidden: () => {}, isHidden: () => false };
-		};
-
-		new SelectorController(
-			createInteractiveModeContext({ session, settings, ui: { showOverlay, setFocus: () => {} } }),
-		).showSettingsSelector();
-		const panel = await opened.promise;
-		if (!(panel instanceof SettingsSelectorComponent)) throw new Error("the settings menu did not open");
-		panel.handleNativeEvent({ type: "action", key: "", act: "page", value: "tools", mods: [] });
-		panel.handleNativeEvent({ type: "change", key: "", item: cfgTodoBackend.id, value: "tracker" });
+		const pick = await openSettings(session, settings);
+		pick(cfgTodoBackend.id, "tracker");
 		await settled(session);
 
 		expect(picked.calls).toEqual([]);
@@ -543,7 +579,10 @@ describe("todo backend", () => {
 		// What a config reload or a move to another project does: the setting lands before the extension.
 		// An approved `cfg://` write can too, and it also runs the settings panel's hook.
 		cfgTodoBackend.set(session.settings, "tracker");
-		const panel = new SelectorController(createInteractiveModeContext({ session, settings: session.settings }));
+		const panel = new SelectorController({
+			session,
+			settings: session.settings,
+		} as unknown as InteractiveModeContext);
 		panel.handleSettingChange(cfgTodoBackend.id, "tracker");
 		await settled(session);
 		session.extensionRunner?.setSuspendedExtensions(() => false);
@@ -595,7 +634,7 @@ describe("todo backend", () => {
 		expect(called).toEqual(["first", "second"]);
 	});
 
-	it("native, a malformed id and a missing replace are refused; a second registration replaces the extension's first", async () => {
+	it("native, a malformed id, a missing replace and a non-function apply are refused; a second registration replaces the extension's first", async () => {
 		const refused: string[] = [];
 		const called: string[] = [];
 		const attempt = (name: string, register: () => void) => {
@@ -612,6 +651,8 @@ describe("todo backend", () => {
 					attempt("two words", () => pi.registerTodoBackend({ id: "two words", replace() {} }));
 					// @ts-expect-error a JavaScript extension can pass anything
 					attempt("no replace", () => pi.registerTodoBackend({ id: "no-replace" }));
+					// @ts-expect-error a JavaScript extension can pass anything
+					attempt("apply", () => pi.registerTodoBackend({ id: "bad-apply", replace() {}, apply: "yes" }));
 					pi.registerTodoBackend({ id: "twice", replace: () => void called.push("first") });
 					pi.registerTodoBackend({ id: "twice", replace: () => void called.push("second") });
 				},
@@ -622,7 +663,544 @@ describe("todo backend", () => {
 		session.commitTodoPhases(list("a"));
 		await settled(session);
 
-		expect(refused).toEqual(["native", "two words", "no replace"]);
+		expect(refused).toEqual(["native", "two words", "no replace", "apply"]);
 		expect(called).toEqual(["second"]);
+	});
+
+	describe("apply", () => {
+		const contents = (session: AgentSession): string[] =>
+			session.getTodoPhases().flatMap(phase => phase.tasks.map(task => task.content));
+		const textOf = (result: AgentToolResult<TodoToolDetails>): string =>
+			result.content.flatMap(part => (part.type === "text" ? [part.text] : [])).join("\n");
+		const call = (
+			session: AgentSession,
+			params: { op: string; items: string[]; phase?: string },
+			signal?: AbortSignal,
+			context?: AgentToolContext,
+		): Promise<AgentToolResult<TodoToolDetails>> => {
+			const tool = session.getToolByName("todo");
+			if (!tool) throw new Error("todo tool is not active");
+			return tool.execute("call", params, signal, undefined, context);
+		};
+
+		it("an accepted change commits, and the backend then gets one replace of the committed list, even an unchanged one", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+
+			const result = await call(session, { op: "init", items: ["a"] });
+			await settled(session);
+			// The same list again: `apply` may have written something else, so it goes out too.
+			await call(session, { op: "init", items: ["a"] });
+			await settled(session);
+
+			expect(result.isError).not.toBe(true);
+			expect(backend.asked[0]).toEqual({ op: "init", previous: [], next: session.getTodoPhases() });
+			expect(contents(session)).toEqual(["a"]);
+			expect(backend.calls.map(entry => entry.phases)).toEqual([session.getTodoPhases(), session.getTodoPhases()]);
+		});
+
+		it("a refusal fails the call on one clean line, keeps the list, is no extension error, and resends the list once", async () => {
+			const backend = tracker("tracker", true);
+			const { session, errors } = await open([backend.extension], "tracker");
+			await call(session, { op: "init", items: ["a"] });
+			await settled(session);
+
+			backend.refusal = "a needs\nevidence\x1b[2J";
+			const gate = Promise.withResolvers<void>();
+			backend.applyHold = gate.promise;
+			const asked = backend.entered();
+			const pending = call(session, { op: "init", items: ["b"] });
+			await asked;
+			// The resend runs outside the replace queue, once the refusal has settled.
+			const resent = backend.entered();
+			gate.resolve();
+			const result = await pending;
+			await resent;
+			// That resend took the mark with it: the same list after it is skipped as usual.
+			session.commitTodoPhases(session.getTodoPhases());
+			await settled(session);
+
+			expect(result.isError).toBe(true);
+			expect(result.details?.uncommitted).toBe("refused");
+			expect(textOf(result)).toContain('Todo backend "tracker" did not accept this change: a needs evidence');
+			// The current list follows the reason, so the model sees what is still saved.
+			expect(textOf(result).split("a needs evidence")[1]).toContain("- a [");
+			expect(textOf(result)).not.toContain("\x1b");
+			expect(contents(session)).toEqual(["a"]);
+			expect(errors).toEqual([]);
+			expect(tasksOf(backend)).toEqual([["a"], ["a"]]);
+		});
+
+		it("a refusal whose reason is not text still fails the call and says no reason was given", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			backend.refusal = JSON.parse("42"); // what a JS backend can return
+
+			const result = await call(session, { op: "init", items: ["a"] });
+			await settled(session);
+
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("no reason given");
+			expect(contents(session)).toEqual([]);
+		});
+
+		it.each([
+			["times out", "did not answer"],
+			["answers after the timeout", "did not answer"],
+			["finds the list changed", "list changed"],
+			["finds the session changed", "session changed"],
+			["is aborted", "aborted"],
+			["throws", "failed: boom"],
+		])("a change whose backend %s fails the call and sends one full replace", async (scenario, cause) => {
+			const backend = tracker("tracker", true);
+			const { session, errors } = await open([backend.extension], "tracker");
+			const gate = Promise.withResolvers<void>();
+			let sentBeforeAnswer = -1;
+			backend.applyHold = gate.promise.then(() => {
+				sentBeforeAnswer = backend.calls.length;
+			});
+			const abort = new AbortController();
+			const late = scenario === "answers after the timeout";
+			// The handler budget is a real timer inside the runner.
+			testSetExtensionHandlerTimeoutMs(late || scenario === "times out" ? 200 : 5_000);
+
+			const asked = backend.entered();
+			if (scenario === "throws") backend.applyError = new TypeError("boom");
+			const result = call(session, { op: "init", items: ["a"] }, abort.signal);
+			await asked;
+			if (scenario === "finds the list changed") session.commitTodoPhases(list("x"));
+			if (scenario === "finds the session changed") await session.newSession();
+			if (scenario === "is aborted") abort.abort();
+			await settled(session);
+			const before = backend.calls.length;
+			// The resend waits outside the queue, so `settled` does not cover it.
+			const resent = backend.entered();
+			const answersMeanwhile = !late && scenario !== "times out";
+			if (answersMeanwhile) gate.resolve();
+			const outcome = await result.catch(() => undefined);
+			// A backend that times out never answers, so its resend goes out on exit; a late one answers after omp gave up.
+			if (scenario === "times out") await session.dispose();
+			if (late) {
+				// Real time on purpose: the rows share a real 200 ms handler timeout; a resend capped at it would fire
+				// 200 ms after the call fails, so sleep past that.
+				await Bun.sleep(300);
+				gate.resolve();
+			}
+			await resent;
+			await settled(session);
+
+			// The replace lands after the late write, not before it.
+			if (scenario !== "times out") expect(sentBeforeAnswer).toBe(before);
+			if (!outcome) throw new Error("the call threw instead of returning a result");
+			expect(outcome.isError).toBe(true);
+			expect(textOf(outcome)).toContain("nothing was saved");
+			expect(textOf(outcome)).toContain(cause);
+			expect(contents(session)).toEqual(scenario === "finds the list changed" ? ["x"] : []);
+			expect(backend.calls.length - before).toBe(1);
+			expect(backend.calls.at(-1)?.phases).toEqual(session.getTodoPhases());
+			expect(errors.length).toBe(["times out", "answers after the timeout", "throws"].includes(scenario) ? 1 : 0);
+		});
+
+		it("native and a backend without apply commit before the call's first await", async () => {
+			const plain = tracker();
+			for (const [extensions, backend] of [
+				[[plain.extension], "tracker"],
+				[[], undefined],
+			] as const) {
+				const { session } = await open([...extensions], backend);
+				// The registered tool sits behind wrappers that defer its first step.
+				const result = new TodoTool({
+					cwd: dir.path(),
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: session.settings,
+					getTodoPhases: () => session.getTodoPhases(),
+					setTodoPhases: phases => session.setTodoPhases(phases),
+					applyTodoChange: (change, commit, signal) => session.applyTodoChange(change, commit, signal),
+				}).execute("call", { op: "init", items: ["a"] });
+				expect(contents(session)).toEqual(["a"]);
+				await result;
+			}
+		});
+
+		it("a subagent's call asks no backend; a call from an eval cell is asked like the model's own", async () => {
+			const backend = tracker("tracker", true);
+			backend.refusal = "no";
+			const sub = await open([backend.extension], "tracker", { parentTaskPrefix: "0-Task" });
+			const main = await open([backend.extension], "tracker");
+			// What the eval and shell bridges pass.
+			const context: AgentToolContext = {
+				sessionManager: main.session.sessionManager,
+				modelRegistry: main.session.modelRegistry,
+				model: undefined,
+				isIdle: () => true,
+				hasQueuedMessages: () => false,
+				abort: () => {},
+				programmatic: true,
+			};
+
+			await call(sub.session, { op: "init", items: ["a"] });
+			const result = await call(main.session, { op: "init", items: ["b"] }, undefined, context);
+
+			expect(result.details?.uncommitted).toBe("refused");
+			expect([contents(sub.session), contents(main.session), backend.asked.length]).toEqual([["a"], [], 1]);
+		});
+
+		it("a todo call made while the session closes fails unasked and keeps the list", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			const gate = Promise.withResolvers<void>();
+			backend.hold = gate.promise;
+			const entered = backend.entered();
+			session.commitTodoPhases(list("a"));
+			await entered;
+
+			// The held replace keeps the close waiting; the harness disposes again afterwards, which is a no-op.
+			const disposing = session.dispose();
+			const result = await call(session, { op: "append", phase: "Work", items: ["b"] });
+			gate.resolve();
+			await disposing;
+
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("was not asked");
+			expect(contents(session)).toEqual(["a"]);
+			expect(backend.asked).toEqual([]);
+		});
+
+		it("a backend that answers only after 10 s fails the call even when the handler timeout is longer", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			const gate = Promise.withResolvers<void>();
+			backend.applyHold = gate.promise;
+			testSetExtensionHandlerTimeoutMs(60_000);
+			vi.useFakeTimers();
+			let outcome: AgentToolResult<TodoToolDetails>;
+			try {
+				const asked = backend.entered();
+				const result = call(session, { op: "init", items: ["a"] });
+				await asked;
+				vi.advanceTimersByTime(10_000);
+				// After a timeout omp waits a moment for the handler to finish; a late answer ends that wait
+				// without a timer, which fake timers would hold back.
+				gate.resolve();
+				outcome = await result;
+			} finally {
+				vi.useRealTimers();
+			}
+
+			expect(outcome.isError).toBe(true);
+			expect(textOf(outcome)).toContain("did not answer within 10000 ms");
+		});
+
+		it("a commit made while a failed call's resend still waits is sent at once, and dispose does not drop it", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			testSetExtensionHandlerTimeoutMs(200);
+			testSetSessionShutdownHandlerTimeoutMs(5);
+			// Only the first call's apply never answers.
+			backend.applyHold = Promise.withResolvers<void>().promise;
+			const first = await call(session, { op: "init", items: ["a"] });
+			backend.applyHold = undefined;
+			const second = await call(session, { op: "init", items: ["b"] });
+			await session.dispose();
+
+			expect(first.isError).toBe(true);
+			expect(second.isError).not.toBe(true);
+			expect(tasksOf(backend).at(-1)).toEqual(["b"]);
+		});
+
+		it.each([
+			["failed and waits for its late answer", true],
+			["is still deciding", false],
+		])("a call that %s when the session closes gets the list resent on exit", async (_, aborted) => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			testSetSessionShutdownHandlerTimeoutMs(5);
+			await call(session, { op: "init", items: ["a"] });
+			await settled(session);
+			expect(tasksOf(backend)).toEqual([["a"]]);
+
+			// The held apply never answers.
+			backend.applyHold = Promise.withResolvers<void>().promise;
+			const abort = new AbortController();
+			const asked = backend.entered();
+			const pending = call(session, { op: "append", phase: "Work", items: ["b"] }, abort.signal);
+			await asked;
+			if (aborted) abort.abort();
+			await settled(session);
+			const before = backend.calls.length;
+
+			await session.dispose();
+			const result = await pending;
+
+			expect(result.isError).toBe(true);
+			expect(backend.calls.length - before).toBe(1);
+			expect(backend.calls.at(-1)?.phases).toEqual(session.getTodoPhases());
+		});
+
+		it("a backend switched while apply decides fails the call, saves nothing, and the new backend is neither asked nor sent an empty list", async () => {
+			const first = tracker("first", true);
+			const second = tracker("second", true);
+			second.refusal = "never";
+			const { session } = await open([first.extension, second.extension], "first");
+			const gate = Promise.withResolvers<void>();
+			first.applyHold = gate.promise;
+
+			const asked = first.entered();
+			const pending = call(session, { op: "init", items: ["a"] });
+			await asked;
+			cfgTodoBackend.override(session.settings, "second");
+			gate.resolve();
+			const result = await pending;
+			// The resend runs once the answer has settled, on microtasks only.
+			await Bun.sleep(0);
+			await settled(session);
+
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("The todo backend changed");
+			expect(contents(session)).toEqual([]);
+			expect([second.asked, second.calls]).toEqual([[], []]);
+		});
+
+		it("a failed call's resend that finds native selected reaches the backend asked once it is selected again, list unchanged or not", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			await call(session, { op: "init", items: ["a"] });
+			await settled(session);
+			backend.refusal = "no";
+			const gate = Promise.withResolvers<void>();
+			backend.applyHold = gate.promise;
+
+			const asked = backend.entered();
+			const pending = call(session, { op: "append", phase: "Work", items: ["b"] });
+			await asked;
+			cfgTodoBackend.override(session.settings, "native");
+			gate.resolve();
+			await pending;
+			// As above: the resend's microtasks run before the backend is selected again.
+			await Bun.sleep(0);
+			cfgTodoBackend.override(session.settings, "tracker");
+			session.commitTodoPhases(session.getTodoPhases());
+			await settled(session);
+
+			// Its apply ran, so it may still hold what it wrote.
+			expect(tasksOf(backend)).toEqual([["a"], ["a"]]);
+		});
+
+		it("a call aborted before apply runs asks nothing and sends nothing, on exit either", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			const abort = new AbortController();
+			abort.abort();
+			const result = await call(session, { op: "init", items: ["a"] }, abort.signal);
+			await session.dispose();
+
+			expect(textOf(result)).toContain("aborted");
+			expect([backend.asked, backend.calls]).toEqual([[], []]);
+		});
+
+		it("an id whose owner changes while apply decides fails the call, saves nothing and asks the new owner nothing", async () => {
+			const first = tracker("tracker", true);
+			const second = tracker("tracker", true);
+			second.refusal = "never";
+			const { session } = await open([first.extension, second.extension], "tracker");
+			const gate = Promise.withResolvers<void>();
+			first.applyHold = gate.promise;
+
+			const asked = first.entered();
+			const pending = call(session, { op: "init", items: ["a"] });
+			await asked;
+			const holder = session.extensionRunner?.getTodoBackends().get("tracker")?.extension;
+			session.extensionRunner?.setSuspendedExtensions(extension => extension === holder);
+			gate.resolve();
+			const result = await pending;
+
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("The todo backend changed");
+			expect(contents(session)).toEqual([]);
+			expect(second.asked).toEqual([]);
+		});
+
+		it("a session that begins closing while apply decides fails the call and saves nothing", async () => {
+			const backend = tracker("tracker", true);
+			const { session } = await open([backend.extension], "tracker");
+			const gate = Promise.withResolvers<void>();
+			backend.applyHold = gate.promise;
+
+			const asked = backend.entered();
+			const pending = call(session, { op: "init", items: ["a"] });
+			await asked;
+			session.beginDispose();
+			gate.resolve();
+			const result = await pending;
+
+			expect(result.isError).toBe(true);
+			expect(textOf(result)).toContain("The session closed");
+			expect(contents(session)).toEqual([]);
+			await session.dispose();
+		});
+
+		it("todo calls after bash in one message: apply sees the committed list; a refusal and a throw leave no retry reminder, and only the throw is an extension error", async () => {
+			// The bash executor reads the global settings: keep them in memory, off the user's agent.db.
+			await Settings.init({ inMemory: true, cwd: dir.path() });
+			// Written by the bash call itself as it ends: a real signal that it has finished.
+			const marker = path.join(dir.path(), "bash-done");
+			const asked: Array<{ op: string; bashDone: boolean; previous: TodoPhase[] }> = [];
+			const { session, errors } = await open(
+				[
+					pi =>
+						pi.registerTodoBackend({
+							id: "veto",
+							replace() {},
+							async apply(change) {
+								const bashDone = await Bun.file(marker).exists();
+								asked.push({ op: change.op, bashDone, previous: change.previous });
+								if (change.op === "append") throw new TypeError("boom");
+								if (change.op === "drop") return { block: true, reason: "not now" };
+								if (change.op === "done" && !bashDone) return { block: true, reason: "bash still running" };
+							},
+						}),
+				],
+				"veto",
+				{ model: getBundledModel("anthropic", "claude-sonnet-4-5"), toolNames: ["read", "todo", "bash"] },
+			);
+			session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
+			const todoCall = (
+				id: string,
+				args: { op: string; items?: string[]; task?: string; phase?: string },
+			): NonNullable<MockResponse["content"]>[number] => ({ type: "toolCall", id, name: "todo", arguments: args });
+			session.agent.streamFn = createMockModel({
+				responses: [
+					{ content: [todoCall("i", { op: "init", items: ["x", "y"] })] },
+					{ content: ["ok"] },
+					{
+						content: [
+							// Real time: the bash call must still be running when an unscheduled todo call would be asked.
+							{
+								type: "toolCall",
+								id: "b",
+								name: "bash",
+								arguments: { command: `sleep 0.2 && touch '${marker}'` },
+							},
+							todoCall("d", { op: "done", task: "x" }),
+							todoCall("r", { op: "drop", task: "y" }),
+							todoCall("t", { op: "append", phase: "More", items: ["z"] }),
+						],
+					},
+					{ content: ["ok"] },
+				],
+			}).stream;
+
+			await session.prompt("go");
+			await session.prompt("next");
+
+			const dropAsked = asked.find(entry => entry.op === "drop");
+			expect(asked.find(entry => entry.op === "done")?.bashDone).toBe(true);
+			const statuses = Object.fromEntries(session.getTodoPhases()[0].tasks.map(task => [task.content, task.status]));
+			expect(statuses.x).toBe("completed");
+			expect(statuses.y).not.toBe("abandoned");
+			expect(dropAsked?.previous[0].tasks.find(task => task.content === "x")?.status).toBe("completed");
+			const results = session.messages.filter(m => m.role === "toolResult");
+			expect(results.find(m => m.toolCallId === "r")).toMatchObject({
+				isError: true,
+				details: { uncommitted: "refused" },
+			});
+			expect(results.find(m => m.toolCallId === "t")).toMatchObject({
+				isError: true,
+				details: { uncommitted: "stale" },
+			});
+			expect(errors).toEqual(["boom"]);
+			expect(session.messages.filter(m => m.role === "custom" && m.customType === "todo-error-reminder")).toEqual(
+				[],
+			);
+		});
+
+		it("a corrected retry the backend refuses clears the payload reminder of the failed call it retries", async () => {
+			const { session } = await open(
+				[
+					pi =>
+						pi.registerTodoBackend({
+							id: "veto",
+							replace() {},
+							apply(change) {
+								if (change.op === "done") return { block: true, reason: "not now" };
+							},
+						}),
+				],
+				"veto",
+				{ model: getBundledModel("anthropic", "claude-sonnet-4-5") },
+			);
+			session.modelRegistry.authStorage.keys.setRuntime("anthropic", "test-key");
+			const todoCall = (id: string, args: { op: string; items?: string[]; task?: string }) =>
+				({ type: "toolCall", id, name: "todo", arguments: args }) as const;
+			session.agent.streamFn = createMockModel({
+				responses: [
+					{ content: [todoCall("i", { op: "init", items: ["x"] })] },
+					{ content: ["ok"] },
+					// A payload error, then its corrected retry, which the backend refuses.
+					{
+						content: [
+							todoCall("bad", { op: "done", task: "no such task" }),
+							todoCall("fixed", { op: "done", task: "x" }),
+						],
+					},
+					{ content: ["ok"] },
+					{ content: ["ok"] },
+				],
+			}).stream;
+
+			await session.prompt("go");
+			await session.prompt("next");
+			await session.prompt("again");
+
+			const results = session.messages.filter(m => m.role === "toolResult");
+			expect(results.find(m => m.toolCallId === "bad")).toMatchObject({ isError: true });
+			expect(results.find(m => m.toolCallId === "fixed")).toMatchObject({ details: { uncommitted: "refused" } });
+			expect(session.messages.filter(m => m.role === "custom" && m.customType === "todo-error-reminder")).toEqual(
+				[],
+			);
+		});
+
+		it("time spent in a dialog the backend opens does not count against the apply timeout", async () => {
+			const { session } = await open(
+				[
+					pi =>
+						pi.registerTodoBackend({
+							id: "ask",
+							replace() {},
+							async apply(_change, ctx) {
+								await ctx.ui.confirm("Allow?", "todo change");
+							},
+						}),
+				],
+				"ask",
+				{ start: false },
+			);
+			const runner = session.extensionRunner;
+			if (!runner) throw new Error("session has no extension runner");
+			// The handler budget pauses around dialogs only when the session has a UI.
+			let confirmed = false;
+			const confirm: ExtensionUIContext["confirm"] = async () => {
+				confirmed = true;
+				// A real delay: the runner's handler budget is a real timer, and the dialog must outlast it.
+				await Bun.sleep(400);
+				return true;
+			};
+			const ui: ExtensionUIContext = { ...runner.getUIContext(), confirm };
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: () => {},
+				mode: "tui",
+				uiContext: ui,
+			});
+			testSetExtensionHandlerTimeoutMs(200);
+
+			const result = await call(session, { op: "init", items: ["a"] });
+
+			expect(confirmed).toBe(true);
+			expect(result.isError).not.toBe(true);
+			expect(contents(session)).toEqual(["a"]);
+		});
 	});
 });

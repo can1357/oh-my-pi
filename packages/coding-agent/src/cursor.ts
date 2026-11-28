@@ -37,7 +37,8 @@ import {
 } from "@oh-my-pi/pi-ai/providers/cursor-pi-args";
 import { editDiffString } from "@oh-my-pi/pi-natives";
 import { isEnoent, sanitizeText } from "@oh-my-pi/pi-utils";
-import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-bridge-tools";
+import { cursorMcpPrefersReplaceEdit, normalizeCursorReplaceArgs } from "./cursor-replace-args";
+import { createCheckoutNotice } from "./edit/checkout-notice";
 import { normalizeToLF, stripBom } from "./edit/normalize";
 import type { MCPResourceReadResult } from "./mcp/types";
 import {
@@ -54,8 +55,8 @@ import {
 	resolveToCwd,
 	splitPathAndSelPreferringLiteral,
 } from "./tools/path-utils";
-import type { EditToolDetails } from "@oh-my-pi/pi-tui/tools/edit";
-import type { TodoPhase, TodoStatus } from "@oh-my-pi/pi-tui/tools/todo";
+import type { EditToolDetails } from "./tools/details/edit";
+import type { TodoPhase, TodoStatus } from "./tools/details/todo";
 
 /** Phase used for Cursor-owned tasks with no local phase grouping. */
 const CURSOR_TODO_PHASE = "Tasks";
@@ -382,7 +383,8 @@ async function materializeEdit(
 	pathArg: string,
 	content: string,
 ): Promise<ToolResultMessage> {
-	const absolutePath = resolveToCwd(pathArg, options.getCwd?.() ?? options.cwd);
+	const cwd = options.getCwd?.() ?? options.cwd;
+	const absolutePath = resolveToCwd(pathArg, cwd);
 	let before: string | undefined;
 	try {
 		before = await fs.promises.readFile(absolutePath, "utf8");
@@ -391,17 +393,36 @@ async function materializeEdit(
 	}
 	const written = await executeTool(withoutEvents(options), "write", toolCallId, { path: pathArg, content });
 	const result: ToolResultMessage = { ...written, toolName: "edit" };
-	if (!written.isError && before !== undefined) {
-		// `write` restores the file's CRLF and BOM, so compare both sides as `edit` does.
-		const { diff, firstChangedLine } = editDiffString(
-			normalizeToLF(stripBom(before).text),
-			normalizeToLF(stripBom(content).text),
-			absolutePath,
-		);
+	if (!written.isError) {
 		const writeDetails =
 			typeof written.details === "object" && written.details !== null ? written.details : undefined;
-		const details: EditToolDetails = { ...writeDetails, diff, firstChangedLine, path: absolutePath };
-		result.details = details;
+		const resolvedPath =
+			writeDetails && "resolvedPath" in writeDetails && typeof writeDetails.resolvedPath === "string"
+				? writeDetails.resolvedPath
+				: absolutePath;
+		const checkoutNotice = createCheckoutNotice(cwd)?.({ path: resolvedPath, followSymlinks: true });
+		if (before !== undefined) {
+			// `write` restores the file's CRLF and BOM, so compare both sides as `edit` does.
+			const { diff, firstChangedLine } = editDiffString(
+				normalizeToLF(stripBom(before).text),
+				normalizeToLF(stripBom(content).text),
+				resolvedPath,
+			);
+			const details: EditToolDetails = {
+				...writeDetails,
+				diff,
+				firstChangedLine,
+				path: resolvedPath,
+				...(checkoutNotice ? { checkoutNotice } : {}),
+			};
+			result.details = details;
+		} else if (checkoutNotice) {
+			const details: EditToolDetails = { ...writeDetails, diff: "", path: resolvedPath, checkoutNotice };
+			result.details = details;
+		}
+		if (checkoutNotice) {
+			result.content = [...result.content, { type: "text", text: checkoutNotice }];
+		}
 	}
 	options.emitEvent?.({
 		type: "tool_execution_end",

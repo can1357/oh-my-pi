@@ -60,21 +60,21 @@ export function catalogMetricsOf(model: Model<Api>): CatalogMetrics | undefined 
 // Wire ids form a bounded set (bundled + discovered), so no eviction is needed.
 const candidateCache = new Map<string, string[]>();
 
-/** Candidate ids for `modelId`, least-stripped first, each already canonical-keyed. */
-function metricCandidateKeys(modelId: string): string[] {
-	const cached = candidateCache.get(modelId);
-	if (cached) return cached;
-	const keys: string[] = [];
-	const seen = new Set<string>();
+/** Expand only after the least-stripped key missed; keep it first for subsequent lookups. */
+function metricCandidateKeys(modelId: string, firstKey: string): string[] {
+	const keys = [firstKey];
+	const seen = new Set(keys);
 	const queue = getReferenceCandidateIds(modelId);
 	for (let index = 0; index < queue.length; index++) {
 		const candidate = queue[index].toLowerCase();
-		const key = canonicalKey(candidate);
-		if (!seen.has(key)) {
-			seen.add(key);
-			keys.push(key);
-		}
 		const bare = bareModelId(candidate);
+		if (index > 0) {
+			const key = bare.replace(/[.:]/g, "-");
+			if (!seen.has(key)) {
+				seen.add(key);
+				keys.push(key);
+			}
+		}
 		const withoutPrefix = bare.replace(DOTTED_PREFIX_PATTERN, "");
 		if (withoutPrefix !== bare && withoutPrefix.length > 0) queue.push(withoutPrefix);
 		const withoutSuffix = bare.replace(STRIPPABLE_SUFFIX_PATTERN, "");
@@ -82,6 +82,13 @@ function metricCandidateKeys(modelId: string): string[] {
 	}
 	candidateCache.set(modelId, keys);
 	return keys;
+}
+
+const kResolvedMetrics = Symbol("metrics.resolved");
+
+/** A row tagged with its last {@link CatalogMetricsIndex.resolve} result. */
+interface ResolvedMetricsTagged {
+	[kResolvedMetrics]?: { index: CatalogMetricsIndex; version: number; metrics: CatalogMetrics | undefined };
 }
 
 /**
@@ -93,6 +100,9 @@ function metricCandidateKeys(modelId: string): string[] {
 export class CatalogMetricsIndex {
 	#exact = new Map<string, CatalogMetrics>();
 	#canonical = new Map<string, ScoredEntry>();
+	#scoredClasses = new Set<string>();
+	/** Bumped by every {@link add}: a row's memoized resolution holds for one version. */
+	#version = 0;
 
 	constructor(models?: Iterable<Model<Api>>) {
 		if (models) this.add(models);
@@ -104,6 +114,7 @@ export class CatalogMetricsIndex {
 
 	/** Record the metrics of every scored model; later rows fill fields earlier rows left unset. */
 	add(models: Iterable<Model<Api>>): void {
+		this.#version++;
 		for (const model of models) {
 			const metrics = catalogMetricsOf(model);
 			if (!metrics) continue;
@@ -113,8 +124,10 @@ export class CatalogMetricsIndex {
 
 			const canonical = canonicalKey(model.id);
 			const scored = this.#canonical.get(canonical);
-			if (!scored) this.#canonical.set(canonical, { ...metrics, identity: model.identity });
-			else if (scored.int === undefined || scored.tps === undefined) {
+			if (!scored) {
+				this.#canonical.set(canonical, { ...metrics, identity: model.identity });
+				if (model.identity.class !== "unknown") this.#scoredClasses.add(model.identity.class);
+			} else if (scored.int === undefined || scored.tps === undefined) {
 				this.#canonical.set(canonical, { ...metrics, ...scored });
 			}
 		}
@@ -122,15 +135,44 @@ export class CatalogMetricsIndex {
 
 	/** Metrics for `model` by exact id, else by dialect-normalized id when the classified identities agree. */
 	resolve(model: Model<Api>): CatalogMetrics | undefined {
+		// Memoized on the row (rows are immutable; a recomposition meets the same rows again).
+		const memo = (model as Model<Api> & ResolvedMetricsTagged)[kResolvedMetrics];
+		if (memo && memo.index === this && memo.version === this.#version) return memo.metrics;
+		const metrics = this.#resolve(model);
+		// Non-enumerable: a row spread from this one must not carry the memo along.
+		Object.defineProperty(model, kResolvedMetrics, {
+			value: { index: this, version: this.#version, metrics },
+			writable: true,
+			configurable: true,
+		});
+		return metrics;
+	}
+
+	#resolve(model: Model<Api>): CatalogMetrics | undefined {
 		const exact = this.#exact.get(model.id.toLowerCase());
 		if (exact) return exact;
 		const identity = model.identity;
-		const ids = identity.logicalId ? [model.id, identity.logicalId] : [model.id];
-		for (const id of ids) {
-			for (const key of metricCandidateKeys(id)) {
-				const scored = this.#canonical.get(key);
-				if (scored && identitiesAgree(identity, scored.identity)) return scored;
-			}
+		if (!this.#scoredClasses.has(identity.class)) return undefined;
+		const wire = this.#resolveId(model.id, identity);
+		return wire ?? (identity.logicalId ? this.#resolveId(identity.logicalId, identity) : undefined);
+	}
+
+	#resolveId(id: string, identity: ModelIdentity): ScoredEntry | undefined {
+		let keys = candidateCache.get(id);
+		let start = 0;
+		if (!keys) {
+			const trimmed = id.trim();
+			if (!trimmed) return undefined;
+			// getReferenceCandidateIds starts with the trimmed wire id, before any expansion.
+			const firstKey = canonicalKey(trimmed);
+			const first = this.#canonical.get(firstKey);
+			if (first && identitiesAgree(identity, first.identity)) return first;
+			keys = metricCandidateKeys(id, firstKey);
+			start = 1;
+		}
+		for (let index = start; index < keys.length; index++) {
+			const scored = this.#canonical.get(keys[index]);
+			if (scored && identitiesAgree(identity, scored.identity)) return scored;
 		}
 		return undefined;
 	}
@@ -140,10 +182,15 @@ export class CatalogMetricsIndex {
  * Fill each model's `int`/`tps` from `index`. Returns the input array when no
  * model changed so callers can keep identity-based caches.
  */
+export function applyCatalogMetrics<TApi extends Api>(models: Model<TApi>[], index: CatalogMetricsIndex): Model<TApi>[];
 export function applyCatalogMetrics<TApi extends Api>(
-	models: Model<TApi>[],
+	models: readonly Model<TApi>[],
 	index: CatalogMetricsIndex,
-): Model<TApi>[] {
+): readonly Model<TApi>[];
+export function applyCatalogMetrics<TApi extends Api>(
+	models: readonly Model<TApi>[],
+	index: CatalogMetricsIndex,
+): readonly Model<TApi>[] {
 	if (index.isEmpty) return models;
 	let changed: Model<TApi>[] | undefined;
 	for (let position = 0; position < models.length; position++) {

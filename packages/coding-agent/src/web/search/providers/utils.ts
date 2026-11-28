@@ -1,8 +1,10 @@
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { mapOpenAIReasoningEffort } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { type ConfiguredThinkingLevel, concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
+import { type ConfiguredThinkingLevel } from "../../../utils/render-utils";
+import { concreteThinkingLevel, toReasoningEffort } from "../../../thinking/levels";
 import { readBoundedBody } from "@oh-my-pi/pi-utils/bounded-json";
+import { debug } from "@oh-my-pi/pi-utils/logger";
 import type { AgentStorageApi } from "../../../session/agent-storage";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, SearchProviderError } from "../../../web/search/types";
 import { SEARCH_PROVIDER_LABELS, type SearchProviderId, type SearchSource } from "../types";
@@ -23,17 +25,17 @@ import { dateToAgeSeconds } from "../utils";
  * @param envKey - Pre-resolved environment variable value (or null)
  * @param storageProviders - Provider names to look up in AgentStorage
  */
-export function findCredential(
+export async function findCredential(
 	storage: AgentStorageApi | null | undefined,
 	envKey: string | null | undefined,
 	...storageProviders: string[]
-): string | null {
+): Promise<string | null> {
 	if (envKey) return envKey;
 	if (!storage) return null;
 
 	try {
 		for (const provider of storageProviders) {
-			const records = storage.listAuthCredentials(provider);
+			const records = await storage.listAuthCredentials(provider);
 			for (const record of records) {
 				const credential = record.credential;
 				if (credential.type === "api_key" && credential.key.trim().length > 0) {
@@ -45,6 +47,7 @@ export function findCredential(
 			}
 		}
 	} catch {
+		debug("Could not read stored credentials for web provider", { providers: storageProviders });
 		return null;
 	}
 

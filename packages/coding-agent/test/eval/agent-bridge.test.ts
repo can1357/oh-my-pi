@@ -6,6 +6,7 @@ import {
 	type EvalAgentBridgeOptions,
 	type EvalAgentResult,
 } from "@oh-my-pi/pi-coding-agent/eval/agent-bridge";
+import { runEvalBudget } from "@oh-my-pi/pi-coding-agent/eval/budget-bridge";
 import { runEvalWait } from "@oh-my-pi/pi-coding-agent/eval/handle-bridge";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as taskDiscovery from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -13,7 +14,7 @@ import * as taskExecutor from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import { runStructuredSubagent } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/task-details";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 import { cfgTaskIsolationEnabled } from "@oh-my-pi/pi-coding-agent/task/settings";
@@ -169,6 +170,20 @@ describe("runEvalAgent", () => {
 		).rejects.toThrow("cleanup failed");
 
 		expect(sessionManager.getTurnBudget().spent).toBe(4_567);
+	});
+
+	it("blocks agent() once the Goal Mode budget budget() reports as hard is exhausted", async () => {
+		const discover = vi.spyOn(taskDiscovery, "discoverAgents");
+		const session = {
+			...createBudgetSession(SessionManager.inMemory()),
+			getGoalModeState: () => ({ enabled: true, goal: { tokenBudget: 20, tokensUsed: 20 } }),
+		} as unknown as ToolSession;
+
+		expect(await runEvalBudget({}, { session })).toEqual({ total: 20, spent: 20, hard: true });
+		await expect(runEvalAgent({ prompt: "do work", agent: "task" }, { session })).rejects.toThrow(
+			"Goal Mode token budget exhausted (20/20 tokens)",
+		);
+		expect(discover).not.toHaveBeenCalled();
 	});
 
 	it("does not route ordinary task subagents through the eval budget accumulator", async () => {

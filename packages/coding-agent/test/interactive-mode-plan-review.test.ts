@@ -4,15 +4,16 @@ import * as path from "node:path";
 import { Agent, AgentBusyError, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { KeybindingsManager, setKeybindings } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
-import type { HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
-import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import type { HookSelectorSlider } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/hook-selector";
+import { type PlanReviewAnnotationState } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/plan-review-overlay";
+import { PlanReviewModel } from "../src/ui/overlays/panels/plan-review-model";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type {
 	Extension,
@@ -22,16 +23,17 @@ import type {
 	PlanReviewResolvedEvent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { planSaveFileName } from "@oh-my-pi/pi-coding-agent/plan-mode/plan-autosave";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
 import { formatNumber, TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
+import { createInteractiveModeContext, renderTranscript } from "./helpers/interactive-mode-context";
+import { createModeTerminal, type ModeTerminal, pressKey, renderRows } from "./helpers/mode-terminal";
 
 import { cfgPlanAutosave, cfgPlanAutosaveDir } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
 
@@ -151,6 +153,7 @@ describe("InteractiveMode plan review rendering", () => {
 	let tempDir: TempDir;
 	let session: AgentSession;
 	let mode: InteractiveMode;
+	let term: ModeTerminal;
 	// Shared across the whole describe: global Settings initialization, AuthStorage
 	// (a SQLite db), and ModelRegistry are immutable inputs here. Tests mutate only
 	// their per-session Settings.isolated() instances, so rebuilding these process-
@@ -174,7 +177,39 @@ describe("InteractiveMode plan review rendering", () => {
 		sharedTempDir?.removeSync();
 	});
 
-	beforeEach(() => {
+	/** A fresh interactive mode on a started in-memory terminal: overlays take keys through it. */
+	async function createMode(): Promise<void> {
+		term = createModeTerminal({ columns: 100, rows: 40 });
+		await term.start();
+		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, term.frame);
+	}
+
+	/**
+	 * Run `act` the moment the next overlay mounts (as the user would act on it), inside
+	 * `shell.overlays.show`: the review is focused and takes the keys `act` presses.
+	 */
+	function onOverlayShown(act: () => void): void {
+		const overlays = mode.shell.overlays;
+		const show = overlays.show.bind(overlays);
+		vi.spyOn(overlays, "show").mockImplementation((factory, options) => {
+			const handle = show(factory, options);
+			act();
+			return handle;
+		});
+	}
+
+	/** The open review's model, caught on the next key it takes. */
+	function catchReview(): { readonly current: PlanReviewModel | undefined } {
+		const caught: { current: PlanReviewModel | undefined } = { current: undefined };
+		const key = PlanReviewModel.prototype.key;
+		vi.spyOn(PlanReviewModel.prototype, "key").mockImplementation(function (this: PlanReviewModel, ...args) {
+			caught.current = this;
+			return key.apply(this, args);
+		});
+		return caught;
+	}
+
+	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-plan-review-");
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) {
@@ -194,7 +229,7 @@ describe("InteractiveMode plan review rendering", () => {
 			settings: Settings.isolated(),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
+		await createMode();
 	});
 
 	afterEach(async () => {
@@ -206,6 +241,8 @@ describe("InteractiveMode plan review rendering", () => {
 		session = undefined as unknown as AgentSession;
 		tempDir = undefined as unknown as TempDir;
 		currentMode?.stop();
+		await currentMode?.shell.stop();
+		term?.dispose();
 		await currentSession?.dispose();
 		currentTempDir?.removeSync();
 		setKeybindings(KeybindingsManager.inMemory());
@@ -394,7 +431,7 @@ describe("InteractiveMode plan review rendering", () => {
 				ctx.resolvePlanReview(event.reviewId, "refine"),
 				ctx.resolvePlanReview(event.reviewId, "refine", { feedback: "   " }),
 			);
-			stayedOpen = mode.ui.hasOverlay();
+			stayedOpen = mode.shell.overlays.open();
 			accepted = ctx.resolvePlanReview(event.reviewId, "execute");
 		});
 		await loadExtensions(recorder.extension);
@@ -477,9 +514,8 @@ describe("InteractiveMode plan review rendering", () => {
 		let answered: boolean | undefined;
 		const recorder = planReviewRecorder("remote", (event, ctx) => {
 			answered = ctx.resolvePlanReview(event.reviewId, "keep", { role: "slow" });
-			const overlay = mode.ui.getFocused() as PlanReviewOverlay;
-			overlay.handleInput("\x1b[C");
-			overlay.handleInput("\x1b[D");
+			pressKey(mode.shell, "right");
+			pressKey(mode.shell, "left");
 		});
 		await loadExtensions(recorder.extension);
 
@@ -523,7 +559,7 @@ describe("InteractiveMode plan review rendering", () => {
 				// A tier only means something for an approval; refine must not silently drop it.
 				ctx.resolvePlanReview(event.reviewId, "refine", { feedback: "tighten it", role: "slow" }),
 			);
-			stayedOpen = mode.ui.hasOverlay();
+			stayedOpen = mode.shell.overlays.open();
 			accepted = ctx.resolvePlanReview(event.reviewId, "execute");
 		});
 		await loadExtensions(recorder.extension);
@@ -576,10 +612,10 @@ describe("InteractiveMode plan review rendering", () => {
 		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 		const first = await firstOpened.promise;
 
-		expect(mode.ui.hasOverlay()).toBe(true);
+		expect(mode.shell.overlays.open()).toBe(true);
 		// Dismiss the review like a pinned error does: the pending plan survives, the overlay does not.
 		mode.showPinnedError("test dismissal");
-		expect(mode.ui.hasOverlay()).toBe(false);
+		expect(mode.shell.overlays.open()).toBe(false);
 		expect(ctxForLater?.getPendingPlanReview()).toBeUndefined();
 
 		const opened = await ctxForLater!.openPlanReview();
@@ -664,7 +700,7 @@ describe("InteractiveMode plan review rendering", () => {
 					ctx.resolvePlanReview(event.reviewId, "compact");
 				} else if (event.type === "plan_review_resolved") {
 					seen.push(event.type);
-					overlayOpenWhenResolved = mode.ui.hasOverlay();
+					overlayOpenWhenResolved = mode.shell.overlays.open();
 					resolved.resolve(event);
 				}
 			}),
@@ -675,7 +711,7 @@ describe("InteractiveMode plan review rendering", () => {
 		// One macrotask turn drains every queued microtask, so a resolution emitted at the
 		// pick (rather than at the hide) would already have reached the handler.
 		await new Promise<void>(resolve => setImmediate(resolve));
-		expect(mode.ui.hasOverlay()).toBe(true);
+		expect(mode.shell.overlays.open()).toBe(true);
 		expect(seen).toEqual(["plan_review_requested"]);
 
 		compactDone.resolve("ok");
@@ -728,10 +764,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
-			(component as PlanReviewOverlay).handleInput("\n");
-			return { hide: vi.fn() } as never;
-		});
+		onOverlayShown(() => pressKey(mode.shell, "enter"));
 		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		let remoteAccepted: boolean | undefined;
@@ -821,7 +854,7 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(
 			events.filter(event => event.type === "plan_review_resolved" && event.reviewId === first.reviewId),
 		).toHaveLength(1);
-		expect(mode.ui.hasOverlay()).toBe(true);
+		expect(mode.shell.overlays.open()).toBe(true);
 
 		await mode.prepareSessionSwitch();
 		await secondApproval;
@@ -857,6 +890,97 @@ describe("InteractiveMode plan review rendering", () => {
 			by: "local",
 		});
 		expect(prompt).not.toHaveBeenCalled();
+	});
+
+	it("pausing plan mode closes an open review so it cannot approve the paused plan", async () => {
+		await mode.handlePlanModeCommand();
+		const planFilePath = mode.planModePlanFilePath;
+		if (!planFilePath) throw new Error("Plan mode did not set a plan path");
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nEdit files.",
+		);
+		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
+		const opened = Promise.withResolvers<void>();
+		const review = mode.handlePlanApproval(
+			{ planFilePath, planExists: true, title: "Plan" },
+			{ abortTurn: false, onOpened: () => opened.resolve() },
+		);
+		await opened.promise;
+		if (!mode.shell.overlays.open()) throw new Error("Plan review did not open");
+
+		await mode.handlePlanModeCommand();
+		// A late Enter on the stale review would otherwise pick "Approve and execute".
+		term.press("enter");
+		await review;
+
+		expect(mode.planModePaused).toBe(true);
+		expect(mode.shell.overlays.open()).toBe(false);
+		expect(prompt).not.toHaveBeenCalled();
+	});
+
+	it("a dismissed review cannot inject an approved plan after /plan pauses", async () => {
+		mode.stop();
+		await session.dispose();
+
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
+		const messageCounts: number[] = [];
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				convertToLlm,
+				streamFn: (_model, context) => {
+					messageCounts.push(context.messages.length);
+					const response = assistantWithUsage({
+						content: [{ type: "text", text: "The plan has two steps." }],
+						model: model.id,
+					});
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						stream.push({ type: "start", partial: response });
+						stream.push({ type: "done", reason: "stop", message: response });
+					});
+					return stream;
+				},
+			}),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+		await mode.shell.stop();
+		term.dispose();
+		await createMode();
+
+		await mode.handlePlanModeCommand();
+		const planFilePath = mode.planModePlanFilePath;
+		if (!planFilePath) throw new Error("Plan mode did not set a plan path");
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			"# Plan\n\nEdit files to answer a question.",
+		);
+		const opened = Promise.withResolvers<void>();
+		const review = mode.handlePlanApproval(
+			{ planFilePath, planExists: true, title: "Plan" },
+			{ abortTurn: false, onOpened: () => opened.resolve() },
+		);
+		await opened.promise;
+		if (!mode.shell.overlays.open()) throw new Error("Plan review did not open");
+		term.press("ctrl+c");
+		await review;
+		vi.spyOn(mode, "showHookConfirm").mockResolvedValue(true);
+		await mode.handlePlanModeCommand();
+		await session.prompt("What does the second step mean?");
+		expect(session.sessionManager.buildSessionContext().mode).toBe("plan_paused");
+		expect(messageCounts).toEqual([1]);
 	});
 
 	it("delivers a request to every extension before delivering its synchronous resolution", async () => {
@@ -916,7 +1040,7 @@ describe("InteractiveMode plan review rendering", () => {
 		let stillOpen = false;
 		const recorder = planReviewRecorder("remote", (event, ctx) => {
 			answered = ctx.resolvePlanReview(event.reviewId, "save");
-			stillOpen = ctx.getPendingPlanReview()?.reviewId === event.reviewId && mode.ui.hasOverlay();
+			stillOpen = ctx.getPendingPlanReview()?.reviewId === event.reviewId && mode.shell.overlays.open();
 			// Saved, the review still takes an answer.
 			void saved.promise.then(() => ctx.resolvePlanReview(event.reviewId, "execute"));
 		});
@@ -943,10 +1067,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 		mode.planModeEnabled = true;
 		mode.planModePlanFilePath = planFilePath;
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
-			(component as PlanReviewOverlay).handleInput("\n");
-			return { hide: vi.fn() } as never;
-		});
+		onOverlayShown(() => pressKey(mode.shell, "enter"));
 		vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		const events = observeExtensionEvents(session);
@@ -1160,15 +1281,14 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 		mode.keybindings = keybindings;
 		setKeybindings(keybindings);
-		let capturedOverlay: PlanReviewOverlay | undefined;
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
-			capturedOverlay = component as PlanReviewOverlay;
-			return { hide: vi.fn() } as never;
-		});
 		let feedback = "";
-		// The terminal restarts after external output returns to the draft.
+		// The terminal comes back once the external editor exits; its output then reaches the draft.
 		const { promise: editorApplied, resolve: markEditorApplied } = Promise.withResolvers<void>();
-		vi.spyOn(mode.ui, "start").mockImplementation(() => markEditorApplied());
+		vi.spyOn(mode, "suspend").mockImplementation(async run => {
+			const result = await run();
+			setImmediate(markEditorApplied);
+			return result;
+		});
 
 		try {
 			Bun.env.EDITOR = editorPath;
@@ -1185,21 +1305,22 @@ describe("InteractiveMode plan review rendering", () => {
 				},
 			);
 
-			expect(capturedOverlay).toBeDefined();
-			const overlay = capturedOverlay!;
-			overlay.render(80);
-			overlay.handleInput("\t"); // -> toc (Rollout)
-			overlay.handleInput("a");
-			for (const ch of "draft") overlay.handleInput(ch);
-			overlay.handleInput("\x05"); // ctrl+e
+			expect(mode.shell.overlays.open()).toBe(true);
+			// The review lays out its sections once painted.
+			await term.settle();
+			const key = (id: string) => pressKey(mode.shell, id);
+			key("tab"); // -> toc (Rollout)
+			key("a");
+			for (const ch of "draft") key(ch);
+			key("ctrl+e");
 			await editorApplied;
 			expect(feedback).toBe("");
-			overlay.handleInput("\r"); // Explicitly save the returned draft.
+			key("enter"); // Explicitly save the returned draft.
 			expect(feedback).toContain("## Rollout\n```md\n- add rollback command\n- include smoke test\n```");
 
-			overlay.handleInput("\x1b[B"); // Rollout -> Verify
-			overlay.handleInput("\x1b[B"); // toc -> actions, where Refine now leads and is selected
-			overlay.handleInput("\r");
+			key("down"); // Rollout -> Verify
+			key("down"); // toc -> actions, where Refine now leads and is selected
+			key("enter");
 			expect(await choice).toBe("refine");
 		} finally {
 			if (previousEditor === undefined) delete Bun.env.EDITOR;
@@ -1209,29 +1330,44 @@ describe("InteractiveMode plan review rendering", () => {
 		}
 	});
 
+	it("captures a plan decision click with inline tracking off, then returns the mouse to the terminal", async () => {
+		const report = (x: number, y: number) => term.engine.encodeMouse({ x, y });
+		expect(report(0, 0)).toBe("");
+		const label = "Apply the reviewed plan";
+		const choice = mode.showPlanReview("# Plan\n\nReady.", "Plan review", [{ id: "apply", label }]);
+		await term.waitFor(screen => screen.some(row => row.includes(label)));
+		const screen = term.screen();
+		const row = screen.findIndex(line => line.includes(label));
+		const click = report(screen[row]!.indexOf(label), row);
+		expect(click).not.toBe("");
+		term.feed(click);
+		await expect(choice).resolves.toBe("apply");
+		// A settled choice remains mounted until its owner replaces the review.
+		expect(report(0, 0)).not.toBe("");
+		mode.showPinnedError("Cancelled by provider");
+		expect(mode.shell.overlays.open()).toBe(false);
+		expect(report(0, 0)).toBe("");
+	});
+
 	it("dismisses Plan Review and restores input when a provider error is pinned", async () => {
-		mode.ui.setFocus(mode.editor);
+		mode.shell.focus(mode.composer.field);
 		const choice = mode.showPlanReview("# Plan\n\nReady for approval.", "Plan mode - next step", [
 			{ id: "approve", label: "Approve" },
 		]);
 
-		expect(mode.ui.hasOverlay()).toBe(true);
+		expect(mode.shell.overlays.open()).toBe(true);
 
 		mode.showPinnedError("Codex rate limit reached");
 
-		expect(mode.ui.hasOverlay()).toBe(false);
-		expect(mode.ui.getFocused()).toBe(mode.editor);
-		expect(mode.errorBannerContainer.render(80).join("\n")).toContain("Codex rate limit reached");
+		expect(mode.shell.overlays.open()).toBe(false);
+		expect(mode.shell.focused()).toBe(mode.composer.field);
+		const banner = mode.shell.dock.slot("errorBanner").view;
+		expect(renderRows(() => banner()).join("\n")).toContain("Codex rate limit reached");
 		await expect(choice).resolves.toBeUndefined();
 	});
 
 	it("copies the overlay's current edited plan markdown from the real plan review overlay", async () => {
-		let capturedOverlay: PlanReviewOverlay | undefined;
-		const overlayHandle = { hide: vi.fn() };
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
-			capturedOverlay = component as PlanReviewOverlay;
-			return overlayHandle as never;
-		});
+		const review = catchReview();
 		const copySpy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
 		const statusSpy = vi.spyOn(mode, "showStatus");
 		const constructorPlan = "# Plan\n\nOriginal constructor body.\n";
@@ -1241,10 +1377,10 @@ describe("InteractiveMode plan review rendering", () => {
 			{ id: "execute", label: "Approve and execute" },
 		]);
 
-		expect(capturedOverlay).toBeDefined();
-		const overlay = capturedOverlay!;
-		overlay.setPlanContent(editedPlan);
-		overlay.handleInput("c");
+		pressKey(mode.shell, "down");
+		expect(review.current).toBeDefined();
+		review.current!.setPlanContent(editedPlan);
+		pressKey(mode.shell, "c");
 		await Promise.resolve();
 
 		expect(copySpy).toHaveBeenCalledTimes(1);
@@ -1252,11 +1388,11 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(copySpy).not.toHaveBeenCalledWith(constructorPlan);
 		expect(statusSpy).toHaveBeenCalledWith("Copied plan to clipboard");
 
-		overlay.handleInput("\x1b");
+		pressKey(mode.shell, "escape");
 		await expect(choice).resolves.toBeUndefined();
 		// showPlanReview no longer hides on settle: the plan-approval caller fuses
 		// #hidePlanReview() with the replacement paint to avoid stale-buffer flicker.
-		expect(overlayHandle.hide).not.toHaveBeenCalled();
+		expect(mode.shell.overlays.open()).toBe(true);
 	});
 
 	it("approves with in-overlay edits and mirrors them to the plan file", async () => {
@@ -1322,7 +1458,14 @@ describe("InteractiveMode plan review rendering", () => {
 		});
 		const generateTitle = vi.spyOn(session, "generateTitle").mockResolvedValue("Auto QA");
 		const destination = path.join(tempDir.path(), "AUTO_QA_PLAN.md");
-		vi.spyOn(mode, "showHookCustom").mockResolvedValue({ path: "AUTO_QA_PLAN.md" });
+		// The save dialog suggests a name from the generated title; Enter takes the suggestion.
+		onOverlayShown(() => {
+			void (async () => {
+				await generateTitle.mock.results[0]?.value;
+				await Promise.resolve();
+				pressKey(mode.shell, "enter");
+			})();
+		});
 		const clear = vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 
 		await mode.handlePlanApproval({
@@ -1339,6 +1482,44 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(await saved.promise).toContain("Saved plan to");
 		expect(clear).not.toHaveBeenCalled();
 		expect(mode.planModeEnabled).toBe(true);
+	});
+
+	it("saves a typed path and shows the destination without dismissing the review", async () => {
+		const planFilePath = "local://PLAN.md";
+		const planContent = "# Draft plan\n\nSave a copy.\n";
+		await Bun.write(
+			resolveLocalUrlToPath(planFilePath, {
+				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+				getSessionId: () => session.sessionManager.getSessionId(),
+			}),
+			planContent,
+		);
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(session, "generateTitle").mockResolvedValue("Draft");
+
+		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "Draft" });
+		try {
+			await term.waitFor(rows => rows.some(row => row.includes("Plan mode - next step")));
+			for (let i = 0; i < 3; i++) term.press("down");
+			term.press("enter");
+			await term.waitFor(rows => rows.some(row => row.includes("Save plan")));
+			const fileName = "custom-review.md";
+			term.type(fileName);
+			term.press("enter");
+
+			await term.waitFor(rows => rows.some(row => row.includes("Saved plan to") && row.includes(fileName)));
+			expect(await Bun.file(path.join(tempDir.path(), fileName)).text()).toBe(planContent);
+			const screen = term.screen().join("\n");
+			expect(screen).toContain("Plan mode - next step");
+			expect(screen).not.toContain("Save plan");
+			pressKey(mode.shell, "escape");
+			await approval;
+			expect(mode.shell.overlays.open()).toBe(false);
+		} finally {
+			mode.stop();
+			await approval;
+		}
 	});
 
 	it("carries pre-approval local artifacts into the fresh approve-and-execute session", async () => {
@@ -1461,7 +1642,9 @@ describe("InteractiveMode plan review rendering", () => {
 			settings: Settings.isolated({ modelRoles: { plan: `anthropic/${planModel.id}` } }),
 			modelRegistry,
 		});
-		mode = new InteractiveMode(session, "test");
+		await mode.shell.stop();
+		term.dispose();
+		await createMode();
 
 		await mode.handlePlanModeCommand();
 		expect(session.model?.id).toBe(planModel.id);
@@ -1523,16 +1706,17 @@ describe("InteractiveMode plan review rendering", () => {
 		let keptOnDefault: boolean | undefined;
 		let keepLabelOnSlow: string | undefined;
 		let keptBackOnDefault: boolean | undefined;
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
-			const overlay = component as PlanReviewOverlay;
+		const review = catchReview();
+		onOverlayShown(() => {
+			pressKey(mode.shell, "j");
+			const overlay = review.current!;
 			keptOnDefault = overlay.selectOption("keep");
-			overlay.handleInput("\x1b[C");
+			pressKey(mode.shell, "right");
 			keepLabelOnSlow = mode.getPendingPlanReview()?.options.find(option => option.id === "keep")?.label;
-			overlay.handleInput("\x1b[D");
+			pressKey(mode.shell, "left");
 			keptBackOnDefault = overlay.selectOption("keep");
-			overlay.handleInput("\x1b[C");
+			pressKey(mode.shell, "right");
 			overlay.selectOption("keep");
-			return { hide: vi.fn() } as never;
 		});
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
@@ -1691,13 +1875,16 @@ describe("InteractiveMode plan review rendering", () => {
 		// "Approve and keep context" (index 2) — that branch keeps the session, so no
 		// clear machinery runs — and confirm with Enter. `showOverlay` runs inside
 		// `showPlanReview`, so the pick resolves the picker promise without a wait.
-		const overlayHandle = { hide: vi.fn() };
-		vi.spyOn(mode.ui, "showOverlay").mockImplementation(component => {
-			const overlay = component as PlanReviewOverlay;
-			overlay.handleInput("j");
-			overlay.handleInput("j");
-			overlay.handleInput("\n");
-			return overlayHandle as never;
+		let overlayHandle: { readonly closed: boolean } | undefined;
+		const overlays = mode.shell.overlays;
+		const show = overlays.show.bind(overlays);
+		vi.spyOn(overlays, "show").mockImplementation((factory, options) => {
+			const handle = show(factory, options);
+			overlayHandle = handle;
+			pressKey(mode.shell, "j");
+			pressKey(mode.shell, "j");
+			pressKey(mode.shell, "enter");
+			return handle;
 		});
 
 		// Block the execution dispatch until released, mirroring a real turn that
@@ -1707,7 +1894,7 @@ describe("InteractiveMode plan review rendering", () => {
 		const promptEntered = Promise.withResolvers<void>();
 		let hiddenWhenPromptEntered: boolean | undefined;
 		vi.spyOn(session, "prompt").mockImplementation(async () => {
-			hiddenWhenPromptEntered = overlayHandle.hide.mock.calls.length > 0;
+			hiddenWhenPromptEntered = overlayHandle?.closed === true;
 			promptEntered.resolve();
 			return gate.promise;
 		});
@@ -1717,7 +1904,7 @@ describe("InteractiveMode plan review rendering", () => {
 		// Await the real dispatch signal instead of a wall-clock guess.
 		await promptEntered.promise;
 		expect(hiddenWhenPromptEntered).toBe(true);
-		expect(overlayHandle.hide).toHaveBeenCalledTimes(1);
+		expect(mode.shell.overlays.open()).toBe(false);
 
 		gate.resolve(true);
 		await approval;
@@ -2910,7 +3097,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 			expect(abort).not.toHaveBeenCalled();
 			expect(warn).not.toHaveBeenCalled();
-			expect(mode.ui.hasOverlay()).toBe(false);
+			expect(mode.shell.overlays.open()).toBe(false);
 			expect(recorder.events).toEqual([]);
 		});
 
@@ -2925,7 +3112,7 @@ describe("InteractiveMode plan review rendering", () => {
 
 			expect(await mode.openPlanReview()).toBe(false);
 
-			expect(mode.ui.hasOverlay()).toBe(false);
+			expect(mode.shell.overlays.open()).toBe(false);
 			expect(recorder.events).toEqual([]);
 		});
 
@@ -2948,13 +3135,13 @@ describe("InteractiveMode plan review rendering", () => {
 	});
 });
 
-describe("AssistantMessageComponent aborted replay", () => {
+describe("assistant message aborted replay", () => {
 	beforeAll(() => {
 		initTheme();
 	});
 
 	// ==========================================================================
-	// Phase 6 — D layer: replay-side render branches in AssistantMessageComponent.
+	// Phase 6 — D layer: replay-side render branches of the assistant message view.
 	//
 	// D1 asserts that the persisted `SILENT_ABORT_MARKER` suppresses the red abort
 	// line. D2 is the over-suppression regression guard — an aborted message with
@@ -2963,8 +3150,9 @@ describe("AssistantMessageComponent aborted replay", () => {
 	// ==========================================================================
 
 	function renderAssistant(message: AssistantMessage, width = 120): string {
-		const component = new AssistantMessageComponent(message);
-		return Bun.stripANSI(component.render(width).join("\n"));
+		const ctx = createInteractiveModeContext();
+		ctx.presentAssistant(message).finalized.set(true);
+		return renderTranscript(ctx, width).join("\n");
 	}
 
 	/** Build an aborted assistant message with the minimum required fields. */

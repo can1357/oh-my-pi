@@ -1,6 +1,6 @@
-import { resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
+import { promptBudgetTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
-import type { ModelCompactionPoint } from "@oh-my-pi/pi-tui/overlays/model-browser";
+import type { ModelCompactionPoint } from "../modes/view-model/overlays/model-browser";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import {
 	applyCompactionThresholdPair,
@@ -58,8 +58,9 @@ function formatWindow(tokens: number): string {
 
 /**
  * Where a compaction policy triggers on a window, and why: at a `fixed` token
- * count (`cappedFrom` the configured count when it is at or past the window,
- * which then compacts at the window less its reserve), or `scaled` to `share`
+ * count (a configured trigger, `cappedFrom` the configured count when it is at
+ * or past the window, which then compacts at the window less its reserve; or
+ * the default's absolute ceiling on a wide window), or `scaled` to `share`
  * percent of `scaledFrom` (the entry's base when `fromBase`, else the window).
  * `share` is the configured percentage when one applies, else the reserve
  * policy's exact share, so fractions survive.
@@ -78,6 +79,10 @@ function resolveTrigger(settings: CompactionSettings, window: number): ModelComp
 	}
 	const base = settings.baseWindowTokens;
 	const fromBase = base !== undefined && base > 0 && base < window;
+	// The bare default stops at its absolute ceiling on a wide window: a fixed size, not a share.
+	if (settings.thresholdPercent <= 0 && (base ?? 0) <= 0 && tokens < promptBudgetTokens(window, settings)) {
+		return { kind: "fixed", tokens };
+	}
 	const scaledFrom = fromBase ? base : window;
 	// Mirrors `resolveThresholdTokens`' clamp of a configured percentage.
 	const share =

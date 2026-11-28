@@ -22,7 +22,7 @@ import * as probe from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
 import { getTabsMapForTest, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import type { Browser } from "puppeteer-core";
 import { TimeoutError } from "puppeteer-core";
 import { rejectionOf } from "../helpers/rejection";
@@ -36,6 +36,8 @@ function makeSession(): ToolSession {
 		settings: Settings.isolated({
 			"browser.enabled": true,
 			"browser.cmux": true,
+			// Relay lease tests substitute cmux at acquisition; never discover a real user's browser.
+			"browser.relayUrl": "http://127.0.0.1:1",
 			// Tern resolves before cmux; keep an ambient Tern pane from capturing the open.
 			"browser.tern": false,
 			"tools.maxTimeout": 0,

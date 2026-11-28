@@ -1,21 +1,19 @@
-import { beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as natives from "@oh-my-pi/pi-natives";
 import { DiffSide, DiffStream } from "@oh-my-pi/pi-natives";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
-import {
-	buildDiffDocument,
-	buildLineSelectionPatch,
-	type DiffBuildOptions,
-	DiffPane,
-} from "@oh-my-pi/pi-tui/apps/git/diff-pane";
-import type { ChangedFile } from "@oh-my-pi/pi-tui/apps/git/state";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { buildLineSelectionPatch, type DiffBuildOptions } from "@oh-my-pi/pi-coding-agent/cli/git-tui/model/diff-pane";
+import type { ChangedFile } from "@oh-my-pi/pi-coding-agent/cli/git-tui/model/state";
 import { GitModel } from "../src/cli/git-tui/state";
-import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { DiffPaneModel } from "../src/ui/apps/git/diff-pane-model";
+import { buildDiffDocument } from "../src/ui/apps/git/document";
+import { paintDiffPane } from "../src/ui/styles/apps/git/diff-pane";
+import { initTheme } from "../src/ui/theme/service";
 
 const RED_PNG = Buffer.from(
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
@@ -26,9 +24,20 @@ const GRAY_PNG = Buffer.from(
 	"base64",
 );
 const LFS_POINTER_VERSION = "version https://git-lfs.github.com/spec/v1";
-beforeAll(async () => {
-	await initTheme(false);
+beforeAll(() => {
+	initTheme({
+		dark: "dark",
+		light: "dark",
+		capabilities: { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI },
+	});
 });
+
+/** The git app's diff pane, painted in the terminal (no inline images: media sides draw their text). */
+class DiffPane extends DiffPaneModel {
+	render(width: number, height: number): string[] {
+		return paintDiffPane(this, currentTheme(), width, height);
+	}
+}
 
 async function withReviewRepo(run: (repo: string) => Promise<void>): Promise<void> {
 	const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-git-tui-stream-"));
@@ -257,42 +266,6 @@ describe("git TUI asset previews", () => {
 			pane.setAsset(file.path, contents.old, contents.new);
 			expect(sanitizeText(pane.render(80, 12).join("\n"))).toContain("After · SVG");
 		});
-	});
-
-	test("encodes a SIXEL image preview once across renders", async () => {
-		const terminal = TERMINAL as unknown as { imageProtocol: ImageProtocol | null };
-		const originalProtocol = terminal.imageProtocol;
-		terminal.imageProtocol = ImageProtocol.Sixel;
-		const encodeSixel = spyOn(natives, "encodeSixelAsync");
-		try {
-			const pane = new DiffPane();
-			pane.setAsset(
-				"image.png",
-				{ kind: "empty" },
-				{
-					kind: "image",
-					image: {
-						data: RED_PNG.toString("base64"),
-						mimeType: "image/png",
-						sourceMimeType: "image/png",
-						widthPx: 1,
-						heightPx: 1,
-						byteLength: RED_PNG.byteLength,
-						key: "red",
-					},
-				},
-			);
-			pane.render(80, 12);
-			await encodeSixel.mock.results[0]?.value;
-			pane.render(80, 12);
-			pane.render(80, 12);
-			// A fresh Image per render would start a new encode every frame and
-			// never show the one that landed.
-			expect(encodeSixel).toHaveBeenCalledTimes(1);
-		} finally {
-			encodeSixel.mockRestore();
-			terminal.imageProtocol = originalProtocol;
-		}
 	});
 
 	test("resolves staged Git LFS pointers from local object storage", async () => {

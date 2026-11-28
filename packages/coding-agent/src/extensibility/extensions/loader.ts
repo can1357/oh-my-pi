@@ -16,7 +16,7 @@ import type {
 	TextContent,
 	TSchema,
 } from "@oh-my-pi/pi-ai";
-import { isBuiltinComposerStyle, type KeyId } from "@oh-my-pi/pi-tui";
+import { type KeyId } from "../../config/keybindings/key-id";
 import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
 import { type Hook, hookCapability } from "../../capability/hook";
@@ -39,9 +39,9 @@ import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/leg
 import { getEnabledPlugins, resolvePluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
-import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
-import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
-import { notifyTranscriptPresentersChanged } from "@oh-my-pi/pi-tui/chat/transcript-presentation";
+import { type ComposerShape, isBuiltinComposerShape } from "../../ui/styles/composer/shapes";
+import { sanitizeDisplayLine } from "../inventory/display-text";
+import { notifyTranscriptPresentersChanged } from "../../session/transcript/transcript-presentation";
 import type {
 	AssistantTextRenderer,
 	AssistantThinkingRenderer,
@@ -274,7 +274,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 			handler: RegisteredCommand["handler"];
 		},
 	): void {
-		this.extension.commands.set(name, { name, ...options });
+		this.extension.commands.set(name, { name, ...options, extensionPath: this.extension.path });
 	}
 
 	setLabel(label: string): void {
@@ -355,18 +355,23 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (!this.extension.linkSchemes.includes(normalized)) this.extension.linkSchemes.push(normalized);
 	}
 
-	registerComposerShape(definition: ComposerShapeDefinition): void {
-		const id = definition.style.id;
-		if (id.length === 0 || id !== id.trim()) {
+	registerComposerShape(shape: ComposerShape & { readonly label: string }): void {
+		const id = shape.id;
+		if (typeof id !== "string" || id.length === 0 || id !== id.trim()) {
 			throw new TypeError("Composer shape id must be a non-empty trimmed string");
 		}
-		if (definition.label.trim().length === 0) {
+		if (typeof shape.label !== "string" || shape.label.trim().length === 0) {
 			throw new TypeError(`Composer shape "${id}" must have a label`);
 		}
-		if (isBuiltinComposerStyle(id)) {
+		if (typeof shape.row !== "function" || typeof shape.sideWidth !== "function") {
+			throw new TypeError(
+				`Composer shape "${id}" must implement row() and sideWidth() (see the ComposerShape contract in docs/extensions.md)`,
+			);
+		}
+		if (isBuiltinComposerShape(id)) {
 			throw new Error(`Cannot replace built-in composer shape "${id}"`);
 		}
-		this.extension.composerShapes.set(id, definition);
+		this.extension.composerShapes.set(id, shape);
 	}
 
 	registerTodoBackend(definition: TodoBackendDefinition): void {
@@ -390,6 +395,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		}
 		if (typeof definition.replace !== "function") {
 			throw new TypeError(`Todo backend "${id}" must have a replace function`);
+		}
+		if (definition.apply !== undefined && typeof definition.apply !== "function") {
+			throw new TypeError(`Todo backend "${id}" apply must be a function`);
 		}
 		(this.extension.todoBackends ??= new Map()).set(id, definition);
 	}
@@ -788,9 +796,9 @@ export async function discoverExtensionPaths(
 	if (ambient) {
 		// 1. Discover extension modules via capability API (native .omp/.pi only).
 		// Scope the load to the native provider — the extension-module capability
-		// also has claude/codex/gemini/opencode providers, and their items were
+		// also has claude/codex/opencode providers, and their items were
 		// discarded here anyway (see #4198). The provider filter skips the walk
-		// entirely instead of running four foreign directory scans and dropping
+		// entirely instead of running three foreign directory scans and dropping
 		// the results.
 		const discovered = await loadCapability<ExtensionModule>(extensionModuleCapability.id, {
 			...loadOptions,

@@ -31,82 +31,80 @@ bench = false
 
 [dependencies]
 async-trait.workspace = true
-chrono = "0.4.44"
-clap = { version = "4.6.0", features = ["cargo", "color", "derive", "env", "wrap_help"] }
+chrono = "0.4.45"
+clap = { version = "4.6.10", features = ["cargo", "color", "derive", "env", "wrap_help"] }
 fancy-regex.workspace = true
-futures = "0.3.32"
-itertools = "0.14.0"
+futures = "0.3.34"
+itertools = "0.15.0"
 parking_lot = "0.12.5"
-thiserror = "2.0.18"
+thiserror = "2.0.21"
 
 # ── Utility builtin dependencies ──────────────────────────────────────────────
-# 0.1.1 moved to unicode-width 0.2, the version the rest of the graph uses.
-ansi-width = "0.1.1"
-argmax = "0.4.0"
 # `ast-grep scan`: YAML rules on the ast-grep-core version omp-ast uses, and
 # their diagnostics in ast-grep's codespan layout.
-ast-grep-config = { version = "0.39.9", optional = true }
+ast-grep-config = { version = "0.41.1", optional = true }
 ast-grep-core = { workspace = true, optional = true }
 bigdecimal = "0.4"
-bstr = "1.12.0"
-codespan-reporting = { version = "0.13", default-features = false, features = ["std"], optional = true }
+bstr = "1.14.0"
 flume = "0.12"
 foldhash = "0.2.0"
-glob = "0.3.1"
+glob = "0.3.4"
 globset = "0.4"
 grep-cli = "0.1"
 grep-matcher = "0.1"
-grep-pcre2 = "0.1"
 grep-printer = "0.3"
 grep-regex = "0.1"
 grep-searcher = "0.1"
 hex = "0.4.3"
 # `sort` collates and reads numbers per call from the shell's locale; uucore's
 # i18n helpers cache one process-wide locale.
-icu_collator = { version = "2.0", default-features = false, features = ["compiled_data"] }
-icu_decimal = { version = "2.0", default-features = false, features = ["compiled_data"] }
-icu_locale_core = { version = "2.0", default-features = false, features = ["alloc"] }
-icu_provider = { version = "2.0", default-features = false }
+icu_collator = { version = "2.4", default-features = false, features = ["compiled_data"] }
+icu_decimal = { version = "2.4", default-features = false, features = ["compiled_data"] }
+icu_locale_core = { version = "2.4", default-features = false, features = ["alloc"] }
+icu_provider = { version = "2.4", default-features = false }
 ignore = "0.4"
-indicatif = "0.18.0"
-jaq-core = "3.1.1"
+jaq-core = "3.1.2"
 jaq-json = "2.0.3"
-jaq-std = "3.0.3"
-jiff = { version = "0.2.18", features = ["tzdb-bundle-platform"] }
-lscolors = { version = "0.21.0", default-features = false, features = ["gnu_legacy"] }
-memchr = "2.7.4"
+jaq-std = "3.0.4"
+jiff = { version = "0.2.46", features = ["tzdb-bundle-platform"] }
+memchr = "2.8.3"
 nom = "8.0.0"
 num-bigint = "0.4"
 num-traits = "0.2"
-onig = { version = "6.4", default-features = false }
+onig = { version = "6.5", default-features = false }
 os_display = "0.1.4"
-parse_datetime = "0.16"
+parse_datetime = "0.17"
 omp-ast = { workspace = true, optional = true }
 omp-diff.workspace = true
 omp-xfs.workspace = true
 omp-vfs.workspace = true
-rand = { version = "0.10.0", features = ["std_rng"] }
-rayon = "1.10"
-regex = "1.11"
+rand = { version = "0.10.4", features = ["std_rng"] }
+rayon = "1.12"
+regex = "1.13"
 # `awk`: POSIX leftmost-longest matching (hybrid DFA, `MatchKind::All`).
 regex-automata = "0.4"
-rustc-hash = "2.1.1"
-self_cell = "1.0.4"
+rustc-hash = "2.1.3"
+# `perl`: insertion-ordered hashes, PCRE2 matching, sockets, XID identifiers,
+# `\N{NAME}` lookup, Unicode::Normalize, `\b{wb}`/`\b{sb}` boundaries.
+icu_normalizer = { version = "2.4", default-features = false, features = ["compiled_data"], optional = true }
+indexmap = { version = "2", optional = true }
+pcre2-sys = { workspace = true, optional = true }
+socket2 = { version = "0.6", features = ["all"], optional = true }
+unicode-ident = { version = "1", optional = true }
+unicode-segmentation = { version = "1.13", optional = true }
+self_cell = "1.3.0"
 serde = { workspace = true, optional = true }
 serde_json = "1"
 # Exact pin keeps `ast-grep test` snapshot bytes identical to ast-grep 0.50.0.
 serde-saphyr = { version = "=2.1.1", default-features = false, features = ["serialize"], optional = true }
 serde_yaml = { version = "0.9", optional = true }
 smallvec.workspace = true
-# `jq` evaluates on a grown stack and bounds its recursion by the stack left.
-stacker = "0.1.25"
-tempfile = "3.15.0"
+tempfile = "3.27.0"
 # `direnv`: `direnv.toml`.
 toml = { workspace = true, optional = true }
 tokio-util = "0.7"
 xutf.workspace = true
-libc = "0.2.172"
-uutils_term_grid = "0.8"
+libc = "0.2.191"
 
 [dependencies.uucore]
 version = "0.8.0"
@@ -152,47 +150,45 @@ base64.workspace = true
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 lz4_flex = "0.14"
 md-5 = "0.10"
-md4 = "0.10"
 sha1 = "0.10"
 sha2 = "0.10"
 xxhash-rust = { workspace = true, features = ["xxh3", "xxh64"] }
 zstd.workspace = true
 # `tar`: the archive format and its bzip2/xz codecs (pure Rust).
 bzip2 = "0.6"
-lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "encoder", "xz"] }
+lzma-rust2 = { version = "0.26", default-features = false, features = ["std", "encoder", "xz"] }
 tar = { version = "0.4.46", default-features = false }
 
 [target."cfg(any(unix, windows))".dependencies.tokio]
-version = "1.50.0"
-features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync"]
+version = "1.54.1"
+features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"]
 
 [target.'cfg(target_family = "wasm")'.dependencies.tokio]
-version = "1.52.1"
+version = "1.54.1"
 features = ["io-util", "macros", "rt"]
 
 [target."cfg(any(target_os = \"freebsd\", target_os = \"openbsd\"))".dependencies]
-dns-lookup = "3.0.1"
+dns-lookup = "4.0.2"
 
 [target."cfg(unix)".dependencies]
-nix = { version = "0.31.3", features = ["fs", "poll", "process", "resource", "signal", "term", "user"] }
-notify = { version = "=8.2.0", features = ["macos_kqueue"] }
-rustix = { version = "1.1.4", features = ["fs", "process", "system", "time"] }
+# `socket`/`net`/`uio`: perl's recv with packed peer addresses.
+nix = { version = "0.31.4", features = ["fs", "net", "poll", "process", "resource", "signal", "socket", "term", "uio", "user"] }
+rustix = { version = "1.1.6", features = ["fs", "process", "system", "time"] }
 uucore = { version = "0.8.0", features = ["fsxattr", "safe-traversal"] }
 
 # `open`: NSWorkspace.
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = { version = "=0.6.2", optional = true }
-objc2 = { version = "=0.6.4", optional = true }
+objc2 = { version = "=0.6.5", optional = true }
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSRunningApplication", "NSWorkspace", "block2", "libc"], optional = true }
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSObject", "NSString", "NSURL"], optional = true }
 
 # `open`: D-Bus activation, the desktop portal and the file manager.
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"], optional = true }
+zbus = { version = "5.19", default-features = false, features = ["tokio"], optional = true }
 
 [target."cfg(windows)".dependencies]
-notify = "=8.2.0"
-rustix = { version = "1.1.4", features = ["fs", "process", "time"] }
+rustix = { version = "1.1.6", features = ["fs", "process", "time"] }
 windows-sys = { version = "0.61", features = [
   "Wdk_System_SystemServices",
   "Win32_Foundation",
@@ -212,7 +208,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-anyhow = "1.0.102"
+anyhow = "1.0.105"
 tempfile = "3"
 
 [features]
@@ -225,7 +221,6 @@ default = ["utils"]
   "dep:omp-ast",
   "dep:ast-grep-config",
   "dep:ast-grep-core",
-  "dep:codespan-reporting",
   "dep:serde",
   "dep:serde-saphyr",
   "dep:serde_yaml",
@@ -289,6 +284,15 @@ default = ["utils"]
 # Hands files and URLs to the desktop: macos, linux and windows targets.
 "util.open" = ["dep:block2", "dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:zbus"]
 "util.paste" = []
+# `perl`: Perl 5 interpreter; PCRE2 is the closest engine to Perl's regexes.
+"util.perl" = [
+  "dep:icu_normalizer",
+  "dep:indexmap",
+  "dep:pcre2-sys",
+  "dep:socket2",
+  "dep:unicode-ident",
+  "dep:unicode-segmentation",
+]
 "util.pgrep" = ["util.proc-match"]
 "util.pidwait" = ["util.proc-match"]
 "util.pkill" = ["util.proc-match"]
@@ -395,6 +399,7 @@ utils = [
   "util.od",
   "util.open",
   "util.paste",
+  "util.perl",
   "util.pgrep",
   "util.pidwait",
   "util.pkill",

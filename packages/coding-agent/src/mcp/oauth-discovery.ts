@@ -6,6 +6,7 @@
  */
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { withTimeoutSignal } from "../utils/fetch-timeout";
 
 /** Per-request abort deadline for each OAuth discovery metadata fetch. */
@@ -82,6 +83,21 @@ export function extractOAuthChallengeScopes(error: Error): string | undefined {
 		if ((key === "scope" || key === "scopes") && value.trim() !== "") {
 			return value;
 		}
+	}
+	return undefined;
+}
+
+/**
+ * Scopes an RFC 6750 §3.1 `insufficient_scope` challenge asks for: the
+ * `scope` parameter of the first `WWW-Authenticate` value whose `error` is
+ * `insufficient_scope` (`""` when it names none). Undefined when no value is
+ * such a challenge. The tool bridge treats a defined result as a step-up
+ * request; `reauthorizeMcpServer` adds the scopes to the grant.
+ */
+export function insufficientScopeOf(challenges: readonly string[]): string | undefined {
+	for (const challenge of challenges) {
+		if (!/\berror\s*=\s*"?insufficient_scope\b/i.test(challenge)) continue;
+		return challenge.match(/\bscope\s*=\s*"([^"]*)"/i)?.[1]?.trim() ?? "";
 	}
 	return undefined;
 }
@@ -403,7 +419,7 @@ export async function fetchResourceMetadataScopes(
 	resourceMetadataUrl: string,
 	opts?: { fetch?: FetchImpl; signal?: AbortSignal },
 ): Promise<string | undefined> {
-	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
+	const fetchImpl: FetchImpl = opts?.fetch ?? wrapFetchForExtraCa(fetch);
 	try {
 		const resp = await fetchImpl(resourceMetadataUrl, {
 			method: "GET",
@@ -474,7 +490,7 @@ export async function discoverOAuthEndpoints(
 	resourceMetadataUrl?: string,
 	opts?: { fetch?: FetchImpl; protectedScopes?: string; signal?: AbortSignal },
 ): Promise<OAuthEndpoints | null> {
-	const fetchImpl: FetchImpl = opts?.fetch ?? fetch;
+	const fetchImpl: FetchImpl = opts?.fetch ?? wrapFetchForExtraCa(fetch);
 	// Authorization servers are not protected resources: probing
 	// `oauth-protected-resource` here would follow another resource's
 	// `authorization_servers` (typically the origin root's) and bypass the

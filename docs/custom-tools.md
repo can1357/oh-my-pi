@@ -49,15 +49,14 @@ CustomTool.execute(toolCallId, params, onUpdate, ctx, signal)
 
 1. Capability providers (`toolCapability`), including:
    - Native OMP config (`<agentDir>/tools`, default `~/.omp/agent/tools`; `.omp/tools`)
-   - Claude config (`<Claude config dir>/tools`, default `~/.claude/tools`; `.claude/tools`)
-   - Codex config (`~/.codex/tools`, `.codex/tools`)
-   - OMP package roots and Claude marketplace plugins
+   - OMP package roots and marketplace plugins
 2. Enabled installed plugin manifests (user `~/.omp/plugins` and the active project `.omp/plugins` registry via the plugin loader; project packages shadow same-named user packages)
 3. Explicit configured paths passed to the loader
 
+`discoverCustomToolPaths(..., { ambient: false })` skips sources 1–2 except OMP package roots, which then list only explicit extension roots. Sessions with `disableExtensionDiscovery` (CLI `--no-extensions`) discover this way.
+
 ### Important behavior
 
-- Foreign user directories are opt-in via `enabledProviders` (for example `"claude"` or `"codex"`); project directories remain discoverable unless the whole provider is disabled. `CLAUDE_CONFIG_DIR` also opts in the Claude user source.
 - Native user discovery follows the active profile and the supplied `agentDir`.
 - Duplicate resolved paths are deduplicated by discovery; `loadCustomTools` itself loads the supplied path list.
 - Filesystem tool name conflicts are rejected against the supplied built-in names and already-loaded custom tools. Configured paths are appended, not name overrides.
@@ -162,7 +161,7 @@ The session bootstrap bridge converts custom tools to extension `ToolDefinition`
 
 Tool definitions may also declare `strict`, `hidden`, `loadMode`, `deferrable`, `readsSkillUris`, `mcpServerName`, `mcpToolName`, `legacyName`, and `approval`. When `loadMode` is omitted, custom tool names default to `"discoverable"` except for the canonical essential built-in names (`read`, `write`, `bash`, `edit`, `glob`, `find`, `eval`, `task`, `wait`, `learn`, `manage_skill`, `context_notes`, and `new_context`), which default to `"essential"` so wrappers or re-registrations do not demote them. An explicit `loadMode` always wins; use `"essential"` to keep any other tool top-level.
 
-Although the public `CustomTool` type also declares `formatApprovalDetails`, `describeCall`, and `describeResult`, the SDK/discovery conversion does not propagate those callbacks into the registered definition. Direct `CustomToolAdapter` consumers retain them.
+Although the public `CustomTool` type also declares `formatApprovalDetails`, the SDK/discovery conversion does not propagate that callback into the registered definition. Direct `CustomToolAdapter` consumers retain it.
 
 ## How tools are exposed to the model
 
@@ -180,15 +179,18 @@ Optional rendering hooks:
 - `renderCall(args, options, theme)`
 - `renderResult(result, options, theme)`
 
+Each returns pi-tui nodes (JSX from `@oh-my-pi/pi-tui`), a rows object `{ render(width): string[] }`, or `undefined`; see [extension rendering](./extensions.md#migrating-from-pi-tui). The `theme` is pi-tui's theme plus `bold`, `italic`, `underline`, `strikethrough` and `inverse`.
+
 The normal SDK and filesystem-discovery paths wrap custom tools as extensions. On those paths, `renderResult` receives only the three arguments above; the bridge does not forward the original tool arguments. The public `CustomTool` type retains an optional fourth `args` parameter for direct `CustomToolAdapter` consumers.
 
 On extension-adapter paths, `renderCall`'s `options` argument additionally answers the `Theme` API, allowing upstream pi renderers to use their second argument for styling. The third argument remains the theme, not upstream pi's context object.
 
-Runtime behavior in TUI:
+Runtime behavior in the interactive UI:
 
-- If hooks exist, tool output is rendered inside a `Box` container.
+- If hooks exist, their output is drawn inside the padded custom-tool box, call first, then result.
+- Nodes are drawn by the terminal and by Tern. Rows objects are drawn by the terminal only; Tern shows the generic tool card for them.
 - `renderResult` receives `{ expanded, isPartial, spinnerFrame? }` as its `options` argument.
-- Renderer errors are caught and logged; UI falls back to default text rendering.
+- A hook that throws, or returns something that is neither nodes nor rows, is reported; when nothing else drew, the generic tool card shows. Rows that throw while painting draw one error row.
 
 ## Session/state handling
 

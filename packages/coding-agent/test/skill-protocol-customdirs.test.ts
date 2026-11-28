@@ -7,23 +7,20 @@ import {
 	buildSkillPromptMessage,
 	loadSkills,
 	resetActiveSkillsForTests,
-	setActiveSkills,
 	type Skill,
+	setActiveSkills,
 } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { SkillProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/skill-protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
-import { readToolRenderer } from "@oh-my-pi/pi-tui/tools/read";
+import { toolText } from "./helpers/tool-text";
 
 function makeSkillMd(name: string, dir: string) {
 	return `---\nname: ${name}\ndescription: ${name} skill.\n---\n\n# ${name} from ${dir}\n`;
 }
 
 const ALL_DEFAULT_SOURCES_DISABLED = {
-	enableCodexUser: false,
-	enableClaudeUser: false,
 	enableClaudeProject: false,
 	enablePiUser: false,
 	enablePiProject: false,
@@ -114,7 +111,10 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 		const [exitCode, output] = await Promise.all([proc.exited, new Response(proc.stdout).text()]);
 		expect(exitCode).toBe(0);
 		expect(output).toBe("helper from plugin-b");
-		expect(result.details?.meta?.source).toEqual({ type: "internal", value: "skill://helper-skill" });
+		expect(result.details?.meta?.source).toEqual({
+			type: "internal",
+			value: "skill://helper-skill",
+		});
 
 		// Out-of-range selectors have no displayContent; the TUI uses the first text block.
 		const outOfRangeArgs = { path: "skill://helper-skill:9999" };
@@ -123,15 +123,13 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 		const firstText = outOfRange.content.find(block => block.type === "text")?.text;
 		expect(firstText).toContain(`[Skill file: ${helper.filePath}]`);
 		expect(firstText).toContain("Line 9999 is beyond end of file");
-		await initTheme(false, undefined, undefined, "dark", "light");
-		const uiTheme = await getThemeByName("dark");
-		if (!uiTheme) throw new Error("Failed to load dark theme");
 		for (const expanded of [false, true]) {
-			const rendered = readToolRenderer
-				.renderResult(outOfRange, { expanded, isPartial: false }, uiTheme, outOfRangeArgs)
-				.render(120)
-				.map(line => Bun.stripANSI(line))
-				.join("\n");
+			const rendered = toolText({
+				name: "read",
+				args: outOfRangeArgs,
+				result: outOfRange,
+				expanded,
+			});
 			expect(rendered).toContain("Line 9999 is beyond end of file");
 		}
 
@@ -194,7 +192,10 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 		const body = Array.from({ length: 30 }, (_, i) => `body-line-${i + 1}`).join("\n");
 		await Bun.write(path.join(skillDir, "SKILL.md"), `${makeSkillMd("tail-skill", tempDir)}${body}\n`);
 
-		const { skills } = await loadSkills({ ...ALL_DEFAULT_SOURCES_DISABLED, customDirectories: [tempDir] });
+		const { skills } = await loadSkills({
+			...ALL_DEFAULT_SOURCES_DISABLED,
+			customDirectories: [tempDir],
+		});
 		setActiveSkills(skills);
 		const session: ToolSession = {
 			cwd: tempDir,
@@ -203,7 +204,9 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 			getSessionSpawns: () => "*",
 			settings: Settings.isolated(),
 		};
-		const result = await new ReadTool(session).execute("read-skill-tail", { path: "skill://tail-skill:-4" });
+		const result = await new ReadTool(session).execute("read-skill-tail", {
+			path: "skill://tail-skill:-4",
+		});
 		const text = result.content.flatMap(block => (block.type === "text" ? [block.text] : [])).join("\n");
 
 		// Last 4 body lines plus one leading context line; nothing earlier.
@@ -266,8 +269,6 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 
 		const { skills } = await loadSkills({
 			cwd,
-			enableCodexUser: false,
-			enableClaudeUser: false,
 			enableClaudeProject: true,
 			enablePiUser: false,
 			enablePiProject: false,
@@ -311,8 +312,6 @@ describe("skill:// resolution honors skills.customDirectories (#7190)", () => {
 
 		const { skills } = await loadSkills({
 			cwd,
-			enableCodexUser: false,
-			enableClaudeUser: false,
 			enableClaudeProject: true,
 			enablePiUser: false,
 			enablePiProject: false,

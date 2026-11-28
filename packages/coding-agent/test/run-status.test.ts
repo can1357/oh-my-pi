@@ -3,6 +3,7 @@ import {
 	disposeProgramStatus,
 	holdBlockedStatus,
 	initProgramStatus,
+	promptZonesEnabled,
 	resendProgramStatus,
 	setProgramStatusEnabled,
 	setProgramStatusSupported,
@@ -11,7 +12,6 @@ import {
 } from "@oh-my-pi/pi-coding-agent/utils/run-status";
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { setTerminalHeadless } from "@oh-my-pi/pi-utils";
-import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
 
 // OSC 7501 Program Status Protocol reports, as the terminal parses them:
 // https://mitchellh.com/writing/program-status-osc7501
@@ -35,7 +35,10 @@ describe("run status OSC 7501 reporting", () => {
 		vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
 		prevHeadless = setTerminalHeadless(false);
 		ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
-		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+		Object.defineProperty(process.stdout, "isTTY", {
+			value: true,
+			configurable: true,
+		});
 		writes = [];
 		spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
 			writes.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk as Uint8Array));
@@ -59,7 +62,11 @@ describe("run status OSC 7501 reporting", () => {
 	it("writes each transition as a whole root record, once, with kind only when blocked and msg as one clean line", () => {
 		setRunStatus({ state: "working" });
 		setRunStatus({ state: "working" });
-		holdBlockedStatus({ state: "blocked", kind: "question", msg: "\x1b[1mWhich branch?\x1b[0m\n\tmain or dev?" })();
+		holdBlockedStatus({
+			state: "blocked",
+			kind: "question",
+			msg: "\x1b[1mWhich branch?\x1b[0m\n\tmain or dev?",
+		})();
 		setRunStatus({ state: "done" });
 		setRunStatus({ state: "error", msg: "boom" });
 		setRunStatus({ state: "error", msg: " \n " });
@@ -115,7 +122,11 @@ describe("run status OSC 7501 reporting", () => {
 	it("re-sends prompt-invalidated working and blocked records but never repeats a done result", () => {
 		setRunStatus({ state: "working" });
 		resendProgramStatus();
-		const release = holdBlockedStatus({ state: "blocked", kind: "permission", msg: "Approve the command?" });
+		const release = holdBlockedStatus({
+			state: "blocked",
+			kind: "permission",
+			msg: "Approve the command?",
+		});
 		resendProgramStatus();
 		release();
 		setRunStatus({ state: "done" });
@@ -135,10 +146,18 @@ describe("run status OSC 7501 reporting", () => {
 		const blocked = (msg: string) =>
 			report(`state=blocked:kind=question:app=omp:msg=${Buffer.from(msg).toString("base64")}`);
 		setRunStatus({ state: "working" });
-		const first = holdBlockedStatus({ state: "blocked", kind: "question", msg: "Use Postgres?" });
+		const first = holdBlockedStatus({
+			state: "blocked",
+			kind: "question",
+			msg: "Use Postgres?",
+		});
 		// The run ends under the open wait: the user is still being asked.
 		setRunStatus({ state: "done" });
-		const second = holdBlockedStatus({ state: "blocked", kind: "question", msg: "Deploy now?" });
+		const second = holdBlockedStatus({
+			state: "blocked",
+			kind: "question",
+			msg: "Deploy now?",
+		});
 		second();
 		first();
 
@@ -175,12 +194,12 @@ describe("run status OSC 7501 reporting", () => {
 		expect(writes).toEqual([report("state=working:app=omp"), report("state=idle:app=omp")]);
 	});
 
-	it("keeps prompt navigation before negotiation and suppresses redraws only after confirmation", () => {
-		const bubble = new UserMessageComponent("Run sleep 15");
-		const marked = () => bubble.render(40).join("").includes("\x1b]133;A\x07");
+	it("keeps prompt navigation before negotiation and suppresses prompt marks only after confirmation", () => {
+		// User messages can mark their scrollback rows while this reads true.
+		const marked = () => promptZonesEnabled();
 
 		// An unknown terminal may ignore OSC 7501; `agent_start` reports
-		// working before this bubble's first paint.
+		// working before the bubble reaches scrollback.
 		setRunStatus({ state: "working" });
 		expect(marked()).toBe(true);
 		setProgramStatusSupported(true);
@@ -199,7 +218,10 @@ describe("run status OSC 7501 reporting", () => {
 		setRunStatus({ state: "done" });
 		expect(marked()).toBe(true);
 		// A dialog opened after the run settled holds a droppable `blocked` record too.
-		const releaseIdle = holdBlockedStatus({ state: "blocked", kind: "permission" });
+		const releaseIdle = holdBlockedStatus({
+			state: "blocked",
+			kind: "permission",
+		});
 		expect(marked()).toBe(false);
 		releaseIdle();
 		expect(marked()).toBe(true);

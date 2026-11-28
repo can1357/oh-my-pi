@@ -143,6 +143,8 @@ function spawnPrintCli(home: string, args: string[], env: Record<string, string>
 				NO_COLOR: "1",
 				HTTP_PROXY: DEAD_PROXY,
 				HTTPS_PROXY: DEAD_PROXY,
+				// Test runtime: keeps the child off the OS keychain.
+				PI_TEST_RUNTIME: "1",
 				...env,
 			},
 			stdin: "ignore",

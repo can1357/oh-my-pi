@@ -1,39 +1,37 @@
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
 /**
- * Large-paste menu: when a paste reaches the configured `paste.largeMenuThreshold` line count,
- * the editor's `onLargePaste` hook routes through `InputController.handleLargePaste`, which offers
- * to attach the text as an `<attachment>` block, save it to a `local://` file, or paste it inline.
- * Below the threshold (or when disabled) the editor keeps its default collapse-to-`[Paste]`-marker behavior.
+ * Large-paste menu: once a paste big enough to collapse reaches the configured
+ * `paste.largeMenuThreshold` line count, the menu offers to attach the text as an `<attachment>`
+ * block, save it to a `local://` file, or paste it inline. Below the threshold (or when disabled)
+ * the paste is staged as a text-attachment chip.
  */
 
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
+import {
+	getKeybindings,
+	KeybindingsManager,
+	setKeybindings,
+} from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
-import { getEditorTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { Composer } from "../src/ui/composer/composer";
+import { createInputHarness } from "./helpers/input-harness";
 
-function createContext(options?: {
-	threshold?: number;
-	choice?: string;
-	artifactsDir?: string;
-	editor?: InteractiveModeContext["editor"];
-}) {
-	const insertTextAttachment = vi.fn();
-	const insertText = vi.fn();
-	const pasteText = vi.fn();
-	const requestRender = vi.fn();
+function createContext(options?: { threshold?: number; choice?: string; artifactsDir?: string }) {
+	const composer = new Composer();
+	const insertTextAttachment = vi.spyOn(composer, "insertTextAttachment");
+	const insertText = vi.spyOn(composer, "insertText");
 	const showStatus = vi.fn();
 	const showError = vi.fn();
 	const showHookSelector = vi.fn(async (_title: string, _options: unknown, _dialog?: unknown) => options?.choice);
+	const input = createInputHarness();
 	const ctx = {
-		editor:
-			options?.editor ??
-			({ insertTextAttachment, insertText, pasteText } as unknown as InteractiveModeContext["editor"]),
-		ui: { requestRender } as unknown as InteractiveModeContext["ui"],
+		composer,
+		...input.context,
 		settings: Settings.isolated({ "paste.largeMenuThreshold": options?.threshold ?? 100 }),
 		sessionManager: {
 			getCwd: () => process.cwd(),
@@ -46,9 +44,25 @@ function createContext(options?: {
 	} as unknown as InteractiveModeContext;
 	const controller = new InputController(ctx);
 	return {
+		ctx,
+		input,
+		composer,
 		controller,
-		spies: { insertTextAttachment, insertText, pasteText, requestRender, showStatus, showError, showHookSelector },
+		spies: { insertTextAttachment, insertText, showStatus, showError, showHookSelector },
 	};
+}
+
+/** Install the controller's input hooks with the composer focused. */
+function wireInput(ctx: InteractiveModeContext, controller: InputController, composer: Composer): void {
+	Object.assign(ctx, {
+		shell: { focused: () => composer.field, host: undefined },
+		keybindings: KeybindingsManager.inMemory(),
+		session: { extensionRunner: undefined, prewarmModelConnection: () => {} },
+		dictationSpaceHold: () => undefined,
+		syncIdleMaintenanceView: () => {},
+		updateEditorBorderColor: () => {},
+	});
+	controller.setupKeyHandlers();
 }
 
 afterEach(() => {
@@ -56,74 +70,83 @@ afterEach(() => {
 });
 
 describe("InputController.handleLargePaste gate", () => {
-	it("declines and skips the menu below the threshold", () => {
+	it("stages a chip and skips the menu below the threshold", () => {
 		const { controller, spies } = createContext({ threshold: 100 });
 		const menu = vi.spyOn(controller, "presentLargePasteMenu").mockResolvedValue();
 
-		expect(controller.handleLargePaste("x", 50)).toBe(true);
+		controller.handleLargePaste("x", 50);
 		expect(menu).not.toHaveBeenCalled();
 		expect(spies.insertTextAttachment).toHaveBeenCalledWith("x");
 	});
 
-	it("declines when disabled (threshold 0), even for a huge paste", () => {
+	it("stages a chip when disabled (threshold 0), even for a huge paste", () => {
 		const { controller, spies } = createContext({ threshold: 0 });
 		const menu = vi.spyOn(controller, "presentLargePasteMenu").mockResolvedValue();
 
-		expect(controller.handleLargePaste("x", 5000)).toBe(true);
+		controller.handleLargePaste("x", 5000);
 		expect(menu).not.toHaveBeenCalled();
 		expect(spies.insertTextAttachment).toHaveBeenCalledWith("x");
 	});
 
-	it("intercepts and presents the menu at the threshold", () => {
+	it("presents the menu at the threshold", () => {
 		const { controller, spies } = createContext({ threshold: 100 });
 		const menu = vi.spyOn(controller, "presentLargePasteMenu").mockResolvedValue();
 
-		expect(controller.handleLargePaste("payload", 100)).toBe(true);
+		controller.handleLargePaste("payload", 100);
 		expect(menu).toHaveBeenCalledWith("payload", 100);
 		expect(spies.insertTextAttachment).not.toHaveBeenCalled();
 	});
 
-	// The submit key shares the paste's terminal read (automation, batched
-	// reads). Opening the menu would leave the composer idle with the Enter
-	// consumed by the menu, so the paste is staged synchronously and the queued
-	// Enter submits it — under both keyboard encodings of Enter.
-	for (const [label, enter] of [
-		["legacy \\r", "\r"],
-		["kitty CSI-u", "\x1b[13u"],
-	] as const) {
-		it(`stages and submits a threshold-sized paste when Enter (${label}) shares the burst`, () => {
-			const editor = new CustomEditor(getEditorTheme());
-			const { controller, spies } = createContext({ threshold: 100, editor });
-			editor.onLargePaste = (text, lineCount, options) => controller.handleLargePaste(text, lineCount, options);
-			const submitted = vi.fn();
-			editor.onSubmit = submitted;
-			const payload = Array.from({ length: 100 }, (_, index) => `line ${index + 1}`).join("\n");
-
-			editor.handleInput(`\x1b[200~${payload}\x1b[201~${enter}`);
-
-			expect(spies.showHookSelector).not.toHaveBeenCalled();
-			expect(submitted).toHaveBeenCalledWith(payload);
-		});
-	}
-
-	it("still presents the menu when a non-submit key shares the burst", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		const { controller, spies } = createContext({ threshold: 100, editor });
-		editor.onLargePaste = (text, lineCount, options) => controller.handleLargePaste(text, lineCount, options);
-		const submitted = vi.fn();
-		editor.onSubmit = submitted;
+	it("routes a threshold-sized paste into the composer through the menu once its read is in", async () => {
+		const { ctx, input, controller, composer, spies } = createContext({ threshold: 100 });
+		const menu = vi.spyOn(controller, "presentLargePasteMenu").mockResolvedValue();
+		wireInput(ctx, controller, composer);
 		const payload = Array.from({ length: 100 }, (_, index) => `line ${index + 1}`).join("\n");
 
-		editor.handleInput(`\x1b[200~${payload}\x1b[201~x`);
+		input.paste(ctx, payload);
+		expect(menu).not.toHaveBeenCalled();
+		await Promise.resolve();
 
-		expect(spies.showHookSelector).toHaveBeenCalledTimes(1);
-		expect(submitted).not.toHaveBeenCalled();
-		expect(editor.getText()).toBe("x");
+		expect(menu).toHaveBeenCalledWith(payload, 100);
+		expect(spies.insertTextAttachment).not.toHaveBeenCalled();
+		expect(composer.text()).toBe("");
+	});
+
+	it("a remapped submit delivered with a large paste sends the pasted text instead of opening its menu", async () => {
+		const previous = getKeybindings();
+		const { ctx, input, controller, composer, spies } = createContext({ threshold: 12 });
+		wireInput(ctx, controller, composer);
+		ctx.keybindings.setUserBindings({ "tui.input.submit": "f4" });
+		setKeybindings(ctx.keybindings);
+		try {
+			const sent: string[] = [];
+			composer.onSubmit = text => sent.push(text);
+			const text = Array.from({ length: 15 }, (_, i) => `line ${i}`).join("\n");
+			input.paste(ctx, text);
+			input.press(ctx, "f4", { afterPaste: true });
+			await Promise.resolve();
+			expect(sent.map(draft => draft.trimEnd())).toEqual([text]);
+			expect(spies.showHookSelector).not.toHaveBeenCalled();
+		} finally {
+			setKeybindings(previous);
+		}
+	});
+
+	it("leaves a short paste to the composer", () => {
+		const { ctx, input, controller, composer, spies } = createContext({ threshold: 100 });
+		const menu = vi.spyOn(controller, "presentLargePasteMenu").mockResolvedValue();
+		wireInput(ctx, controller, composer);
+
+		expect(input.paste(ctx, "short")).toBe("composer");
+
+		expect(menu).not.toHaveBeenCalled();
+		expect(spies.showHookSelector).not.toHaveBeenCalled();
+		expect(composer.text()).toBe("short");
 	});
 });
 
 describe("InputController.presentLargePasteMenu actions", () => {
-	it("wraps the paste in attachment XML collapsed to a marker", async () => {
+	it("wraps the paste in attachment XML collapsed to a chip", async () => {
 		const { controller, spies } = createContext({ choice: "Attach as a wrapped block" });
 
 		await controller.presentLargePasteMenu("payload", 1);
@@ -131,18 +154,13 @@ describe("InputController.presentLargePasteMenu actions", () => {
 		expect(spies.insertTextAttachment).toHaveBeenCalledWith("payload", "<attachment>\npayload\n</attachment>");
 	});
 
-	it("recalls and submits the wrapped expansion rather than only the chip preview", async () => {
-		const editor = new CustomEditor(getEditorTheme());
-		const { controller } = createContext({ choice: "Attach as a wrapped block", editor });
+	it("submits the wrapped expansion rather than only the chip preview", async () => {
+		const { controller, composer } = createContext({ choice: "Attach as a wrapped block" });
 		await controller.presentLargePasteMenu("line one\nline two", 2);
-		editor.clearDraftForRecall();
-		editor.addToHistory("intervening prompt");
-		editor.handleInput("\x1b[A");
-		editor.handleInput("\x1b[A");
 		const submitted = vi.fn();
-		editor.onSubmit = submitted;
-		editor.handleInput("\r");
-		expect(submitted).toHaveBeenCalledWith("<attachment>\nline one\nline two\n</attachment>");
+		composer.onSubmit = submitted;
+		composer.submit();
+		expect(submitted.mock.calls[0]?.[0].trim()).toBe("<attachment>\nline one\nline two\n</attachment>");
 	});
 
 	it("pastes inline when explicitly selected", async () => {
@@ -151,6 +169,15 @@ describe("InputController.presentLargePasteMenu actions", () => {
 		await controller.presentLargePasteMenu("payload", 1);
 
 		expect(spies.insertTextAttachment).toHaveBeenCalledWith("payload");
+	});
+
+	it("inserts the raw text as editable text when selected", async () => {
+		const { controller, spies } = createContext({ choice: "Insert as editable text" });
+
+		await controller.presentLargePasteMenu("line one\nline two", 2);
+
+		expect(spies.insertText).toHaveBeenCalledWith("line one\nline two");
+		expect(spies.insertTextAttachment).not.toHaveBeenCalled();
 	});
 
 	it("pastes inline when the menu is cancelled, so the content is not lost", async () => {
@@ -193,23 +220,5 @@ describe("InputController.presentLargePasteMenu file attachment", () => {
 		expect(spies.insertText).toHaveBeenCalledWith("local://paste-2.md ");
 		expect(await Bun.file(path.join(dir, "local", "paste-1.md")).text()).toBe("previous");
 		expect(await Bun.file(path.join(dir, "local", "paste-2.md")).text()).toBe("fresh");
-	});
-
-	it("recalls a paste-file reference without deleting or overwriting its content", async () => {
-		dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-paste-recall-"));
-		const editor = new CustomEditor(getEditorTheme());
-		const { controller } = createContext({ choice: "Attach as local file", artifactsDir: dir, editor });
-		await controller.presentLargePasteMenu("first file\nsecond line", 2);
-		editor.clearDraftForRecall();
-		await controller.presentLargePasteMenu("another paste", 1);
-		editor.clearDraftForRecall();
-		editor.handleInput("\x1b[A");
-		editor.handleInput("\x1b[A");
-		const submitted = vi.fn();
-		editor.onSubmit = submitted;
-		editor.handleInput("\r");
-		expect(submitted).toHaveBeenCalledWith("local://paste-1.md");
-		expect(await Bun.file(path.join(dir, "local", "paste-1.md")).text()).toBe("first file\nsecond line");
-		expect(await Bun.file(path.join(dir, "local", "paste-2.md")).text()).toBe("another paste");
 	});
 });

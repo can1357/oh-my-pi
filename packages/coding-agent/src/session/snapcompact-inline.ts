@@ -23,8 +23,8 @@ import {
 	HL_FILE_PREFIX,
 	HL_FILE_SUFFIX,
 	HL_LINE_BODY_SEP,
-} from "@oh-my-pi/pi-tui/tools/hashline-format";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+} from "../tools/hashline-format";
+import type { ReadToolDetails } from "../tools/details/read";
 import { prompt } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { SnapcompactFrameSink } from "../blob-broker/service";
@@ -804,6 +804,7 @@ export class SnapcompactInlineTransformer {
 			const message = messages[target.index];
 			if (message.role !== "toolResult") continue;
 			const frames = await this.#framesFor(this.#toolCache, swap.id, target.frameText, shape, shapeKey);
+			if (frames.length === 0) continue;
 			const note = target.read?.note ?? toolResultNote;
 			const content: (TextContent | ImageContent)[] = [{ type: "text", text: note }, ...frames];
 			let sourceImageIndex = 0;
@@ -852,15 +853,17 @@ export class SnapcompactInlineTransformer {
 				this.#systemCache = cached;
 			}
 			const frames = cached.frames;
-			const original = messages[userIndex] as UserMessage;
-			const originalContent: (TextContent | ImageContent)[] =
-				typeof original.content === "string" ? [{ type: "text", text: original.content }] : original.content;
-			messages[userIndex] = {
-				...original,
-				content: [{ type: "text", text: systemPromptTarget.userNote }, ...frames, ...originalContent],
-			};
-			systemPrompt = systemPromptTarget.replacement;
-			changed = true;
+			if (frames.length > 0) {
+				const original = messages[userIndex] as UserMessage;
+				const originalContent: (TextContent | ImageContent)[] =
+					typeof original.content === "string" ? [{ type: "text", text: original.content }] : original.content;
+				messages[userIndex] = {
+					...original,
+					content: [{ type: "text", text: systemPromptTarget.userNote }, ...frames, ...originalContent],
+				};
+				systemPrompt = systemPromptTarget.replacement;
+				changed = true;
+			}
 		}
 
 		if (stampCapRetractions(messages, { original: context.messages, plan, scan, imageLimit })) changed = true;

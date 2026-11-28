@@ -14,12 +14,16 @@ import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import * as modelHubModule from "@oh-my-pi/pi-tui/overlays/model-hub";
-import * as modelPickerModule from "@oh-my-pi/pi-tui/overlays/model-picker";
-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { signal, type UiNode } from "@oh-my-pi/pi-tui";
+import { jsx } from "@oh-my-pi/pi-tui/jsx-runtime";
+import * as modelHubModule from "../../../src/ui/overlays/pickers/model-hub";
+import type { ModelHubState } from "../../../src/ui/overlays/pickers/model-hub-state";
+import * as modelPickerModule from "../../../src/ui/overlays/pickers/model-picker";
+import { Overlays } from "../../../src/ui/shell/overlays";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "../../helpers/settings-test-state";
 
 const model = (id: string) => getBundledModel("anthropic", id) as Model;
@@ -66,43 +70,51 @@ describe("SelectorController model selector writes", () => {
 		});
 		session = live;
 		const showError = vi.fn();
-		const controller = new SelectorController(
-			createInteractiveModeContext({
-				session: live,
-				settings,
-				ui: { showOverlay: () => ({ hide: () => {}, setHidden: () => {}, isHidden: () => false }) },
-				keybindings: { getKeys: () => [], getDisplayString: () => "" },
-				showError,
-			}),
-		);
+		const focused = signal<UiNode | null>(null);
+		const ctx = {
+			session: live,
+			viewSession: live,
+			focusedAgentId: undefined,
+			settings,
+			shell: {
+				native: () => false,
+				focus: (node: UiNode | null) => focused.set(node),
+				size: () => ({ columns: 120, rows: 40 }),
+				overlays: new Overlays({ focused, focus: node => focused.set(node), fallback: () => null }),
+			},
+			keybindings: { keysFor: () => [] },
+			statusLine: { refresh: () => {} },
+			updateEditorBorderColor: () => {},
+			showModelCycleTrack: () => {},
+			showStatus: () => {},
+			showWarning: () => {},
+			showError,
+		} as unknown as InteractiveModeContext;
+		const controller = new SelectorController(ctx);
 		return { controller, showError };
 	}
 
-	function openModelHub(controller: SelectorController): modelHubModule.ModelHubCallbacks {
-		let callbacks: modelHubModule.ModelHubCallbacks | undefined;
-		vi.spyOn(modelHubModule, "ModelHubComponent").mockImplementation(function (...args: unknown[]) {
-			callbacks = args[4] as modelHubModule.ModelHubCallbacks;
-			return { refreshAfterExternalMutation: () => {}, dispose: () => {} };
-		} as never);
+	function openModelHub(controller: SelectorController): modelHubModule.ModelHubProps["callbacks"] {
+		let callbacks: modelHubModule.ModelHubProps["callbacks"] | undefined;
+		vi.spyOn(modelHubModule, "ModelHub").mockImplementation(props => {
+			callbacks = props.callbacks;
+			return jsx("picker", {});
+		});
 		controller.showModelSelector();
 		if (!callbacks) throw new Error("model hub was not opened");
 		return callbacks;
 	}
 
+	type PickerProps = modelPickerModule.ModelPickerProps;
 	function openModelPicker(controller: SelectorController): {
-		callbacks: modelPickerModule.ModelPickerCallbacks;
-		options: modelPickerModule.ModelPickerOptions;
+		callbacks: PickerProps["callbacks"];
+		options: NonNullable<PickerProps["options"]>;
 	} {
-		let opened:
-			| { callbacks: modelPickerModule.ModelPickerCallbacks; options: modelPickerModule.ModelPickerOptions }
-			| undefined;
-		vi.spyOn(modelPickerModule, "ModelPickerComponent").mockImplementation(function (...args: unknown[]) {
-			opened = {
-				callbacks: args[4] as modelPickerModule.ModelPickerCallbacks,
-				options: args[5] as modelPickerModule.ModelPickerOptions,
-			};
-			return {};
-		} as never);
+		let opened: { callbacks: PickerProps["callbacks"]; options: NonNullable<PickerProps["options"]> } | undefined;
+		vi.spyOn(modelPickerModule, "ModelPicker").mockImplementation(props => {
+			opened = { callbacks: props.callbacks, options: props.options ?? {} };
+			return jsx("picker", {});
+		});
 		controller.showModelSelector({ temporaryOnly: true });
 		if (!opened) throw new Error("model picker was not opened");
 		return opened;
@@ -327,18 +339,17 @@ describe("SelectorController model selector writes", () => {
 		const terra = registry.find("openai", "gpt-5.6-terra");
 		if (!terra) throw new Error("Expected bundled gpt-5.6-terra");
 		const refreshed = Promise.withResolvers<number | null | undefined>();
-		vi.spyOn(modelHubModule, "ModelHubComponent").mockImplementation(function (...args: unknown[]) {
-			const callbacks = args[4] as modelHubModule.ModelHubCallbacks;
-			queueMicrotask(() => {
-				expect(callbacks.onCompactionPointChange?.(terra, "400k", true)).toBeUndefined();
-			});
-			return {
+		vi.spyOn(modelHubModule, "ModelHub").mockImplementation(props => {
+			props.onState?.({
 				// The window the hub would re-read when it refreshes.
 				refreshAfterExternalMutation: () =>
 					refreshed.resolve(registry.find("openai", "gpt-5.6-terra")?.contextWindow),
-				dispose: () => {},
-			};
-		} as never);
+			} as unknown as ModelHubState);
+			queueMicrotask(() => {
+				expect(props.callbacks.onCompactionPointChange?.(terra, "400k", true)).toBeUndefined();
+			});
+			return jsx("picker", {});
+		});
 		controller.showModelSelector();
 
 		expect(await refreshed.promise).toBe(1_050_000);

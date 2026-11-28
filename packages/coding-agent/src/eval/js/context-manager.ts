@@ -1,7 +1,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { MessageChannel, type MessagePort, receiveMessageOnPort } from "node:worker_threads";
+import type * as WorkerThreads from "node:worker_threads";
+import type { MessagePort } from "node:worker_threads";
+
+// Lazy loader: keeps node:worker_threads off CLI startup until the Bun Worker fallback spawns.
+let workerThreadsCache: typeof WorkerThreads | undefined;
+function workerThreads(): typeof WorkerThreads {
+	if (!workerThreadsCache) workerThreadsCache = require("node:worker_threads") as typeof WorkerThreads;
+	return workerThreadsCache;
+}
 import { isRecord, logger, Snowflake, workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	createWorkerHandle,
@@ -12,7 +20,7 @@ import {
 import { registerOnBoard } from "../../daemon/client";
 import type { ToolSession } from "../../tools";
 import { ToolAbortError } from "../../tools/tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tools/tool-errors";
 import { safeSend as safeSendIpc } from "../../utils/ipc";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../bridge-timeout";
 import { getEnabledEvalPreludes } from "../preludes";
@@ -26,12 +34,8 @@ import {
 } from "../executor-base";
 import { shouldDetachKernel } from "../py/spawn-options";
 import { updateEvalState } from "../state";
-import type { EvalShadowCellSession } from "../speculation/cell-session";
-import { getActiveEvalShadowCell } from "../speculation/runtime-context";
-import type { ShadowPlan } from "../speculation/types";
 import type { EvalDisplayOutput, EvalToolDescriptor, EvalToolInvokeResult } from "../types";
-import { type ShadowSnapshot, shadowSnapshotDigest } from "./shared/runtime";
-import { projectJavaScriptShadowPlan } from "./speculation";
+import { BUN_STUB_MESSAGE, jsKernelEnv } from "./kernel-env";
 import { callSessionTool, type JsStatusEvent } from "./tool-bridge";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so compiled/npm builds only need one JavaScript entry.
@@ -81,7 +85,6 @@ interface PendingRun {
 	runId: string;
 	runState: VmRunState;
 	toolSession: ToolSession;
-	shadowCell?: EvalShadowCellSession;
 	/** The cell's `timeout` in ms, handed to prelude calls as their default budget. */
 	cellTimeoutMs?: number;
 	resolve(value: { value: unknown }): void;
@@ -121,8 +124,6 @@ interface JsSession {
 	state: "alive" | "dead";
 	stateSessions: Set<ToolSession>;
 	pending: Map<string, PendingRun>;
-	pendingSnapshots: Map<string, PromiseWithResolvers<Extract<WorkerOutbound, { type: "shadow-snapshot" }>>>;
-	pendingShadowRuns: Map<string, PromiseWithResolvers<Extract<WorkerOutbound, { type: "shadow-run" }>>>;
 	ownerIds: Set<string>;
 	hasFallbackOwner: boolean;
 }
@@ -312,102 +313,6 @@ export async function invokeJsTool(
 	return { ok: true, tools, missing };
 }
 
-/**
- * Captures a retained runtime's safe user-global snapshot without executing user
- * code. A busy runtime returns `null`; callers must execute normally.
- */
-export async function snapshotVmContext(options: {
-	sessionKey: string;
-	cwd: string;
-	sessionId: string;
-	localRoots?: Record<string, string>;
-	timeoutMs?: number;
-}): Promise<ShadowSnapshot | null> {
-	const session = sessions.get(options.sessionKey);
-	if (session?.state !== "alive") return null;
-	const id = `snapshot-${Snowflake.next()}`;
-	const deferred = Promise.withResolvers<Extract<WorkerOutbound, { type: "shadow-snapshot" }>>();
-	session.pendingSnapshots.set(id, deferred);
-	try {
-		session.worker.send({
-			type: "shadow-snapshot",
-			id,
-			snapshot: {
-				cwd: options.cwd,
-				sessionId: options.sessionId,
-				localRoots: options.localRoots,
-				packageRoot: session.packageRoot,
-				packageEnvironment: session.packageEnvironment,
-			},
-		});
-		const reply = await raceWithTimeout(
-			deferred.promise,
-			options.timeoutMs ?? WORKER_INIT_TIMEOUT_MS,
-			"JS shadow snapshot timed out",
-		);
-		return reply.eligible ? (reply.snapshot ?? null) : null;
-	} finally {
-		session.pendingSnapshots.delete(id);
-	}
-}
-
-export interface JavaScriptShadowPlanningResult {
-	snapshot: ShadowSnapshot;
-	digest: string;
-	plan: ShadowPlan;
-}
-
-/**
- * Retained-only planning seam. It never starts a worker and never executes the
- * candidate source; unavailable or busy runtimes fall back to normal eval.
- */
-export async function shadowPlanIfPresent(options: {
-	sessionKey: string;
-	cwd: string;
-	sessionId: string;
-	code: string;
-	localRoots?: Record<string, string>;
-	timeoutMs?: number;
-}): Promise<JavaScriptShadowPlanningResult | null> {
-	const snapshot = await snapshotVmContext(options);
-	if (!snapshot) return null;
-	return {
-		snapshot,
-		digest: shadowSnapshotDigest(snapshot),
-		plan: await projectJavaScriptShadowPlan(options.code, {
-			snapshot: snapshot.values,
-			initialGlobals: snapshot.initialGlobals,
-		}),
-	};
-}
-
-/**
- * Atomically rechecks a retained runtime's snapshot before starting a real
- * cell. `null` means the caller must discard speculative outcomes and use the
- * normal execution path.
- */
-export async function runIfSnapshotMatches(options: {
-	sessionKey: string;
-	sessionId: string;
-	cwd: string;
-	session: ToolSession;
-	localRoots?: Record<string, string>;
-	code: string;
-	filename: string;
-	runState: VmRunState;
-	expectedRevision: number;
-	expectedDigest: string;
-}): Promise<{ value: unknown } | null> {
-	const session = sessions.get(options.sessionKey);
-	if (session?.state !== "alive") return null;
-	try {
-		return await runOnce(session, options);
-	} catch (error) {
-		if (error instanceof ToolError && error.message === "JS shadow snapshot changed") return null;
-		throw error;
-	}
-}
-
 /** Whether `sessionKey` has a retained, live JS worker. */
 export function hasLiveVmContext(sessionKey: string): boolean {
 	return sessions.get(sessionKey)?.state === "alive";
@@ -502,8 +407,6 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 		state: "alive",
 		stateSessions: new Set(),
 		pending: new Map(),
-		pendingSnapshots: new Map(),
-		pendingShadowRuns: new Map(),
 		ownerIds: new Set(),
 		hasFallbackOwner: false,
 	};
@@ -512,9 +415,57 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 		if (worker.mode !== "process") {
 			throw new Error("JS eval worker smoke fell back from the isolated subprocess");
 		}
+		// `bun` in the kernel must be a real bun or the stub that says bun is missing, never
+		// this executable: in a compiled omp with no bun on PATH, Bun's shell would otherwise
+		// resolve `bun` to omp (kernel-env.ts). `--version` is the only word that ever follows
+		// `bun` here, so a regression prints omp's version, never starts an agent.
+		const output = await smokeRun(session, {
+			runId: "smoke-bun",
+			code: "const r = await Bun.$`bun --version`.nothrow().quiet(); console.log(JSON.stringify({ exitCode: r.exitCode, stdout: r.stdout.toString().trim(), stderr: r.stderr.toString().trim() }));",
+		});
+		const probe: unknown = JSON.parse(output.trim().split("\n").at(-1) ?? "null");
+		const realBun =
+			isRecord(probe) &&
+			probe.exitCode === 0 &&
+			typeof probe.stdout === "string" &&
+			/^\d+\.\d+\.\d+/.test(probe.stdout);
+		const stub =
+			isRecord(probe) &&
+			probe.exitCode === 127 &&
+			typeof probe.stderr === "string" &&
+			probe.stderr.includes(BUN_STUB_MESSAGE);
+		if (!realBun && !stub) {
+			throw new Error(
+				`JS eval worker smoke: \`bun --version\` in the kernel reached neither bun nor the bun stub: ${JSON.stringify(probe)}`,
+			);
+		}
 	} finally {
 		await worker.terminate().catch(() => undefined);
 	}
+}
+
+/** Run one cell in a smoke session and return what it printed; the worker speaks the run protocol directly. */
+function smokeRun(session: JsSession, run: { runId: string; code: string }): Promise<string> {
+	const { promise, resolve, reject } = Promise.withResolvers<string>();
+	let text = "";
+	const unsubscribe = session.worker.onMessage(msg => {
+		if (msg.type === "text" && msg.runId === run.runId) {
+			text += msg.chunk;
+			return;
+		}
+		if (msg.type !== "result" || msg.runId !== run.runId) return;
+		unsubscribe();
+		if (msg.ok) resolve(text);
+		else reject(errorFromPayload(msg.error));
+	});
+	session.worker.send({
+		type: "run",
+		runId: run.runId,
+		code: run.code,
+		filename: `${run.runId}.ts`,
+		snapshot: { cwd: session.cwd, sessionId: session.sessionId },
+	});
+	return raceWithTimeout(promise, WORKER_INIT_TIMEOUT_MS, "JS eval worker smoke cell timed out");
 }
 
 function javascriptPreludeSources(session: ToolSession): EvalPreludeSource[] {
@@ -539,8 +490,6 @@ async function runOnce(
 		filename: string;
 		timeoutMs?: number;
 		runState: VmRunState;
-		expectedRevision?: number;
-		expectedDigest?: string;
 	},
 ): Promise<{ value: unknown }> {
 	const runId = `r-${Snowflake.next()}`;
@@ -549,7 +498,6 @@ async function runOnce(
 		runId,
 		runState: options.runState,
 		toolSession: options.session,
-		shadowCell: getActiveEvalShadowCell(),
 		cellTimeoutMs: options.timeoutMs ?? 0,
 		resolve,
 		reject,
@@ -598,33 +546,7 @@ async function runOnce(
 			packageRoot: session.packageRoot,
 			packageEnvironment: session.packageEnvironment,
 		};
-		if (options.expectedRevision !== undefined && options.expectedDigest !== undefined) {
-			const id = `shadow-run-${Snowflake.next()}`;
-			const admission = Promise.withResolvers<Extract<WorkerOutbound, { type: "shadow-run" }>>();
-			session.pendingShadowRuns.set(id, admission);
-			try {
-				session.worker.send({
-					type: "run-if-snapshot-matches",
-					id,
-					runId,
-					code: options.code,
-					filename: options.filename,
-					snapshot,
-					expectedRevision: options.expectedRevision,
-					expectedDigest: options.expectedDigest,
-				});
-				const reply = await raceWithTimeout(
-					admission.promise,
-					WORKER_INIT_TIMEOUT_MS,
-					"JS shadow admission timed out",
-				);
-				if (!reply.eligible) throw new ToolError("JS shadow snapshot changed");
-			} finally {
-				session.pendingShadowRuns.delete(id);
-			}
-		} else {
-			session.worker.send({ type: "run", runId, code: options.code, filename: options.filename, snapshot });
-		}
+		session.worker.send({ type: "run", runId, code: options.code, filename: options.filename, snapshot });
 		return await promise;
 	} finally {
 		options.runState.signal?.removeEventListener("abort", onAbort);
@@ -674,8 +596,6 @@ async function acquireSession(
 			state: "alive",
 			stateSessions: new Set(),
 			pending: new Map(),
-			pendingSnapshots: new Map(),
-			pendingShadowRuns: new Map(),
 			ownerIds: new Set(),
 			hasFallbackOwner: false,
 		};
@@ -795,16 +715,6 @@ function handleSessionMessage(session: JsSession, msg: WorkerOutbound): void {
 		case "result":
 			settlePending(session, msg);
 			return;
-		case "shadow-snapshot": {
-			const pending = session.pendingSnapshots.get(msg.id);
-			if (pending) pending.resolve(msg);
-			return;
-		}
-		case "shadow-run": {
-			const pending = session.pendingShadowRuns.get(msg.id);
-			if (pending) pending.resolve(msg);
-			return;
-		}
 		case "log":
 			logWorkerMessage(msg);
 			return;
@@ -862,8 +772,6 @@ async function handleToolCall(session: JsSession, msg: Extract<WorkerOutbound, {
 			parentToolCallId: pending.runState.parentToolCallId,
 			signal: ctrl.signal,
 			cellTimeoutMs: pending.cellTimeoutMs,
-			identity: msg.identity,
-			shadowCell: pending.shadowCell,
 			onReply: pending.runState.onReply,
 			emitStatus: (event: JsStatusEvent) => {
 				trackDeferPhase(pending, event);
@@ -949,10 +857,6 @@ async function killSession(session: JsSession, error: Error, options: { force: b
 		pending.reject(error);
 	}
 	session.pending.clear();
-	for (const pending of session.pendingSnapshots.values()) pending.reject(error);
-	session.pendingSnapshots.clear();
-	for (const pending of session.pendingShadowRuns.values()) pending.reject(error);
-	session.pendingShadowRuns.clear();
 }
 
 function markJsSessionAlive(session: JsSession, toolSession: ToolSession, environment: string | undefined): void {
@@ -1047,9 +951,12 @@ function bundledHostEntry(): string | null {
 function spawnBunWorker(): JsEvalWorkerHandle {
 	try {
 		const hostEntry = workerHostEntry() ?? bundledHostEntry();
+		// Both variants run model code under `jsKernelEnv`: the compiled binary's `bun` stub (kernel-env.ts).
+		const env = jsKernelEnv(workerEnvFromParent());
 		const worker = hostEntry
-			? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_js_eval"] })
-			: new Worker(SOURCE_WORKER_ENTRY.href, { type: "module" });
+			? new Worker(hostEntry, { type: "module", argv: ["__omp_worker_js_eval"], env })
+			: new Worker(SOURCE_WORKER_ENTRY.href, { type: "module", env });
+		const { MessageChannel } = workerThreads();
 		const channel = new MessageChannel();
 		const outbox: WorkerOutboxMessage = { type: "outbox", port: channel.port2 };
 		worker.postMessage(outbox, [channel.port2]);
@@ -1065,7 +972,7 @@ function spawnBunWorker(): JsEvalWorkerHandle {
 function spawnJsProcess(sessionId?: string): JsEvalWorkerHandle {
 	const spawned = createWorkerSubprocess<WorkerOutbound>({
 		spawnCommand: resolveWorkerSpawnCmd(JS_EVAL_PROCESS_ARG, { sameBuild: true }),
-		env: workerEnvFromParent(),
+		env: jsKernelEnv(workerEnvFromParent()),
 		exitLabel: "JS eval worker",
 		detached: shouldDetachKernel(process.platform),
 		reportCleanExit: true,
@@ -1196,6 +1103,7 @@ function wrapBunWorker(worker: Worker, outbox: MessagePort): JsEvalWorkerHandle 
 			worker.terminate();
 			if (!outboxOpen) return;
 			outboxOpen = false;
+			const { receiveMessageOnPort } = workerThreads();
 			for (let received = receiveMessageOnPort(outbox); received; received = receiveMessageOnPort(outbox)) {
 				deliver(received.message);
 			}

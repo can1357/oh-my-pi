@@ -7,7 +7,9 @@ import {
 	resolveActiveRepoContext,
 	resolveActiveRepoContextSync,
 } from "@oh-my-pi/pi-coding-agent/utils/active-repo-context";
-import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
+import type { ActiveRepoContext } from "@oh-my-pi/pi-coding-agent/modes/view-model/status-line/host";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
 
 const itWithSymlinkPrivilege = process.platform === "win32" ? it.skip : it;
 
@@ -174,5 +176,30 @@ describe("resolveActiveRepoContext", () => {
 			source: "single-direct-child-repo",
 		} satisfies ActiveRepoContext;
 		await expectResolvers(cwd, expected);
+	});
+});
+
+describe("statusLineHost.resolveActiveRepo", () => {
+	let tempRoot: string;
+
+	beforeEach(() => {
+		tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-active-repo-host-"));
+	});
+
+	afterEach(() => {
+		resetSettingsForTest();
+		fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	});
+
+	it("does not adopt a direct child repository when git.childRepoDiscovery is off", async () => {
+		const cwd = path.join(tempRoot, "workspace");
+		createGitDirectory(path.join(cwd, "repo"));
+
+		await Settings.init({ inMemory: true, cwd, overrides: { "git.childRepoDiscovery": false } });
+		expect(statusLineHost.resolveActiveRepo(cwd)).toBeNull();
+
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, cwd });
+		expect(statusLineHost.resolveActiveRepo(cwd)?.relativeRepoRoot).toBe("repo");
 	});
 });

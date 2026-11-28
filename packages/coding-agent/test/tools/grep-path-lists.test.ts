@@ -1,4 +1,3 @@
-import { agentTranscriptSource } from "@oh-my-pi/pi-coding-agent/modes/agent-hub-runtime";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -7,15 +6,17 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getEditStore } from "@oh-my-pi/pi-coding-agent/edit/store";
-import { AgentTranscriptViewer } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
-import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
-import type { ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { ToolCall } from "../../src/ui/transcript/tool-block";
+import { toolCallText } from "../helpers/tool-text";
+import { renderTreeSelector } from "../helpers/tree-selector";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -66,22 +67,6 @@ async function createSearchFixture(rootDir: string): Promise<void> {
 		"const providerOptions = {};\nlegacyWrap(otherValue, otherArg);\n",
 	);
 }
-async function makeJsonlSessionFile(dirPath: string, entries: object[]): Promise<string> {
-	const filePath = path.join(dirPath, "session.jsonl");
-	await Bun.write(filePath, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
-	return filePath;
-}
-
-function makeSubagentRegistry(sessions: ObservableSession[]): SessionObserverRegistry {
-	return {
-		getSessions: () => sessions,
-		getSession: (id: string) => sessions.find(session => session.id === id),
-		onChange: () => () => {},
-		setMainSession: () => {},
-		getActiveSubagentCount: () => sessions.filter(session => session.status === "active").length,
-	} as unknown as SessionObserverRegistry;
-}
-
 let treeEntryCounter = 0;
 function makeMessageNode(message: AgentMessage, parentId: string | null = null): SessionTreeNode {
 	const entry: SessionEntry = {
@@ -95,21 +80,13 @@ function makeMessageNode(message: AgentMessage, parentId: string | null = null):
 }
 
 function renderTree(tree: SessionTreeNode[], currentLeafId: string): string {
-	const selector = new TreeSelectorComponent(
-		tree,
-		currentLeafId,
-		60,
-		() => {},
-		() => {},
-	);
-	return Bun.stripANSI(selector.render(120).join("\n"));
+	return renderTreeSelector({ roots: tree, currentLeafId }, { rows: 60 });
 }
 
 describe("tool path arrays", () => {
 	let tempDir: string;
 
 	beforeAll(async () => {
-		await initTheme(false, undefined, undefined, "dark", "light");
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "search-path-lists-"));
@@ -123,6 +100,21 @@ describe("tool path arrays", () => {
 	afterAll(async () => {
 		await removeWithRetries(tempDir);
 		resetSettingsForTest();
+	});
+
+	it("grep and ast_grep refuse a scope that names the filesystem root", async () => {
+		const tools = await createTools(createTestSession(tempDir));
+		const { root } = path.parse(tempDir);
+		const calls = [
+			["grep", { pattern: "shared-needle", path: `${root}usr/..` }],
+			["grep", { pattern: "shared-needle", path: `apps/; ${root}usr/..` }],
+			["ast_grep", { pat: "legacyWrap($A, $B)", path: path.relative(tempDir, root) }],
+		] as const;
+		for (const [name, args] of calls) {
+			const tool = tools.find(entry => entry.name === name);
+			if (!tool) throw new Error(`Missing ${name} tool`);
+			await expect(tool.execute(`root-${name}`, args)).rejects.toThrow("Refusing to search the filesystem root");
+		}
 	});
 
 	it("search finds a named NUL-containing file and sanitizes matches and context", async () => {
@@ -349,89 +341,17 @@ describe("tool path arrays", () => {
 		await removeWithRetries(tmp);
 	});
 
-	it("agent hub chat renders a single-string grep path summary", async () => {
-		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "search-path-lists-"));
-		const sessionFile = await makeJsonlSessionFile(tmp, [
-			{ type: "session", version: 3, id: "search-overlay-session", timestamp: new Date().toISOString() },
-			{
-				type: "message",
-				id: "msg-user-1",
-				parentId: null,
-				timestamp: new Date().toISOString(),
-				message: { role: "user", content: "grep", timestamp: 1 },
-			},
-			{
-				type: "message",
-				id: "msg-assistant-1",
-				parentId: "msg-user-1",
-				timestamp: new Date().toISOString(),
-				message: {
-					role: "assistant",
-					content: [
-						{
-							type: "toolCall",
-							id: "search-call-1",
-							name: "grep",
-							arguments: { pattern: "space-needle", paths: "folder with spaces/" },
-						},
-					],
-					api: "test",
-					provider: "test",
-					model: "test",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					timestamp: 2,
-				},
-			},
-		]);
-		const observers = makeSubagentRegistry([
-			{
-				id: "search-overlay-session",
-				kind: "subagent",
-				label: "Search Overlay",
-				status: "active",
-				sessionFile,
-				lastUpdate: Date.now(),
-			},
-		]);
-		const agents = new AgentRegistry();
-		agents.register({
-			id: "search-overlay-session",
-			displayName: "search-overlay-session",
-			kind: "sub",
-			parentId: "Main",
-			session: null,
-			sessionFile,
-			status: "parked",
-		});
-
-		const viewer = new AgentTranscriptViewer({
-			transcript: agentTranscriptSource,
-			agentId: "search-overlay-session",
-			registry: agents,
-			observers,
-			ui: { requestRender: () => {}, requestComponentRender: () => {} } as never,
-			cwd: tmp,
-			expandKeys: ["ctrl+o"],
-			hubKeys: ["ctrl+s"],
-			requestRender: () => {},
-			onClose: () => {},
-			onHubClose: () => {},
-		});
-		const rendered = Bun.stripANSI(viewer.render(120).join("\n"));
-		viewer.dispose();
-
-		// The hub chat now renders through grepToolRenderer.renderCall; the
-		// single-string `paths` arg shows up as the "in <paths>" scope of the
-		// header subject on the pending call line (a completed result merges the call line away).
-		expect(rendered).toContain("in folder with spaces/");
-		await removeWithRetries(tmp);
+	it("grep call card shows a single-string legacy `paths` scope", () => {
+		// Hub chats and rebuilt transcripts replay calls with the pre-`path` `paths` arg as one
+		// string; the pending call line names it as the search scope.
+		const rendered = toolCallText(
+			new ToolCall({
+				id: "search-call-1",
+				name: "grep",
+				args: { pattern: "space-needle", paths: "folder with spaces/" },
+			}),
+		);
+		expect(rendered).toContain("folder with spaces/");
 	});
 
 	it("tree selector renders a single-string grep path summary", () => {

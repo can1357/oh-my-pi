@@ -10,7 +10,7 @@ import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { estimateToolSchemaTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
+import { estimateToolSchemaTokens } from "@oh-my-pi/pi-coding-agent/session/context-usage";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -1032,9 +1032,9 @@ describe("AgentSession advisor context maintenance", () => {
 		advisor.setModel(opus46);
 		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
 		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([opus46]);
-		// Opus 4-6 has a 1M-token window against a reserve-based threshold, and
-		// only the newest usage report anchors the estimate — so the anchors
-		// themselves must each clear ~850k, where the shared helper's 371k
+		// Opus 4-6 has a 1M-token window whose default threshold stops at 690k,
+		// and only the newest usage report anchors the estimate — so the anchors
+		// themselves must each clear 690k, where the shared helper's 371k
 		// suffices for the fallback harness's 400k windows.
 		const hugeAnchor = (timestamp: number): AssistantMessage => {
 			const anchor = usageAnchor(advisorMock, timestamp);

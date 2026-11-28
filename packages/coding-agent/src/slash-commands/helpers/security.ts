@@ -1,21 +1,20 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { errorMessage, prompt } from "@oh-my-pi/pi-utils";
 import { parseInternalUrl } from "../../internal-urls/parse";
 import { SecurityProtocolHandler } from "../../internal-urls/security-protocol";
 import validationRequestPrompt from "../../prompts/security/validate-request.md" with { type: "text" };
 import { selectSecurityOAuthAccount } from "../../security/auth";
 import { CodexSecurityCloudClient, pullCodexSecurityCloudResults } from "../../security/cloud";
 import type { SecurityDispositionStatus } from "../../security/contracts";
-import type { SecurityPreflightInput } from "../../security/coordinator";
-import { getSecurityCoordinator } from "../../security/coordinator";
+import type { SecurityCoordinator, SecurityPreflightInput } from "../../security/coordinator";
 import { importCodexSecurityBundle, importSarifFile } from "../../security/importers";
 import type { SecurityTargetRequest } from "../../security/preflight";
 import { SecurityStore, writeSecurityFileAtomic } from "../../security/store";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenPath } from "../../utils/render-utils";
 import { parseCommandArgs } from "../../utils/command-args";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "../types";
-import { commandConsumed, errorMessage, parseSubcommand, usage } from "./parse";
+import { commandConsumed, parseSubcommand, usage } from "./parse";
 
 import { cfgSecurityEnabled } from "../../tools/settings";
 
@@ -35,7 +34,9 @@ const DISPOSITIONS: ReadonlySet<SecurityDispositionStatus> = new Set([
 	"wont_fix",
 ]);
 
-function coordinatorFor(runtime: SlashCommandRuntime) {
+async function coordinatorFor(runtime: SlashCommandRuntime): Promise<SecurityCoordinator> {
+	// Keep the scanner out of normal slash-command startup and result-only actions.
+	const { getSecurityCoordinator } = await import("../../security/coordinator");
 	return getSecurityCoordinator({
 		cwd: runtime.cwd,
 		settings: runtime.settings,
@@ -123,7 +124,7 @@ function parsePlanOptions(rest: string): SecurityPlanCliOptions {
 	return { target, knowledgeBasePaths, outputRoot, archiveExisting, credentialId };
 }
 
-async function preflight(runtime: SlashCommandRuntime, rest: string) {
+async function preflight(runtime: SlashCommandRuntime, rest: string, coordinator?: SecurityCoordinator) {
 	const options = parsePlanOptions(rest);
 	const input: SecurityPreflightInput = {
 		target: options.target,
@@ -133,7 +134,8 @@ async function preflight(runtime: SlashCommandRuntime, rest: string) {
 		credentialId: options.credentialId,
 		model: runtime.session.model,
 	};
-	return coordinatorFor(runtime).preflight(input);
+	const backend = coordinator ?? (await coordinatorFor(runtime));
+	return backend.preflight(input);
 }
 
 function scanIdFromInput(value: string): string {
@@ -367,14 +369,15 @@ export async function handleSecurityCommand(
 				return commandConsumed();
 			}
 			case "scan": {
-				const coordinator = coordinatorFor(runtime);
-				const planId = rest.trim().startsWith("secplan_") ? rest.trim() : (await preflight(runtime, rest)).id;
+				const coordinator = await coordinatorFor(runtime);
+				const target = rest.trim();
+				const planId = target.startsWith("secplan_") ? target : (await preflight(runtime, rest, coordinator)).id;
 				const operation = await coordinator.start({ planId });
 				await runtime.output(`Security scan ${operation.scanId} started as ${operation.operationId}.`);
 				return commandConsumed();
 			}
 			case "status": {
-				const coordinator = coordinatorFor(runtime);
+				const coordinator = await coordinatorFor(runtime);
 				const operationId = rest.trim();
 				if (operationId) {
 					const operation = await coordinator.status(operationId);
@@ -388,8 +391,9 @@ export async function handleSecurityCommand(
 			case "cancel": {
 				const operationId = rest.trim();
 				if (!operationId) throw new Error("cancel requires an operation id");
+				const coordinator = await coordinatorFor(runtime);
 				await runtime.output(
-					(await coordinatorFor(runtime).cancel(operationId))
+					(await coordinator.cancel(operationId))
 						? `Cancellation requested for ${operationId}.`
 						: `No cancellable security operation ${operationId}.`,
 				);

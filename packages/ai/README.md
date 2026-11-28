@@ -83,8 +83,6 @@ Unified LLM API with automatic model discovery, provider configuration, token an
 - **llama.cpp** (local OpenAI and Anthropic compatible inference server)
 - **vLLM** (OpenAI-compatible server; `VLLM_API_KEY` for secured deployments)
 - **GitHub Copilot** (requires OAuth, see below)
-- **Google Gemini CLI** (requires OAuth, see below)
-- **Google Antigravity** (requires OAuth, see below)
 - **Any OpenAI-compatible API**: LM Studio, custom proxies, etc.
 
 ## Installation
@@ -1030,12 +1028,8 @@ Several providers support OAuth authentication (some also support static API key
 - **Anthropic** (Claude Pro/Max subscription)
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, access to GPT-5.x Codex models)
 - **GitHub Copilot** (Copilot subscription)
-- **Google Gemini CLI** (Gemini 2.0/2.5 via Google Cloud Code Assist; free tier or paid subscription)
-- **Google Antigravity** (Gemini, Claude, GPT-OSS via Google Cloud)
 - **Qwen Portal** (Qwen OAuth token or API key)
 - **Snowflake Cortex** (Snowflake account OAuth with PKCE and refresh, subject to the account's local-application integration)
-
-For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_CLOUD_PROJECT_ID` to your project ID.
 
 ### Snowflake Cortex
 
@@ -1103,7 +1097,7 @@ Credentials are saved to `agent.db` in the agent directory. `/login qianfan` ope
 
 If SQLite reports corruption during startup, the damaged database and remaining journal sidecars are preserved beside it as private `agent.db.corrupt-<timestamp>-<id>*` backups before a fresh database is created. The log records the backup path. This restores startup, not unreadable credentials: log in again; retain the backups for manual data recovery. Lock contention and other non-corruption errors never reset the database.
 
-`login` supports OAuth providers (Anthropic, OpenAI Codex, GitHub Copilot, Gemini CLI, Antigravity) and API-key onboarding flows.
+`login` supports OAuth providers (Anthropic, OpenAI Codex, GitHub Copilot) and API-key onboarding flows.
 
 For the current API-key onboarding flows, the library covers Together, Moonshot, Qianfan, NVIDIA, NanoGPT, Novita, DeepInfra, Hugging Face, Venice, Xiaomi, vLLM, LiteLLM, Cloudflare AI Gateway, Qwen Portal, and Ollama Cloud. Ollama remains the local runtime integration; set `OLLAMA_API_KEY` only when your local or self-hosted deployment enforces bearer auth.
 
@@ -1116,7 +1110,6 @@ import {
 	getProviderDefinition,
 	refreshOAuthToken, // (provider, credentials) => new credentials
 	getOAuthApiKey, // (provider, credentialsMap) => { newCredentials, apiKey } | null
-	type OAuthProvider,
 	type OAuthCredentials,
 } from "@oh-my-pi/pi-ai";
 
@@ -1195,8 +1188,6 @@ usage polling do not imply that reason.
 **OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options.
 
 **GitHub Copilot**: If you get "The requested model is not supported" error, enable the model manually in VS Code: open Copilot Chat, click the model selector, select the model (warning icon), and click "Enable".
-
-**Google Gemini CLI / Antigravity**: These use Google Cloud OAuth. The `apiKey` returned by `getOAuthApiKey()` is a JSON string containing both the token and project ID, which the library handles automatically.
 
 ## License
 

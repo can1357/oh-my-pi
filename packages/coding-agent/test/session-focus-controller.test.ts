@@ -1,5 +1,4 @@
-import { beforeAll, describe, expect, it } from "bun:test";
-import { Container } from "@oh-my-pi/pi-tui";
+import { describe, expect, it } from "bun:test";
 import {
 	pickRecentFocusableAgentId,
 	SessionFocusController,
@@ -8,8 +7,6 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type AgentRef } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 
 interface SessionStub {
 	session: AgentSession;
@@ -23,11 +20,13 @@ interface SessionStub {
 	setQueue: (queue: { steering?: string[]; followUp?: string[] }) => void;
 }
 
-function makeSessionStub(opts: { isStreaming?: boolean } = {}): SessionStub {
+function makeSessionStub(opts: { isStreaming?: boolean; sessionId?: string } = {}): SessionStub {
 	let listener: ((event: AgentSessionEvent) => Promise<void> | void) | undefined;
 	let unsubscribeCalls = 0;
 	let queue: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
 	const stub = {
+		sessionId: "provider-session",
+		sessionManager: { getSessionId: () => opts.sessionId ?? "session" },
 		isStreaming: opts.isStreaming ?? false,
 		runStartedAt: undefined as number | undefined,
 		agent: { state: { streamMessage: null } },
@@ -71,7 +70,12 @@ interface Harness {
 	asyncWaitShows: () => number;
 	setSessionCalls: Array<[AgentSession, string | undefined]>;
 	reloadTodoSessions: AgentSession[];
-	pendingMessagesContainer: Container;
+	/** The steering queue the pending bar showed, per `updatePendingMessagesDisplay()` call. */
+	pendingDisplays: string[][];
+	/** Events the main session's extension runner received. */
+	extensionEvents: unknown[];
+	/** Call `listener` on the next event the main session's extension runner receives. */
+	onExtensionEvent: (listener: () => void) => void;
 	counts: {
 		clearTransientSessionUi: () => number;
 		resetTranscriptAnchors: () => number;
@@ -81,11 +85,22 @@ interface Harness {
 }
 
 function makeHarness(options: { renderInitialMessages?: () => void | Promise<void> } = {}): Harness {
-	const main = makeSessionStub();
+	const main = makeSessionStub({ sessionId: "main-session" });
+	const extensionEvents: unknown[] = [];
+	let extensionListener: (() => void) | undefined;
+	Object.assign(main.session, {
+		extensionRunner: {
+			emit: async (event: unknown) => {
+				extensionEvents.push(event);
+				extensionListener?.();
+				extensionListener = undefined;
+			},
+		},
+	});
 	const handledEvents: unknown[] = [];
 	const setSessionCalls: Array<[AgentSession, string | undefined]> = [];
 	const reloadTodoSessions: AgentSession[] = [];
-	const pendingMessagesContainer = new Container();
+	const pendingDisplays: string[][] = [];
 	let clearTransientSessionUi = 0;
 	let resetTranscriptAnchors = 0;
 	let renderInitialMessages = 0;
@@ -97,9 +112,7 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		get viewSession() {
 			return controller.target ?? main.session;
 		},
-		pendingMessagesContainer,
 		compactionQueuedMessages: [],
-		keybindings: { getKeys: () => ["alt+up"] },
 		unsubscribe: () => {
 			mainUnsubscribe++;
 		},
@@ -121,12 +134,10 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 			setSession: (session: AgentSession, focusedAgentId?: string) => {
 				setSessionCalls.push([session, focusedAgentId]);
 			},
-			invalidate() {},
+			refresh() {},
 		},
 		clearTransientSessionUi: () => {
 			clearTransientSessionUi++;
-			// Mirror interactive-mode.ts: focus teardown disposes the pending block.
-			pendingMessagesContainer.disposeChildren();
 		},
 		renderInitialMessages: async () => {
 			renderInitialMessages++;
@@ -135,10 +146,11 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		reloadTodos: async (source?: AgentSession) => {
 			reloadTodoSessions.push(source ?? main.session);
 		},
-		updatePendingMessagesDisplay: () => uiHelpers.updatePendingMessagesDisplay(),
+		updatePendingMessagesDisplay: () => {
+			pendingDisplays.push([...ctx.viewSession.getQueuedMessages().steering]);
+		},
 		updateEditorBorderColor() {},
 		syncIdleMaintenanceView() {},
-		ui: { requestRender() {}, requestComponentRender() {} },
 		showStatus() {},
 		collabGuest: undefined,
 	} as unknown as InteractiveModeContext;
@@ -146,7 +158,6 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 	const registry = new AgentRegistry();
 	const lifecycle = new AgentLifecycleManager(registry);
 	const controller = new SessionFocusController(ctx, registry, () => lifecycle);
-	const uiHelpers = new UiHelpers(ctx);
 
 	return {
 		ctx,
@@ -157,7 +168,11 @@ function makeHarness(options: { renderInitialMessages?: () => void | Promise<voi
 		asyncWaitShows: () => asyncWaitShows,
 		setSessionCalls,
 		reloadTodoSessions,
-		pendingMessagesContainer,
+		pendingDisplays,
+		extensionEvents,
+		onExtensionEvent: listener => {
+			extensionListener = listener;
+		},
 		counts: {
 			clearTransientSessionUi: () => clearTransientSessionUi,
 			resetTranscriptAnchors: () => resetTranscriptAnchors,
@@ -177,11 +192,6 @@ async function flushAsync(): Promise<void> {
 }
 
 describe("SessionFocusController", () => {
-	beforeAll(async () => {
-		// updatePendingMessagesDisplay renders through the global theme singleton.
-		await initTheme(false);
-	});
-
 	it("focusAgent retargets subscription, transcript anchors, and status line onto the worker session", async () => {
 		const h = makeHarness();
 		const worker = makeSessionStub();
@@ -239,26 +249,21 @@ describe("SessionFocusController", () => {
 	});
 
 	it("re-renders the pending steering block against the attached session's real queue on both focus directions (#11379)", async () => {
-		// clearTransientSessionUi() disposes pendingMessagesContainer on every attach.
-		// The queue survives, but nothing repainted it, so returning from a focused
-		// agent left the steering block permanently blank. #attach() must rebuild the
-		// real container from viewSession's queue in both directions: the subagent's
-		// own queue on focus, main's queue on unfocus.
+		// clearTransientSessionUi() clears the pending bar on every attach. The queue
+		// survives, but nothing repainted it, so returning from a focused agent left the
+		// steering block permanently blank. #attach() must refresh it from viewSession's
+		// queue in both directions: the subagent's own queue on focus, main's on unfocus.
 		const h = makeHarness();
 		const worker = makeSessionStub();
 		h.main.setQueue({ steering: ["main steer alpha"] });
 		worker.setQueue({ steering: ["worker steer beta"] });
 		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
 
-		const rendered = () => h.pendingMessagesContainer.render(80).join("\n");
-
 		await h.controller.focusAgent("Worker");
-		expect(rendered()).toContain("worker steer beta");
-		expect(rendered()).not.toContain("main steer alpha");
+		expect(h.pendingDisplays.at(-1)).toEqual(["worker steer beta"]);
 
 		await h.controller.unfocus();
-		expect(rendered()).toContain("main steer alpha");
-		expect(rendered()).not.toContain("worker steer beta");
+		expect(h.pendingDisplays.at(-1)).toEqual(["main steer alpha"]);
 	});
 
 	it("does not let a superseded focus attachment restore the worker todo HUD after unfocusing", async () => {
@@ -385,6 +390,47 @@ describe("SessionFocusController", () => {
 			[worker.session, "Worker"],
 			[h.main.session, undefined],
 		]);
+	});
+
+	it("reports each attached view change to the main session's extensions (#16546)", async () => {
+		const h = makeHarness();
+		const parent = makeSessionStub({ sessionId: "parent-session" });
+		const worker = makeSessionStub({ sessionId: "worker-session" });
+		registerSub(h.registry, "Parent", parent.session, MAIN_AGENT_ID);
+		registerSub(h.registry, "Worker", worker.session, "Parent");
+
+		await h.controller.focusAgent("Worker");
+		await h.controller.focusAgent("Worker");
+		await h.controller.focusParent();
+		await h.controller.unfocus();
+		await h.controller.unfocus();
+		await h.controller.focusAgent("Worker");
+		// The reactive return is fire-and-forget: wait for the report it ends with.
+		const returned = Promise.withResolvers<void>();
+		h.onExtensionEvent(returned.resolve);
+		h.registry.setStatus("Worker", "parked");
+		await returned.promise;
+
+		expect(h.extensionEvents).toEqual([
+			{ type: "agent_view_changed", agentId: "Worker", previousAgentId: undefined, sessionId: "worker-session" },
+			{ type: "agent_view_changed", agentId: "Parent", previousAgentId: "Worker", sessionId: "parent-session" },
+			{ type: "agent_view_changed", agentId: undefined, previousAgentId: "Parent", sessionId: "main-session" },
+			{ type: "agent_view_changed", agentId: "Worker", previousAgentId: undefined, sessionId: "worker-session" },
+			{ type: "agent_view_changed", agentId: undefined, previousAgentId: "Worker", sessionId: "main-session" },
+		]);
+	});
+
+	it("does not report a focus whose attachment fails (#16546)", async () => {
+		const h = makeHarness({
+			renderInitialMessages: () => {
+				if (h.controller.focusedAgentId) throw new Error("replay failed");
+			},
+		});
+		const worker = makeSessionStub();
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+
+		await expect(h.controller.focusAgent("Worker")).rejects.toThrow("replay failed");
+		expect(h.extensionEvents).toEqual([]);
 	});
 
 	it("drops a slower focus that resolves after a newer request", async () => {
@@ -609,7 +655,7 @@ describe("SessionFocusController", () => {
 		await second;
 		expect(controller.focusedAgentId).toBe("Worker");
 		expect(controller.target).toBe(worker.session);
-		expect(h.pendingMessagesContainer.render(80).join("\n")).toContain("queued worker input");
+		expect(h.pendingDisplays.at(-1)).toContain("queued worker input");
 	});
 
 	it("reports attachment failure to a repeated same-session focus request", async () => {
@@ -730,7 +776,7 @@ describe("SessionFocusController", () => {
 		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
 		await expect(h.controller.focusAgent("Worker")).rejects.toThrow("replay failed");
 		expect(h.controller.focusedAgentId).toBeUndefined();
-		expect(h.pendingMessagesContainer.render(80).join("\n")).toContain("main input after recovery");
+		expect(h.pendingDisplays.at(-1)).toContain("main input after recovery");
 		const mainEvent = {
 			type: "message_start",
 			message: { role: "user", content: "MAIN_AFTER_FAILURE", timestamp: 1 },
@@ -738,7 +784,7 @@ describe("SessionFocusController", () => {
 		await h.main.emit(mainEvent);
 		expect(h.handledEvents).toContainEqual(mainEvent);
 		await h.controller.focusAgent("Worker");
-		expect(h.pendingMessagesContainer.render(80).join("\n")).toContain("worker input after retry");
+		expect(h.pendingDisplays.at(-1)).toContain("worker input after retry");
 		expect(h.controller.target).toBe(worker.session);
 	});
 
@@ -765,7 +811,7 @@ describe("SessionFocusController", () => {
 		oldReplay.reject(new Error("old replay failed"));
 		await oldFocus;
 		expect(h.controller.target).toBe(second.session);
-		expect(h.pendingMessagesContainer.render(80).join("\n")).toContain("newer worker input");
+		expect(h.pendingDisplays.at(-1)).toContain("newer worker input");
 	});
 
 	it("retains main event delivery if its recovery replay also fails", async () => {
@@ -820,7 +866,7 @@ describe("SessionFocusController", () => {
 		recoveryReplay.resolve();
 		await firstFocus;
 		expect(h.controller.target).toBe(newer.session);
-		expect(h.pendingMessagesContainer.render(80).join("\n")).toContain("newer view stays active");
+		expect(h.pendingDisplays.at(-1)).toContain("newer view stays active");
 	});
 });
 

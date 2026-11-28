@@ -52,6 +52,7 @@ pub mod ir;
 mod mem;
 mod mem_store;
 mod packed_names;
+mod pvec;
 pub mod signal;
 pub mod snapshot;
 pub mod socket;
@@ -65,6 +66,7 @@ pub mod zshopt;
 pub mod pattern;
 pub mod syntax;
 
+pub(crate) use self::vm::decode_zsh_dollar_quote;
 /// zsh/newuser's startup check: the `newuser` scripts an interactive zsh
 /// sources after `/etc/zshenv` when the user has no startup files.
 pub use crate::bash::vm::newuser_startup_scripts;
@@ -80,9 +82,9 @@ pub use crate::bash::{
 	fs::{DirEntry, DirIter, File, FileKind, Fs, FsPending, FsPoll, OpenFlags, Stat},
 	host::{
 		ChildRedir, ChildRedirs, CpuTimes, Deadline, EnvView, ExitStatus, ExtProc, Host, Invocation,
-		Lineage, Login, Logins, OsHandle, PgroupSpec, PipeMirror, PipeTap, ProcEvent, ResolveCtx,
-		Resolved, Rlimit, SpawnFuture, SpawnSpec, StdFd, StdioSpec, SystemTimeLike, TapSite, Task,
-		Timer, TtyInfo, UserInfo, Verdict, Via,
+		Lineage, Login, Logins, OsHandle, PgroupSpec, PipeMirror, PipeTap, ProcEvent, ProcUsage,
+		ResolveCtx, Resolved, Rlimit, SpawnFuture, SpawnSpec, StdFd, StdioSpec, SystemTimeLike,
+		TapSite, Task, Timer, TtyInfo, UserInfo, Verdict, Via,
 	},
 	ids::{
 		AstNodeId, CallId, CmdTag, Dialect, IntrinsicId, JobId, ModeId, NativeRef, Platform, RunId,

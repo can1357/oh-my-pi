@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
+import type { CoordinationDetails } from "../tools/details/wait";
 import type { Settings } from "../config/settings";
 import { IrcBus } from "./bus";
 import type { AgentRegistryApi } from "../registry/agent-registry";

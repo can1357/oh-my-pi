@@ -4,7 +4,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import { validateAgentAccountPools } from "../config/account-pools";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { assertModelSupportsEffortCeiling } from "@oh-my-pi/pi-tui/thinking";
+import { assertModelSupportsEffortCeiling } from "../thinking/levels";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelStringWithRouting,
@@ -177,7 +177,7 @@ export function createPersistedSubagentReviverFactory(
 		// probe below, so gate on the stamped contract instead — otherwise a
 		// restart + peer message revives the agent outside isolation, in the
 		// parent cwd, contradicting the delivery notice.
-		if (peek.init.isolated) return undefined;
+		if (peek.init.isolated) return { refused: "it ran isolated, and isolated runs are not resumable by design" };
 		try {
 			await fs.stat(peek.cwd);
 		} catch {

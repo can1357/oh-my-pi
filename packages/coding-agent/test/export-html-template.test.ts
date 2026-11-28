@@ -7,6 +7,7 @@ import { parseHTML } from "@oh-my-pi/pi-utils/dom";
 import type { BunPlugin } from "bun";
 import { getTemplate } from "../src/export/html/index";
 import viewerAsset from "../src/export/html/viewer.generated.json" with { type: "json" };
+import { ensureDevelopmentViewer } from "./fixtures/development-export-viewer";
 
 const bundleDistUrl = new URL("../scripts/bundle-dist.ts", import.meta.url).href;
 const probePath = path.resolve(import.meta.dir, "fixtures", "html-export-template-probe.ts");
@@ -20,7 +21,7 @@ const dependencyStubs: Record<string, string> = {
 	"@oh-my-pi/omp-stats/trace":
 		'export const buildSessionTraceFromSnapshots = () => { throw new Error("Trace assembly is outside the template probe"); };',
 	"@oh-my-pi/pi-utils": `export const APP_NAME = "omp"; export const VERSION = ${JSON.stringify(VERSION)}; export const isEnoent = err => err?.code === "ENOENT"; export const isCompiledBinary = () => false;`,
-	"@oh-my-pi/pi-tui/theme":
+	"../../ui/theme/service":
 		"export const getResolvedThemeColors = async () => ({}); export const getThemeExportColors = async () => ({});",
 	"../../session/sub-sessions": "export const collectSubSessions = async () => ({});",
 	"../../session/session-manager":
@@ -51,6 +52,7 @@ async function runProbe(command: string[]): Promise<string> {
 }
 
 beforeAll(async () => {
+	await ensureDevelopmentViewer();
 	await fs.mkdir(unrelatedCwd);
 	const bundle = await Bun.build({
 		entrypoints: [probePath],
@@ -188,7 +190,11 @@ describe("HTML export template", () => {
 		const packDir = path.join(packWorkspace, packageRel);
 		await Bun.write(path.join(packDir, "package.json"), Bun.file(path.join(packageDir, "package.json")));
 		await fs.cp(productionDir, path.join(packDir, "dist"), { recursive: true });
-		await fs.cp(path.join(packageDir, "src/export/html"), path.join(packDir, "src/export/html"), { recursive: true });
+		const hostedAssets = ["shell.html", "template.css", "template.js", "share-loader.js"];
+		for (const name of ["template.html.txt", "viewer.generated.json", ...hostedAssets]) {
+			const relative = path.join("src/export/html", name);
+			await Bun.write(path.join(packDir, relative), Bun.file(path.join(packageDir, relative)));
+		}
 		const pack = Bun.spawn([process.execPath, "pm", "pack", "--dry-run", "--ignore-scripts"], {
 			cwd: packDir,
 			stdin: "ignore",
@@ -204,7 +210,7 @@ describe("HTML export template", () => {
 		const packed = Array.from(packOut.matchAll(/^packed \S+ (.+)$/gm), match => match[1]);
 		expect(packed).toContain("src/export/html/template.html.txt");
 		expect(packed).toContain("src/export/html/viewer.generated.json");
-		for (const name of ["shell.html", "template.css", "template.js", "share-loader.js"]) {
+		for (const name of hostedAssets) {
 			expect(packed).not.toContain(`src/export/html/${name}`);
 		}
 		expect(packed.filter(file => /^dist\/(template-|tool-views\.|marked\.|highlight\.)/.test(file))).toEqual([]);

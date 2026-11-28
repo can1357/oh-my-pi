@@ -24,6 +24,7 @@ import {
 	analyzeAuthError,
 	discoverOAuthEndpoints,
 	fetchResourceMetadataScopes,
+	insufficientScopeOf,
 	type OAuthEndpoints,
 } from "./oauth-discovery";
 import {
@@ -701,7 +702,10 @@ export interface McpReauthOptions extends McpOAuthFlowPresentation {
 	authStorage: AuthStorage;
 	/** Host cancellation; wired before the anonymous probe so the whole reauth is abortable. */
 	signal?: AbortSignal;
-	/** Tool-level `_meta["mcp/www_authenticate"]` challenge that triggered an auto-reauth. */
+	/**
+	 * Challenge that refused a tool call and triggered an auto-reauth; an
+	 * `insufficient_scope` one adds its scopes to the grant (step-up).
+	 */
 	authChallenge?: MCPAuthChallenge;
 	/** Host's live manager, used to prepare the anonymous probe config. */
 	mcpManager?: MCPManager;
@@ -815,13 +819,27 @@ export async function reauthorizeMcpServer(
 	const oauthResource =
 		oauth.resource ?? currentAuthResource ?? ("url" in runtimeBaseConfig ? runtimeBaseConfig.url : undefined);
 	const oauthResourceIsFallback = !oauth.resource && !currentAuthResource;
+	// An explicit `oauth.scope` is the user's exact request; discovered scopes
+	// only fill in when none is configured.
+	const baseScopes = runtimeBaseConfig.oauth?.scope?.trim() || oauth.scopes || "";
+	// Step-up (RFC 6750 §3.1): protected-resource metadata names only the
+	// baseline, so keep what the grant holds and add what the challenge asks for.
+	const stepUpScopes = opts.authChallenge ? insufficientScopeOf(opts.authChallenge.wwwAuthenticate) : undefined;
+	const scopes =
+		stepUpScopes === undefined
+			? baseScopes
+			: [
+					...new Set(
+						`${existingCredential?.scope ?? ""} ${baseScopes} ${stepUpScopes}`.split(/\s+/).filter(Boolean),
+					),
+				].join(" ");
 
 	const oauthResult = await runMcpOAuthFlow({
 		authUrl: oauth.authorizationUrl,
 		tokenUrl: oauth.tokenUrl,
 		clientId: flowClientId,
 		clientSecret: flowClientSecret,
-		scopes: oauth.scopes || runtimeBaseConfig.oauth?.scope || "",
+		scopes,
 		callbackPort: found.config.oauth?.callbackPort,
 		callbackPath: found.config.oauth?.callbackPath,
 		redirectUri: found.config.oauth?.redirectUri,

@@ -335,6 +335,12 @@ describe("compaction.modelThresholds", () => {
 		expect(point.basis).toContain("capped by window");
 		const wide = { provider: "anthropic", id: "claude-opus-5-5", contextWindow: 1_000_000 } as Model;
 		expect(describeModelCompactionPoint(global, wide)).toMatchObject({ tokens: 300_000, basis: "fixed" });
+		// With nothing configured, the wide window compacts at the default's 690K ceiling.
+		expect(describeModelCompactionPoint(Settings.isolated({}), wide)).toMatchObject({
+			tokens: 690_000,
+			basis: "fixed",
+			source: "default",
+		});
 		// One token below the window is still the user's exact trigger.
 		const justBelow = Settings.isolated({ "compaction.thresholdTokens": 196_607 });
 		expect(describeModelCompactionPoint(justBelow, capped)).toMatchObject({ tokens: 196_607, basis: "fixed" });

@@ -18,8 +18,9 @@ import {
 } from "./protocol";
 import { OUTPUT_ACTIVE_LEVEL, OutputActivity } from "./output-activity";
 import { type LiveEndpoint, LiveTransport, resolveLiveEndpoint } from "./transport";
-import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
+import type { LivePhase } from "../modes/view-model/apps/live-visualizer";
 import { DEFAULT_LIVE_VOICE } from "./voices";
+import { rmsLevel } from "../stt/wav";
 
 const MIN_BARGE_IN_LEVEL = 0.04;
 const OUTPUT_ECHO_RATIO = 0.65;
@@ -76,16 +77,6 @@ function clampLevel(level: number): number {
 	return Math.min(1, level);
 }
 
-function microphoneLevel(samples: Float32Array): number {
-	if (samples.length === 0) return 0;
-	let sumSquares = 0;
-	for (let index = 0; index < samples.length; index += 1) {
-		const sample = samples[index] ?? 0;
-		sumSquares += sample * sample;
-	}
-	return clampLevel(Math.sqrt(sumSquares / samples.length));
-}
-
 function currentUser(): { username: string; firstName: string } {
 	let username = "user";
 	try {
@@ -111,6 +102,7 @@ export class LiveSessionController {
 	/** The custom server set by `live.endpoint`, resolved at start; unset uses Codex. */
 	#endpoint: LiveEndpoint | undefined;
 	readonly #transportAbort = new AbortController();
+	readonly #callId = Symbol("live voice call");
 	#recorder: AudioCapture | undefined;
 	#unsubscribeSession: (() => void) | undefined;
 	#sendChain: Promise<void> = Promise.resolve();
@@ -269,6 +261,7 @@ export class LiveSessionController {
 
 	async #stop(): Promise<void> {
 		this.#stopped = true;
+		if (this.#session.activeVoiceCall === this.#callId) this.#session.activeVoiceCall = undefined;
 		if (
 			this.#phase === "connecting" ||
 			(cfgOffline.get(this.#session.settings) && this.#session.model?.provider !== "openai-codex")
@@ -361,8 +354,11 @@ export class LiveSessionController {
 		}
 		request = request.trim();
 		if (!request) return;
+		this.#session.activeVoiceCall = this.#callId;
 		this.#activeDelegationId = event.item.id;
 		this.#refreshAudioPhase();
+		// No end-of-call message follows: the model sees the call's end before the next typed prompt,
+		// derived from the transcript at LLM conversion (`convertToLlm`), so it survives a crash or switch.
 		void this.#session
 			.sendCustomMessage(
 				{
@@ -441,7 +437,7 @@ export class LiveSessionController {
 			return;
 		}
 		if (this.#muted) return;
-		this.#inputLevel = microphoneLevel(samples);
+		this.#inputLevel = rmsLevel(samples);
 		this.#emitLevels();
 		const outputActive = this.#outputLevel > OUTPUT_ACTIVE_LEVEL;
 		const echoThreshold = Math.max(MIN_BARGE_IN_LEVEL, this.#outputLevel * OUTPUT_ECHO_RATIO);

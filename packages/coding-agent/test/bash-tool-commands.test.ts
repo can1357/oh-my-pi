@@ -9,7 +9,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { JsStatusEvent } from "@oh-my-pi/pi-coding-agent/eval/js/shared/types";
@@ -19,8 +19,8 @@ import type { ClientBridge, ClientBridgeTerminalHandle } from "@oh-my-pi/pi-codi
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { resolveToolCommand, type ToolCommandState } from "@oh-my-pi/pi-coding-agent/tools/tool-commands";
-import { convertImageToPng } from "@oh-my-pi/pi-tui/png-conversion";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { convertImageToPng } from "@oh-my-pi/pi-coding-agent/utils/png-conversion";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 
 const PNG_1X1 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC";
 
@@ -229,5 +229,31 @@ describe.skipIf(process.platform === "win32")("tool commands in eval sh()", () =
 		expect(result.output).toContain("fake:v");
 		expect(executed).toEqual([{ flag: "v" }]);
 		expect(statuses).toContainEqual(expect.objectContaining({ op: "fake", mode: "execute", code: 0 }));
+	});
+});
+
+describe("eval sh() bash interceptor (#20033)", () => {
+	function interceptedSession(enabled: boolean): ToolSession {
+		return bashSession([], {
+			settings: Settings.isolated({ "bash.autoBackground.enabled": false, "bashInterceptor.enabled": enabled }),
+			getToolContext: () => ({ toolNames: ["bash", "read"] }) as unknown as AgentToolContext,
+		});
+	}
+
+	it("refuses a matching command with the interceptor's guidance", async () => {
+		await Bun.write(path.join(cwd, "f.txt"), "content");
+		const result = await runEvalShell({ command: "cat f.txt" }, { session: interceptedSession(true) });
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toStartWith("Blocked:");
+		expect(result.output).toContain("Original command: cat f.txt");
+		expect(result.output).not.toContain("content");
+	});
+
+	it("runs non-matching commands, and everything when disabled", async () => {
+		await Bun.write(path.join(cwd, "f.txt"), "content");
+		const ok = await runEvalShell({ command: "echo hi" }, { session: interceptedSession(true) });
+		expect(ok).toEqual({ output: "hi\n", exitCode: 0 });
+		const off = await runEvalShell({ command: "cat f.txt" }, { session: interceptedSession(false) });
+		expect(off).toEqual({ output: "content", exitCode: 0 });
 	});
 });

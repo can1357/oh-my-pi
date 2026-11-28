@@ -35,9 +35,9 @@ Programmatic API options use separate contracts, not CLI flags; see [Programmati
 
 That empty literal suppresses discovered `SYSTEM.md` and `SYSTEM_TEMPLATE.md`, but does not disable OMP-generated instructions; only the programmatic `CreateAgentSessionOptions.systemPrompt` full-replacement option does that.
 
-Without an explicit custom source, discovery is project-first, then user-level. Within each scope a literal beats a template: project `SYSTEM.md` beats project `SYSTEM_TEMPLATE.md`, which beats user `SYSTEM.md`, which beats user `SYSTEM_TEMPLATE.md`. `SYSTEM.md` is the long-established override, so an existing literal keeps working until its author deliberately removes it in favor of a template. Both filenames resolve through the same capability providers, so ancestor walk-up (repo-root `.omp` from a nested cwd) and `.agent` / `.agents` directories apply to templates exactly as they do to literals. `.claude`, `.codex`, and `.gemini` project bases resolve at the launch cwd. Foreign user bases require `enabledProviders` opt-in; `CLAUDE_CONFIG_DIR` also opts in and relocates the Claude user base.
+Without an explicit custom source, discovery is project-first, then user-level. Within each scope a literal beats a template: project `SYSTEM.md` beats project `SYSTEM_TEMPLATE.md`, which beats user `SYSTEM.md`, which beats user `SYSTEM_TEMPLATE.md`. `SYSTEM.md` is the long-established override, so an existing literal keeps working until its author deliberately removes it in favor of a template. Both filenames resolve through the same capability providers, so ancestor walk-up (repo-root `.omp` from a nested cwd) and `.agent` / `.agents` directories apply to templates exactly as they do to literals.
 
-The native user path follows the active profile: with `omp --profile work`, `~/.omp/agent` becomes `~/.omp/profiles/work/agent`. `PI_CONFIG_DIR` changes the native config-directory name. Both capability discovery (`SYSTEM.md`, `SYSTEM_TEMPLATE.md`) and the shared config-base lookup (`APPEND_SYSTEM.md`, `TITLE_SYSTEM.md`) resolve the native user base through `getAgentDir()`, so in the default profile `PI_CODING_AGENT_DIR` relocates all four; named profiles ignore it. An explicit CLI flag or programmatic API option still wins over every discovered file. See [Configuration usage](./config-usage.md) for the shared config-directory contract.
+The native user path follows the active profile: with `omp --profile work`, `~/.omp/agent` becomes `~/.omp/profiles/work/agent`. `PI_CONFIG_DIR` changes the native config-directory name. Both capability discovery (`SYSTEM.md`, `SYSTEM_TEMPLATE.md`) and the shared config-base lookup (`APPEND_SYSTEM.md`, `TITLE_SYSTEM.md`, which searches only `<cwd>/.omp/` and the agent directory) resolve the native user base through `getAgentDir()`, so in the default profile `PI_CODING_AGENT_DIR` relocates all four; named profiles ignore it. An explicit CLI flag or programmatic API option still wins over every discovered file. See [Configuration usage](./config-usage.md) for the shared config-directory contract.
 
 `--system-prompt-template <path>` is a strict file path: a missing, unreadable, empty, or malformed template is an error, never a literal prompt. An empty discovered `SYSTEM_TEMPLATE.md` is skipped (the discovered literal, if any, already won discovery). Malformed templates discovered directly by `buildSystemPrompt()` warn and render the bundled prompt. CLI discovery forwards the loaded source as an explicit SDK template, so a malformed discovered template fails CLI startup. A same-scope literal always wins discovery, so a malformed template beside a literal is never rendered. Discovered templates are read once through capability discovery; later runtime rebuilds re-render that in-memory source.
 
@@ -85,14 +85,14 @@ generated block — the append text is emitted unchanged, without a heading.
 
 Which automatic inputs reach each kind of session. An input applies only when it exists or is enabled, and Personality means the default template's personality block. Advisors build a dedicated prompt that also carries memory instructions and the shared and per-advisor instructions; `@path` imports in `WATCHDOG.md` are expanded.
 
-| Session type     | `AGENTS.md`   | `CLAUDE.md` / `GEMINI.md` | `APPEND_SYSTEM.md` / `--append-system-prompt` | MCP tools | MCP server instructions | `WATCHDOG.md` | Personality |
+| Session type     | `AGENTS.md`   | `CLAUDE.md` | `APPEND_SYSTEM.md` / `--append-system-prompt` | MCP tools | MCP server instructions | `WATCHDOG.md` | Personality |
 | ---------------- | ------------- | ------------------------- | --------------------------------------------- | --------- | ----------------------- | ------------- | ----------- |
 | Main session     | Discovered    | Discovered                | Yes                                           | Yes       | Yes                     | No            | Configured  |
 | Task subagent    | Not inherited | Inherited                 | No                                            | Inherited | Inherited               | No            | `none`      |
 | Advisor/watchdog | Inherited     | Inherited                 | No                                            | No        | No                      | Yes           | None        |
 
 1. Task subagents drop every context file whose basename is `agents.md` (case-insensitive), whether inherited from the parent or discovered for an additional workspace root, including the user-level `~/.omp/agent/AGENTS.md`. Text pulled in through `@` imports is not filtered.
-2. Context discovery selects one user file and one project file per directory depth, and higher-priority providers win. Foreign user files require `enabledProviders` opt-in. A standalone `CLAUDE.md` is supported; `GEMINI.md` is read from the user and project `.gemini` directories.
+2. Context discovery selects one user file and one project file per directory depth, and higher-priority providers win. Other tools' home-directory files are never read. A standalone `CLAUDE.md` is supported.
 3. A task agent's `tools:` list does not remove MCP tools or server instructions: the tools stay available top-level or as bash tool commands. Plan-mode tasks and children of restricted sessions run with `restrictToolNames`, which drops both.
 
 ## Handlebars template route
@@ -180,7 +180,7 @@ Delegate only when the request or repository guidance calls for it.
 
 {{#if mountedCommands.length}}
 # Tool Commands
-Each listed tool is also a command in `{{toolRefs.bash}}`: run `<tool> <positional> [--flag value]`; `<tool> --help` prints usage derived from its schema.
+The commands documented below (not the Tool Inventory above) run inside `{{toolRefs.bash}}`: `<tool> <positional> [--flag value]`; `<tool> --help` prints usage derived from its schema.
 Raw JSON arguments object: `-j '<json>'`, `@file`, or `-` (stdin); bad arguments exit 2 with a usage hint.
 {{toolCommandDocs}}
 {{/if}}
@@ -237,7 +237,7 @@ Generate a session name using lowercase `<type>:<primary-objective>`.
 If the message has no concrete task, output exactly `none`.
 ```
 
-`TITLE_SYSTEM.md` uses project-first config-base discovery with no ancestor walk. Foreign user bases require `enabledProviders` opt-in (or `CLAUDE_CONFIG_DIR` for Claude). When absent, OMP titles a new session from a fork of its first reply (the session's own model, on the cached prompt) with the bundled tiny-model title prompt as the fallback. The override is used for both initial automatic titles and replan-driven title refreshes, and turns the reply fork off: titles come from the tiny title model.
+`TITLE_SYSTEM.md` is looked up in `<cwd>/.omp/` first, then `~/.omp/agent/`, with no ancestor walk; `.claude/` and `.codex/` directories are not searched. When absent, OMP titles a new session from a fork of its first reply (the session's own model, on the cached prompt) with the bundled tiny-model title prompt as the fallback. The override is used for both initial automatic titles and replan-driven title refreshes, and turns the reply fork off: titles come from the tiny title model.
 
 Generated title output has an enforced normalization contract even with a custom prompt. OMP considers only the first trimmed line, strips surrounding quotes, `<title>...</title>` markers, and terminal punctuation, and treats `none` or `<title/>` as “no title yet.” A result longer than 80 characters or 12 words is rejected rather than truncated. Empty, deferred, or rejected output leaves the session unnamed, so a later eligible title attempt can name it.
 

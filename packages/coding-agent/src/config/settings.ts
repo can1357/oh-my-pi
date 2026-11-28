@@ -28,11 +28,13 @@ import {
 	isRecord,
 	logger,
 	MAIN_CONFIG_FILENAMES,
+	pathIsWithinLexical,
 	procmgr,
 } from "@oh-my-pi/pi-utils";
+import { pollFile } from "@oh-my-pi/pi-natives/file-poll";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
-import { isLightTheme } from "@oh-my-pi/pi-tui/theme/theme";
 import { JSONC, YAML } from "bun";
+import { configOverlayPaths, readConfigOverlay } from "./config-overlays";
 import { invalidate as invalidateCapabilityFsCache } from "../capability/fs";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-roles";
@@ -57,6 +59,7 @@ import {
 import "./all-settings";
 import { cfgDisabledProviders, cfgModelRoles, cfgModelRoleStorage } from "./model-settings";
 import { cfgShellPath } from "../exec/settings";
+import { isLightTheme } from "../ui/theme/service";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -159,8 +162,10 @@ type PersistedReloadMode = "strict" | "keep-last-good";
 /** Layer refreshes serialized by `Settings.#exclusive`: disk reloads and cwd re-scopes. */
 type LayerRefreshKind = PersistedReloadMode | "rescope";
 
-/** Quiet period after the last config-file event before the watcher reloads from disk. */
+/** Quiet period after the last config-file change before reloading from disk. */
 const CONFIG_WATCH_DEBOUNCE_MS = 200;
+/** Stat-poll interval for config sources while {@link Settings.startWatching} is active. */
+const CONFIG_POLL_INTERVAL_MS = 500;
 
 type ConfigOverlayReadResult = {
 	settings: RawSettings;
@@ -350,7 +355,12 @@ export type SettingsMirrorWrite =
 	| { readonly op: "setModelRole"; readonly role: string; readonly modelId: string | undefined }
 	| { readonly op: "setProjectModelRole"; readonly role: string; readonly modelId: string }
 	| { readonly op: "clearProjectModelRole"; readonly role: string }
-	| { readonly op: "overrideModelRoles"; readonly roles: ReadOnlyDict<string> };
+	| { readonly op: "overrideModelRoles"; readonly roles: ReadOnlyDict<string> }
+	| {
+			readonly op: "overrideModelRolesWhole";
+			readonly roles: ReadOnlyDict<string | null>;
+			readonly untrusted: boolean;
+	  };
 
 /** A disk or scope operation a worker mirror runs on its main-thread instance. */
 export type SettingsMirrorRefresh =
@@ -404,9 +414,8 @@ function settingsGroupOnlyPrefixes(): Readonly<Record<string, true>> {
 
 /**
  * Drop entries from capability-provided project settings whose non-object
- * value would shadow an entire settings group. `.claude/settings.json` is
- * shared with other tools, and a foreign leaf like `"tui": "fullscreen"`
- * deep-merges over omp's `tui` group, silently replacing every `tui.*`
+ * value would shadow an entire settings group. A leaf like `"tui": "fullscreen"`
+ * would deep-merge over omp's `tui` group, silently replacing every `tui.*`
  * setting for sessions rooted in that project. Values at schema leaves,
  * unknown keys, and well-formed nested objects pass through unchanged.
  */
@@ -436,8 +445,7 @@ function normalizePathPrefix(prefix: string): string {
 }
 
 function pathMatchesPrefix(cwd: string, prefix: string): boolean {
-	const relative = path.relative(normalizePathPrefix(prefix), path.resolve(cwd));
-	return relative === "" || (!!relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+	return pathIsWithinLexical(normalizePathPrefix(prefix), path.resolve(cwd));
 }
 
 /**
@@ -451,26 +459,38 @@ const PHONON_VOICE_FOR_KOKORO_PREFIX: Record<string, string> = {
 	bm_: "edwin",
 };
 
+/** Retired local speech models and the catalog model that replaced each. */
+const RETIRED_LOCAL_SPEECH_MODELS: Record<string, string> = {
+	"local/kokoro": "local/phonon-31m",
+	"local/parakeet-tdt-0.6b-v3": "local/fluid-speech-pro",
+};
+
 /**
- * Local TTS moved from Kokoro-82M to Phonon 31M: rewrite configured Kokoro
- * voice ids (`tts.localVoice`, `speech.voice`) to the Phonon voice of the same
- * accent and gender, and a `local/kokoro` speech role to `local/phonon-31m`.
- * Handles nested and quoted-dotted sources.
+ * Local speech models were replaced in place: Kokoro-82M by Phonon 31M (TTS)
+ * and Parakeet TDT 0.6B v3 by Fluid Speech Pro (dictation). Rewrite the
+ * `speech`/`dictation` roles and their fallback chains to the successors, and
+ * configured Kokoro voice ids (`tts.localVoice`, `speech.voice`) to the Phonon
+ * voice of the same accent and gender. Handles nested and quoted-dotted sources.
  */
-function migrateKokoroSpeechSettings(raw: RawSettings): void {
+function migrateRetiredSpeechSettings(raw: RawSettings): void {
 	const phononVoice = (value: unknown): string | undefined =>
 		typeof value === "string" ? PHONON_VOICE_FOR_KOKORO_PREFIX[value.slice(0, 3)] : undefined;
-	const phononRole = (value: unknown): unknown =>
-		value === "local/kokoro"
-			? "local/phonon-31m"
-			: Array.isArray(value)
-				? value.map(entry => (entry === "local/kokoro" ? "local/phonon-31m" : entry))
-				: value;
+	const successor = (value: unknown): unknown =>
+		typeof value === "string" ? (RETIRED_LOCAL_SPEECH_MODELS[value] ?? value) : value;
+	const migrateRole = (value: unknown): unknown => (Array.isArray(value) ? value.map(successor) : successor(value));
 	const leaves: Array<[root: string, leaf: string, migrate: (value: unknown) => unknown]> = [
 		["tts", "localVoice", value => phononVoice(value) ?? value],
 		["speech", "voice", value => phononVoice(value) ?? value],
-		["modelRoles", "speech", phononRole],
+		["modelRoles", "speech", migrateRole],
+		["modelRoles", "dictation", migrateRole],
 	];
+	for (const role of ["speech", "dictation"]) {
+		const retry = raw.retry;
+		const chains = isRecord(retry) ? retry.fallbackChains : raw["retry.fallbackChains"];
+		if (isRecord(chains) && role in chains) chains[role] = migrateRole(chains[role]);
+		const dotted = `retry.fallbackChains.${role}`;
+		if (dotted in raw) raw[dotted] = migrateRole(raw[dotted]);
+	}
 	for (const [root, leaf, migrate] of leaves) {
 		const rootObj = raw[root];
 		if (isRecord(rootObj) && leaf in rootObj) rootObj[leaf] = migrate(rootObj[leaf]);
@@ -740,6 +760,8 @@ function physicalTargetSegments(target: string, pathApi: typeof path = path): st
 
 export class Settings {
 	#configPath: string | null;
+	/** A writable root's loaded global layer, or a read-only root's original disk snapshot. */
+	#loadedGlobalSettings?: true | RawSettings;
 	#cwd: string;
 	#agentDir: string;
 	#storage: AgentStorageApi | null = null;
@@ -747,7 +769,7 @@ export class Settings {
 	#configFiles: string[] = [];
 	/** Global settings from config.yml/config.yaml */
 	#global: RawSettings = {};
-	/** Project settings from .claude/settings.yml etc */
+	/** Project settings from .omp/config.yml etc */
 	#project: RawSettings = {};
 	/** Last successfully loaded native .omp/config.yml contents. */
 	#projectFileSettings: RawSettings = {};
@@ -812,7 +834,15 @@ export class Settings {
 	 * source-project value. Maps role → original override value (`undefined`
 	 * when the role had no runtime override).
 	 */
-	#savedRuntimeModelRoleOverrides = new Map<string, string | undefined>();
+	#savedRuntimeModelRoleOverrides = new Map<string, string | null | undefined>();
+	/**
+	 * Runtime model-role overrides seeded by {@link overrideModelRolesWhole} from an
+	 * untrusted source (a project config's preset): they route this process's session
+	 * but are excluded from {@link grantAuthority}, so an untrusted preset never widens
+	 * operator-owned model grants. Any later write through a role mutator removes the
+	 * role from this set, re-owning it.
+	 */
+	#untrustedRuntimeModelRoles = new Set<string>();
 
 	/** Legacy `lastChangelogVersion` captured from config.yml during migration (now a marker file). */
 	#legacyLastChangelogVersion?: string;
@@ -826,9 +856,9 @@ export class Settings {
 	#activeReload?: { kind: LayerRefreshKind; promise: Promise<void> };
 	/** Whether {@link startWatching} is active. */
 	#watchingFiles = false;
-	/** Directory watchers for config sources, keyed by directory, with the basenames that trigger a reload. */
-	#fileWatchers = new Map<string, { watcher: fs.FSWatcher; names: Set<string> }>();
-	/** Debounce timer for watcher-triggered reloads. */
+	/** Disposers of the stat polls on config sources, keyed by resolved path. */
+	#configPolls = new Map<string, () => void>();
+	/** Debounce timer for poll-triggered reloads. */
 	#watchReloadTimer?: NodeJS.Timeout;
 
 	/** Whether to persist changes */
@@ -851,9 +881,7 @@ export class Settings {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
 		this.#agentDir = path.normalize(options.agentDir ?? getAgentDir());
 		this.#configPath = options.inMemory ? null : path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]);
-		const configFiles = process.env.PI_CONFIG_FILES?.split(path.delimiter).filter(Boolean) ?? [];
-		if (options.configFiles) configFiles.push(...options.configFiles);
-		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
+		this.#configFiles = configOverlayPaths(this.#cwd, options.configFiles);
 		this.#persist = !options.inMemory && options.readOnly !== true;
 		if (!projection) liveSettingsInstances.add(new WeakRef(this));
 		if (options.overrides) this.#overrides = this.#overrideLayer(options.overrides);
@@ -966,7 +994,20 @@ export class Settings {
 
 	/** Global, `--config` and runtime layers merged over an overlay parent's, skipping every project layer. */
 	#operatorLayers(): RawSettings {
-		const own = this.#mergeOwnLayers({ ...this.#ownLayers(), project: {} });
+		const layers = { ...this.#ownLayers(), project: {} };
+		if (this.#untrustedRuntimeModelRoles.size > 0) {
+			const roles = getByPath(this.#overrides, ["modelRoles"]);
+			if (isRecord(roles)) {
+				// A project preset's values route the session but never grant: drop them so the
+				// operator's own layers resurface in the authority view.
+				const operatorRoles: Record<string, unknown> = {};
+				for (const [role, value] of Object.entries(roles)) {
+					if (!this.#untrustedRuntimeModelRoles.has(role)) operatorRoles[role] = value;
+				}
+				layers.overrides = { ...this.#overrides, modelRoles: operatorRoles };
+			}
+		}
+		const own = this.#mergeOwnLayers(layers);
 		return this.#parent ? this.#deepMerge(this.#parent.#operatorLayers(), own) : own;
 	}
 
@@ -1182,6 +1223,16 @@ export class Settings {
 	}
 
 	/**
+	 * Raw value of `setting` beneath this instance's own runtime overrides: the `--config` overlay,
+	 * project and global layers over an overlay parent's view. An override deep-merges over a record
+	 * here, so `cfg://` session writes check it before removing record entries. `null` counts as unset.
+	 */
+	underlyingValue(setting: AnySetting): unknown {
+		const layers = this.#mergeOwnLayers({ ...this.#ownLayers(), overrides: {} });
+		return configuredValue(this.#mergeOverParent(layers), setting, this.#cwd);
+	}
+
+	/**
 	 * Whether `setting` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.
 	 * A configured `null` counts as unset, like in {@link rawValue}.
@@ -1369,6 +1420,7 @@ export class Settings {
 		if (this.#mirror) return this.#forward(this.#mirror, { op: "clearOverrideValue", id: setting.id });
 		if (setting === cfgModelRoles) {
 			this.#savedRuntimeModelRoleOverrides.clear();
+			this.#untrustedRuntimeModelRoles.clear();
 		}
 		this.#softPins.delete(setting);
 		if (getByPath(this.#overrides, setting.segments) === undefined) return;
@@ -1437,19 +1489,20 @@ export class Settings {
 	}
 
 	/**
-	 * Apply on-disk edits live: watch the directories holding config.yml, the
-	 * project settings files, and `--config` overlays, and run a debounced
-	 * keep-last-good reload (a file that fails to parse or validate keeps its
-	 * layer's last good values; a single value this build cannot read keeps its
-	 * last good value). Arming a watch also schedules one reload, so
-	 * edits that landed before it went live are not lost. Only the persisting
-	 * process-global instance watches; other instances ignore the call. Stopped
-	 * by {@link stopWatching} / {@link cancelPendingSaves}.
+	 * Apply on-disk edits live: stat-poll config.yml, the project settings
+	 * files, and `--config` overlays, and run a debounced keep-last-good reload
+	 * (a file that fails to parse or validate keeps its layer's last good
+	 * values; a single value this build cannot read keeps its last good value).
+	 * Each poll stats its path through every symlink, so atomic saves and
+	 * retargeted links surface like edits. Arming a poll also schedules one
+	 * reload, so edits that landed before it went live are not lost. Only the
+	 * persisting process-global instance watches; other instances ignore the
+	 * call. Stopped by {@link stopWatching} / {@link cancelPendingSaves}.
 	 */
 	startWatching(): void {
 		if (this.#watchingFiles || !this.#persist || this.#savesCancelled || globalInstance !== this) return;
 		this.#watchingFiles = true;
-		this.#syncFileWatchers();
+		this.#syncConfigPolls();
 	}
 
 	/** Stop config-file watching started by {@link startWatching}; idempotent. */
@@ -1457,116 +1510,45 @@ export class Settings {
 		this.#watchingFiles = false;
 		clearTimeout(this.#watchReloadTimer);
 		this.#watchReloadTimer = undefined;
-		for (const { watcher } of this.#fileWatchers.values()) watcher.close();
-		this.#fileWatchers.clear();
+		for (const stop of this.#configPolls.values()) stop();
+		this.#configPolls.clear();
 	}
 
-	/** Directory → basenames whose events should trigger a reload, for every current config source. */
-	#configWatchTargets(): Map<string, Set<string>> {
-		const targets = new Map<string, Set<string>>();
-		const addTarget = (dir: string, name: string) => {
-			const names = targets.get(dir);
-			if (names) names.add(name);
-			else targets.set(dir, new Set([name]));
-		};
-		const addFile = (file: string) => {
-			// Walk physically so every symlink hop (including profile/ancestor
-			// directory links) is observed, not just the logical file and final
-			// realpath. Physical directory keys also re-arm a watch after retargeting.
-			const absolute = path.resolve(file);
-			let dir = path.parse(absolute).root;
-			let segments = physicalTargetSegments(absolute);
-			let hops = 0;
-			while (segments.length > 0) {
-				const segment = segments.shift()!;
-				if (segment === "" || segment === ".") continue;
-				if (segment === "..") {
-					dir = path.dirname(dir);
-					continue;
-				}
-				const current = path.join(dir, segment);
-				if (segments.length === 0) addTarget(dir, segment);
-				try {
-					if (fs.lstatSync(current).isSymbolicLink()) {
-						addTarget(dir, segment);
-						if (++hops > MAX_SYMLINK_HOPS) return;
-						const target = fs.readlinkSync(current);
-						if (path.isAbsolute(target)) dir = path.parse(target).root;
-						segments = [...physicalTargetSegments(target), ...segments];
-					} else {
-						dir = current;
-					}
-				} catch {
-					// Watch the nearest existing parent, even when several
-					// directories or a symlink's referent are missing.
-					addTarget(dir, segment);
-					return;
-				}
-			}
-		};
-		for (const filename of MAIN_CONFIG_FILENAMES) addFile(path.join(this.#agentDir, filename));
+	/** Every current config source, resolved; missing ones are polled too, so their creation is seen. */
+	#configWatchPaths(): Set<string> {
 		const projectCwd = path.resolve(this.#cwd);
 		const projectConfigDir = getProjectAgentDir(projectCwd);
-		addFile(path.join(projectConfigDir, "config.yml"));
-		addFile(path.join(projectConfigDir, "settings.json"));
-		addFile(path.join(projectCwd, ".claude", "settings.json"));
-		for (const file of this.#projectSourcePaths) addFile(file);
-		for (const file of this.#configFiles) addFile(file);
-		return targets;
+		const files = [
+			...MAIN_CONFIG_FILENAMES.map(filename => path.join(this.#agentDir, filename)),
+			path.join(projectConfigDir, "config.yml"),
+			path.join(projectConfigDir, "settings.json"),
+			...this.#projectSourcePaths,
+			...this.#configFiles,
+		];
+		return new Set(files.map(file => path.resolve(file)));
 	}
 
-	/**
-	 * Reconcile directory watchers with the current config sources. Watching
-	 * directories (not files) keeps atomic rename-over writes observable.
-	 */
-	#syncFileWatchers(): void {
+	/** Reconcile the stat polls with the current config sources. */
+	#syncConfigPolls(): void {
 		if (!this.#watchingFiles) return;
-		const targets = this.#configWatchTargets();
-		let armed = false;
-		for (const [dir, entry] of this.#fileWatchers) {
-			if (targets.has(dir)) continue;
-			entry.watcher.close();
-			this.#fileWatchers.delete(dir);
+		const files = this.#configWatchPaths();
+		for (const [file, stop] of this.#configPolls) {
+			if (files.has(file)) continue;
+			stop();
+			this.#configPolls.delete(file);
 		}
-		for (const [dir, names] of targets) {
-			const existing = this.#fileWatchers.get(dir);
-			if (existing) {
-				// A newly followed target can share a directory with the old one.
-				// Events for its name were filtered out while the reload was reading
-				// the files, so reconcile once even though no new watch was opened.
-				for (const name of names) {
-					if (!existing.names.has(name)) {
-						armed = true;
-						break;
-					}
-				}
-				existing.names = names;
-				continue;
-			}
-			let watcher: fs.FSWatcher;
-			try {
-				watcher = fs.watch(dir, { persistent: false }, (_event, filename) => {
-					const entry = this.#fileWatchers.get(dir);
-					if (!entry || entry.watcher !== watcher) return;
-					if (filename && !entry.names.has(path.basename(filename.toString()))) return;
-					this.#scheduleWatchReload();
-				});
-			} catch (error) {
-				if (!isEnoent(error))
-					logger.debug("Settings: cannot watch config directory", { dir, error: String(error) });
-				continue;
-			}
-			watcher.on("error", error => {
-				logger.debug("Settings: config directory watcher failed", { dir, error: String(error) });
-				watcher.close();
-				if (this.#fileWatchers.get(dir)?.watcher === watcher) this.#fileWatchers.delete(dir);
-			});
-			this.#fileWatchers.set(dir, { watcher, names });
+		let armed = false;
+		for (const file of files) {
+			if (this.#configPolls.has(file)) continue;
+			this.#configPolls.set(
+				file,
+				pollFile(file, () => this.#scheduleWatchReload(), CONFIG_POLL_INTERVAL_MS),
+			);
 			armed = true;
 		}
-		// The sources were last read before a watch or name was added. Bun also
-		// arms macOS FSEvents asynchronously, so a write in between may raise no
-		// event. Re-read once; the next sync adds nothing new, so it settles.
+		// The sources were last read before a new poll took its first stat,
+		// which is its baseline: a write in between raises no change. Re-read
+		// once; the next sync adds nothing new, so it settles.
 		if (armed) this.#scheduleWatchReload();
 	}
 
@@ -1587,8 +1569,8 @@ export class Settings {
 		} catch (error) {
 			logger.warn("Settings: failed to apply on-disk config change", { error: String(error) });
 		}
-		// Sources may have appeared, moved, or vanished; re-target the watchers.
-		this.#syncFileWatchers();
+		// Sources may have appeared, moved, or vanished; re-target the polls.
+		this.#syncConfigPolls();
 	}
 
 	/**
@@ -1640,6 +1622,7 @@ export class Settings {
 			});
 			cloned.#storage = this.#storage;
 			cloned.#configPath = this.#configPath;
+			cloned.#loadedGlobalSettings = this.#loadedGlobalSettings;
 			cloned.#project = this.#persist
 				? cloned.#adoptProjectRead(await cloned.#readProjectSettings(true), {
 						global: this.#global,
@@ -1658,6 +1641,7 @@ export class Settings {
 		const layers = { ...cloned.#ownLayers(), overrides: this.#buildOriginalOverrides() };
 		for (const setting of cloned.#settlePins(layers)) cloned.#softPins.delete(setting);
 		cloned.#overrides = layers.overrides;
+		cloned.#untrustedRuntimeModelRoles = new Set(this.#untrustedRuntimeModelRoles);
 		cloned.#rebuildMerged();
 		inheritWarnings(cloned, this);
 		cloned.#validateAll();
@@ -1853,7 +1837,7 @@ export class Settings {
 
 	/**
 	 * Re-scope this instance to a new working directory *in place*: reload the
-	 * project layer (`.claude/settings.yml` etc.) from `cwd`, re-resolve
+	 * project layer (`.omp/config.yml` etc.) from `cwd`, re-resolve
 	 * path-scoped settings against it, and notify listeners (and process-wide
 	 * effects: theme, symbols, …) of every value the new scope changes. Global
 	 * settings and runtime overrides are preserved.
@@ -1905,7 +1889,7 @@ export class Settings {
 			}
 			this.#rebuildMerged();
 			this.#fireChangesSince(previous);
-			this.#syncFileWatchers();
+			this.#syncConfigPolls();
 		} catch (error) {
 			settled.reject(error);
 			throw error;
@@ -1961,8 +1945,18 @@ export class Settings {
 	}
 
 	/**
-	 * Raw project settings layer (`.claude/settings.yml`, `.omp/config.yml`,
-	 * etc.), deep-cloned. Companion to {@link getGlobalSettings} for the legacy
+	 * This root's already-loaded main config, excluding project, overlay and runtime values.
+	 * `undefined` means it never loaded global settings; `{}` is a loaded but empty layer.
+	 * A read-only root can have local writes; those are not part of its disk snapshot.
+	 */
+	getPersistedGlobalSettings(): RawSettings | undefined {
+		const loaded = this.#loadedGlobalSettings;
+		return loaded === undefined ? undefined : structuredClone(loaded === true ? this.#global : loaded);
+	}
+
+	/**
+	 * Raw project settings layer (`.omp/config.yml`, `.omp/settings.json`),
+	 * deep-cloned. Companion to {@link getGlobalSettings} for the legacy
 	 * pi `SettingsManager` shim's `getProjectSettings()`; an {@link overlay}
 	 * likewise reports its parent's layer under its own.
 	 */
@@ -1998,9 +1992,9 @@ export class Settings {
 	/**
 	 * Provenance of the effective `extensions` array for extension-root
 	 * sub-discovery. `"project"` only when a project settings provider owns it
-	 * (any of `.omp/config.yml`, `.omp/settings.json`, `.claude/settings.json`,
-	 * … — all merged into the project layer) and no higher user-level layer (a
-	 * `--config` overlay or a runtime override) replaces it; otherwise `"user"`.
+	 * (`.omp/config.yml` or `.omp/settings.json`, both merged into the project
+	 * layer) and no higher user-level layer (a `--config` overlay or a runtime
+	 * override) replaces it; otherwise `"user"`.
 	 * Callers pass this into {@link EffectiveExtensionRoots.configuredLevel} so
 	 * discovery labels roots by the authority that produced them rather than
 	 * re-deriving provenance from a partial disk scan. An {@link overlay} whose
@@ -2042,22 +2036,40 @@ export class Settings {
 	 * capture invalidation independently of the whole-map replacement
 	 * semantics that `override("modelRoles", …)` carries.
 	 */
-	#setRuntimeModelRoleOverrides(next: Record<string, string>): void {
+	#setRuntimeModelRoleOverrides(next: Record<string, string | null>): void {
 		const prev = cfgModelRoles.get(this);
 		setByPath(this.#overrides, ["modelRoles"], next);
 		this.#rebuildMerged();
 		this.#fireIfChanged(cfgModelRoles, prev);
 	}
 
+	/** Runtime model-role override record for whole-map edits, keeping `null` tombstones. */
+	#runtimeModelRoleOverridesForEdit(): Record<string, string | null> {
+		const value = getByPath(this.#overrides, ["modelRoles"]);
+		const roles: Record<string, string | null> = {};
+		if (!isRecord(value)) return roles;
+		for (const role in value) {
+			if (!Object.hasOwn(value, role)) continue;
+			if (value[role] === null) {
+				roles[role] = null;
+				continue;
+			}
+			const modelId = modelRoleValueFromUnknown(value[role]);
+			if (modelId !== undefined) roles[role] = modelId;
+		}
+		return roles;
+	}
+
 	#updateRuntimeModelRoleOverride(role: ModelRole | string, modelId: string | undefined): void {
 		const runtimeOverrides = getByPath(this.#overrides, ["modelRoles"]);
 		if (!isRecord(runtimeOverrides) || !Object.hasOwn(runtimeOverrides, role)) return;
 
-		const nextRuntimeOverride = this.#modelRolesFromLayer(this.#overrides);
+		const nextRuntimeOverride = this.#runtimeModelRoleOverridesForEdit();
 		if (modelId === undefined) {
 			delete nextRuntimeOverride[role];
 		} else {
 			nextRuntimeOverride[role] = modelId;
+			this.#untrustedRuntimeModelRoles.delete(role);
 		}
 		this.#setRuntimeModelRoleOverrides(nextRuntimeOverride);
 	}
@@ -2072,7 +2084,7 @@ export class Settings {
 		if (this.#savedRuntimeModelRoleOverrides.has(role)) return;
 		const runtimeOverrides = getByPath(this.#overrides, ["modelRoles"]);
 		if (!isRecord(runtimeOverrides) || !Object.hasOwn(runtimeOverrides, role)) return;
-		this.#savedRuntimeModelRoleOverrides.set(role, this.#modelRolesFromLayer(this.#overrides)[role]);
+		this.#savedRuntimeModelRoleOverrides.set(role, this.#runtimeModelRoleOverridesForEdit()[role]);
 	}
 
 	/**
@@ -2334,14 +2346,41 @@ export class Settings {
 	 */
 	overrideModelRoles(roles: ReadOnlyDict<string>): void {
 		if (this.#mirror) return this.#forward(this.#mirror, { op: "overrideModelRoles", roles: { ...roles } });
-		const next = this.#modelRolesFromLayer(this.#overrides);
+		const next = this.#runtimeModelRoleOverridesForEdit();
 		for (const [role, modelId] of Object.entries(roles)) {
 			if (modelId) {
 				next[role] = modelId;
 				this.#savedRuntimeModelRoleOverrides.delete(role);
+				this.#untrustedRuntimeModelRoles.delete(role);
 			}
 		}
 		this.#setRuntimeModelRoleOverrides(next);
+	}
+
+	/**
+	 * Replace the runtime model-role override record wholesale (the `--preset`
+	 * launch path). `null` tombstones unset the roles the map omits, and later
+	 * per-role {@link overrideModelRoles} writes keep those tombstones, so the
+	 * roles stay unset for the run. With `untrusted` (a project config's preset)
+	 * the values route this process's session but stay out of
+	 * {@link grantAuthority}, so an untrusted preset never widens
+	 * operator-owned model grants.
+	 */
+	overrideModelRolesWhole(roles: ReadOnlyDict<string | null>, options: { untrusted?: boolean } = {}): void {
+		if (this.#mirror) {
+			return this.#forward(this.#mirror, {
+				op: "overrideModelRolesWhole",
+				roles: { ...roles },
+				untrusted: options.untrusted === true,
+			});
+		}
+		// Whole-map replacement supersedes any per-role capture, like `writeValue` on the override layer.
+		this.#savedRuntimeModelRoleOverrides.clear();
+		this.#untrustedRuntimeModelRoles = new Set(options.untrusted ? Object.keys(roles) : []);
+		const prev = cfgModelRoles.get(this);
+		setByPath(this.#overrides, ["modelRoles"], { ...roles });
+		this.#rebuildMerged();
+		this.#fireIfChanged(cfgModelRoles, prev);
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -2379,6 +2418,7 @@ export class Settings {
 			this.#global = await this.#loadYaml(this.#configPath!);
 		}
 		await this.#seedLastChangelogVersionMarker();
+		this.#loadedGlobalSettings = true;
 	}
 
 	async #loadReadOnly(): Promise<Settings> {
@@ -2391,6 +2431,7 @@ export class Settings {
 		if (globalResult.value) {
 			this.#global = globalResult.value;
 		}
+		if (this.#configPath !== null) this.#loadedGlobalSettings = structuredClone(this.#global);
 
 		this.#configOverlay = await this.#loadConfigOverlays();
 		this.#project = this.#adoptProjectRead(projectResult.value);
@@ -2841,7 +2882,6 @@ export class Settings {
 		const projectConfigPath = path.join(projectConfigDir, "config.yml");
 		invalidateCapabilityFsCache(projectConfigPath);
 		invalidateCapabilityFsCache(path.join(projectConfigDir, "settings.json"));
-		invalidateCapabilityFsCache(path.join(discoveryCwd, ".claude", "settings.json"));
 		for (const sourcePath of this.#projectSourcePaths) invalidateCapabilityFsCache(sourcePath);
 		let projectItems: SettingsCapabilityItem[] = [];
 		let rejectedWarnings: string[] | undefined;
@@ -2987,7 +3027,7 @@ export class Settings {
 		let shellPathSource: string | undefined;
 		let settings: RawSettings = {};
 		for (const filePath of this.#configFiles) {
-			const overlay = await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion);
+			const overlay = this.#migrateRawSettings(await readConfigOverlay(filePath), captureLegacyChangelogVersion);
 			settings = this.#deepMerge(settings, overlay, { arrays: "combine" });
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
@@ -2998,35 +3038,6 @@ export class Settings {
 		const result = await this.#readConfigOverlays();
 		this.#overlayShellPathSource = result.shellPathSource;
 		return result.settings;
-	}
-
-	/**
-	 * Strict loader for explicit `--config` overlays: unlike `#loadYaml`,
-	 * missing or malformed files are hard errors so a typo'd path cannot
-	 * silently fall back to the persistent settings.
-	 */
-	async #loadOverlayYaml(filePath: string, captureLegacyChangelogVersion = true): Promise<RawSettings> {
-		let content: string;
-		try {
-			content = await Bun.file(filePath).text();
-		} catch (error) {
-			throw new Error(
-				isEnoent(error)
-					? `Config overlay not found: ${filePath}`
-					: `Failed to read config overlay ${filePath}: ${String(error)}`,
-			);
-		}
-		let parsed: unknown;
-		try {
-			parsed = YAML.parse(content);
-		} catch (error) {
-			throw new Error(`Failed to parse config overlay ${filePath}: ${String(error)}`);
-		}
-		if (parsed === null || parsed === undefined) return {};
-		if (typeof parsed !== "object" || Array.isArray(parsed)) {
-			throw new Error(`Config overlay must be a YAML mapping: ${filePath}`);
-		}
-		return this.#migrateRawSettings(parsed as RawSettings, captureLegacyChangelogVersion);
 	}
 
 	async #migrateFromLegacy(): Promise<void> {
@@ -3349,6 +3360,26 @@ export class Settings {
 		}
 		if (typeof raw["snapcompact.systemPrompt"] === "boolean") {
 			raw["snapcompact.systemPrompt"] = raw["snapcompact.systemPrompt"] ? "all" : "none";
+		}
+
+		// display.hideToolActivity (boolean) -> display.toolActivity (detailed |
+		// concise | hidden): true hid tool calls, false drew full cards. Nested
+		// values win over quoted-dotted ones; an explicit new mode wins over both.
+		const displayObj = isRecord(raw.display) ? raw.display : undefined;
+		const legacyHideToolActivity =
+			typeof displayObj?.hideToolActivity === "boolean"
+				? displayObj.hideToolActivity
+				: typeof raw["display.hideToolActivity"] === "boolean"
+					? raw["display.hideToolActivity"]
+					: undefined;
+		if (displayObj) delete displayObj.hideToolActivity;
+		delete raw["display.hideToolActivity"];
+		if (
+			legacyHideToolActivity !== undefined &&
+			displayObj?.toolActivity === undefined &&
+			raw["display.toolActivity"] === undefined
+		) {
+			raw.display = { ...displayObj, toolActivity: legacyHideToolActivity ? "hidden" : "detailed" };
 		}
 
 		// inlineToolDescriptors: boolean -> enum (auto | on | off). The old
@@ -3737,7 +3768,7 @@ export class Settings {
 			value => typeof value === "number" && Number.isFinite(value),
 		);
 
-		migrateKokoroSpeechSettings(raw);
+		migrateRetiredSpeechSettings(raw);
 
 		// BM25 tool discovery removal: tools.discoveryMode / tools.essentialOverride /
 		// mcp.discoveryMode / mcp.discoveryDefaultServers are gone with no
@@ -3812,7 +3843,7 @@ export class Settings {
 				const selector = bundledSelector(provider, model => model.webSearchModel);
 				return selector ? [selector] : [];
 			};
-			const geminiSelectors = (model: string): string[] => [`google-antigravity/${model}`, `google/${model}`];
+			const geminiSelectors = (model: string): string[] => [`google/${model}`];
 			const webSelectors = (provider: string, geminiModel: string): string[] => {
 				switch (provider) {
 					case "gemini":
@@ -3876,7 +3907,6 @@ export class Settings {
 			const legacyImageProviders: Record<string, string> = {
 				openai: "openai",
 				"openai-codex": "openai-codex",
-				antigravity: "google-antigravity",
 				xai: "xai",
 				gemini: "google",
 				deepinfra: "deepinfra",

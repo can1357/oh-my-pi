@@ -17,20 +17,17 @@ import type { CustomTool } from "../../../capability/tool";
 import type { EffectiveExtensionRoots, SourceMeta } from "../../../capability/types";
 import {
 	disableProvider,
-	disableUserSource,
 	enableProvider,
-	enableUserSource,
 	getProviderInfo,
 	isProviderEnabled,
-	isUserSourceEnabled,
 	loadCapability,
 } from "../../../discovery";
 import { createSourceMeta, getExtensionNameFromPath } from "../../../discovery/helpers";
 import { isExtensionFile, listPackageExtensionModules } from "../../../extensibility/extensions/loader";
 import { readDisabledServers, readEnabledServers } from "../../../mcp/config-writer";
 import type { MCPDroppedServer } from "../../../mcp/transforms";
-import { commandPreview } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
-import { inferMcpTransport } from "@oh-my-pi/pi-tui/overlays/extensions/mcp-runtime";
+import { commandPreview } from "../../../extensibility/inventory/inspector-model";
+import { inferMcpTransport } from "../../../extensibility/inventory/mcp-runtime";
 import {
 	type DisabledReason,
 	type Extension,
@@ -38,18 +35,11 @@ import {
 	type ExtensionState,
 	makeExtensionId,
 	sourceFromMeta,
-} from "@oh-my-pi/pi-tui/overlays/extensions/types";
+} from "../../../extensibility/inventory/types";
 
 /**
- * Provider-level gate for one discovered item: the whole-provider switch, plus
- * the `~/` opt-in for user-level items of foreign tools. Item-level disable and
- * shadowing take precedence and are decided by the caller.
- *
- * Mirrors the loader's foreign gate (`allowedRoots` / `isSourceEnabled`,
- * #10666/#10743): a user-scope `claude-plugins` item whose `origin` is not the
- * foreign `~/.claude` tree is an omp-native marketplace root under
- * `~/.omp/plugins` and loads without the opt-in — so the dashboard must render
- * it active, not a phantom `user-opt-in` disabled (#12776).
+ * State of one discovered item: item-level disable and shadowing first, then the
+ * whole-provider switch.
  */
 function resolveState(
 	source: SourceMeta,
@@ -59,12 +49,6 @@ function resolveState(
 	if (isDisabled) return { state: "disabled", disabledReason: "item-disabled" };
 	if (isShadowed) return { state: "shadowed", disabledReason: "shadowed" };
 	if (!isProviderEnabled(source.provider)) return { state: "disabled", disabledReason: "provider-disabled" };
-	if (source.provider === "claude-plugins" && source.origin !== undefined && source.origin !== "claude") {
-		return { state: "active" };
-	}
-	if (source.level === "user" && !isUserSourceEnabled(source.provider)) {
-		return { state: "disabled", disabledReason: "user-opt-in" };
-	}
 	return { state: "active" };
 }
 
@@ -146,7 +130,7 @@ export async function loadAllExtensions(
 			getDescription?: (item: T) => string | undefined;
 			getTrigger?: (item: T) => string | undefined;
 			getShadowedBy?: (item: T) => string | undefined;
-			/** Skip provider/user-source gates for items only `disabledExtensions` controls. */
+			/** Skip the provider gate for items only `disabledExtensions` controls. */
 			itemGateOnly?: boolean;
 		},
 	): void {
@@ -388,16 +372,4 @@ export function toggleProvider(providerId: string): boolean {
 		enableProvider(providerId);
 		return true;
 	}
-}
-
-/**
- * Toggle a foreign provider's `~/` config opt-in.
- */
-export function toggleUserSource(providerId: string): boolean {
-	if (isUserSourceEnabled(providerId)) {
-		disableUserSource(providerId);
-		return false;
-	}
-	enableUserSource(providerId);
-	return true;
 }

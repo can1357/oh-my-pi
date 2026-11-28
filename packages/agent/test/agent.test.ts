@@ -19,9 +19,12 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core/types";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { createAssistantMessage, createUserMessage } from "./helpers";
 
 describe("Agent", () => {
@@ -1611,6 +1614,48 @@ describe("Agent", () => {
 		]);
 	});
 
+	it("lets a running tool detach before a detaching abort, even in wait mode", async () => {
+		// Interrupt-and-send must background a running bash/eval job, not kill it:
+		// the tool sees the cooperative steering signal before the abort lands.
+		const schema = type({});
+		const started = Promise.withResolvers<void>();
+		let steeringSignal: AbortSignal | undefined;
+		const work: AgentTool<typeof schema, Record<string, never>> = {
+			name: "work",
+			label: "Work",
+			description: "Foreground work that backgrounds itself on steering",
+			parameters: schema,
+			async execute(_toolCallId, _params, signal) {
+				const outcome = Promise.withResolvers<string>();
+				steeringSignal?.addEventListener("abort", () => outcome.resolve("detached"), { once: true });
+				signal?.addEventListener("abort", () => outcome.resolve("killed"), { once: true });
+				started.resolve();
+				return { content: [{ type: "text", text: await outcome.promise }], details: {} };
+			},
+		};
+		const mock = createMockModel({
+			responses: [{ content: [{ type: "toolCall", id: "call-1", name: "work", arguments: {} }] }],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [work], messages: [] },
+			interruptMode: "wait",
+			streamFn: mock.stream,
+			getToolContext: toolCall => {
+				steeringSignal = toolCall?.steeringSignal;
+				return {};
+			},
+		});
+
+		const running = agent.prompt("start");
+		await started.promise;
+		agent.abort("Interrupted by user", { detachTools: true });
+		await running;
+
+		const result = agent.state.messages.find(message => message.role === "toolResult");
+		expect(result?.isError).toBe(false);
+		expect(result?.content).toEqual([{ type: "text", text: "detached" }]);
+	});
+
 	it("keeps the reserved result when the transformer rejects", async () => {
 		// `cursorOnToolResult` is a supported option returning a Promise, and the
 		// provider dispatches decoded messages with `void handleServerMessage(...)`.
@@ -2096,6 +2141,68 @@ describe("Agent", () => {
 
 		expect(mock.calls[0]?.options?.sessionId).toBe("provider-lineage");
 		expect(mock.calls[0]?.options?.promptCacheKey).toBe("parent-cache");
+	});
+
+	it.each(["gpt-5.6", "gpt-6-sol", "gpt-6-luna"])("keeps explicit prompt caching opt-in for %s", async modelId => {
+		const model = getBundledModel("openai", modelId);
+		if (!model) throw new Error(`Expected bundled ${modelId} model`);
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+		const agent = new Agent({ initialState: { model, messages: [] }, streamFn: mock.stream });
+
+		await agent.prompt("run");
+
+		expect(mock.calls[0]?.options?.promptCache).toBeUndefined();
+	});
+
+	it("preserves a caller-supplied prompt-cache policy", async () => {
+		const model = getBundledModel("openai", "gpt-5.6");
+		if (!model) throw new Error("Expected bundled GPT-5.6 model");
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+		const config = {
+			model,
+			convertToLlm: (messages: AgentMessage[]) =>
+				messages.filter(
+					message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+				) as Message[],
+			promptCache: { mode: "explicit" as const, breakpoint: "none" as const },
+		};
+
+		await agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: [], messages: [] },
+			config,
+			undefined,
+			mock.stream,
+		).result();
+
+		expect(mock.calls[0]?.options?.promptCache).toEqual({ mode: "explicit", breakpoint: "none" });
+	});
+
+	it("keeps models without the declared cache capability markerless", async () => {
+		const capableModel = getBundledModel("openai", "gpt-5.6");
+		if (!capableModel) throw new Error("Expected bundled GPT-5.6 model");
+		const model = structuredClone(capableModel);
+		if (!model.compat || !("supportsPromptCacheBreakpoints" in model.compat)) {
+			throw new Error("Expected OpenAI prompt-cache capability metadata");
+		}
+		model.compat.supportsPromptCacheBreakpoints = false;
+		const mock = createMockModel({ responses: [{ content: ["ok"] }] });
+
+		await agentLoop(
+			[createUserMessage("run")],
+			{ systemPrompt: [], messages: [] },
+			{
+				model,
+				convertToLlm: (messages: AgentMessage[]) =>
+					messages.filter(
+						message => message.role === "user" || message.role === "assistant" || message.role === "toolResult",
+					) as Message[],
+			},
+			undefined,
+			mock.stream,
+		).result();
+
+		expect(mock.calls[0]?.options?.promptCache).toBeUndefined();
 	});
 
 	it("forwards the live cwd from cwdResolver to the stream, overriding the static cwd", async () => {

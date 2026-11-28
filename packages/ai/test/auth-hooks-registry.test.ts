@@ -10,6 +10,7 @@ const TABLE_FOR_KIND: Record<string, keyof typeof HOOKS> = {
 	login: "login",
 	refresh: "refresh",
 	"after-exchange": "afterExchange",
+	"sign-out": "signOut",
 };
 
 describe("auth rules ↔ hook registry", () => {
@@ -40,7 +41,7 @@ describe("auth rules ↔ hook registry", () => {
 
 	test("every lazily loaded hook module resolves", async () => {
 		const failures: string[] = [];
-		for (const table of ["headers", "value", "login", "refresh", "afterExchange"] as const) {
+		for (const table of ["headers", "value", "login", "refresh", "afterExchange", "signOut"] as const) {
 			for (const name in HOOKS[table]) {
 				try {
 					const hook = await HOOKS[table][name]();

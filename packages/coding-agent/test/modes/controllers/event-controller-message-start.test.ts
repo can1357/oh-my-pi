@@ -1,13 +1,23 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, UserMessage } from "@oh-my-pi/pi-ai";
-import { ToolExecutionComponent, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { recapBlock } from "../../../src/modes/controllers/event-blocks";
+import { initTheme } from "../../../src/ui/theme/service";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { isSettled } from "@oh-my-pi/pi-tui";
+import type { PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
+import { createModeTerminal } from "../../helpers/mode-terminal";
+import { blockText } from "../../helpers/transcript-text";
 
 beforeAll(() => {
 	initTheme();
@@ -28,17 +38,7 @@ function createContext(options: {
 	locallySubmittedSignatures?: string[];
 	pendingImages?: ImageContent[];
 }) {
-	let currentEditorText = options.editorText;
-	const setText = vi.fn((text: string) => {
-		currentEditorText = text;
-	});
-	const editor = {
-		setText,
-		getText: () => currentEditorText,
-		pendingImages: [...(options.pendingImages ?? [])],
-	};
 	const ctx = createInteractiveModeContext({
-		editor,
 		optimisticUserMessageSignature: options.optimisticSignature,
 		locallySubmittedUserSignatures: new Set<string>(options.locallySubmittedSignatures ?? []),
 	});
@@ -50,6 +50,18 @@ function createContext(options: {
 	});
 	ctx.clearOptimisticUserMessage = clearOptimisticUserMessage;
 	ctx.replaceOptimisticUserMessage = replaceOptimisticUserMessage;
+	const composer = ctx.composer;
+	composer.setText(options.editorText);
+	for (const image of options.pendingImages ?? []) {
+		composer.pendingImages.push({ type: "image", data: image.data, mimeType: image.mimeType });
+	}
+	const setText = vi.spyOn(composer, "setText");
+	const editor = {
+		getText: () => composer.text(),
+		get pendingImages() {
+			return composer.pendingImages.map(image => ({ type: "image", data: image.data, mimeType: image.mimeType }));
+		},
+	};
 	return {
 		ctx,
 		editor,
@@ -165,6 +177,134 @@ describe("EventController message_start (user role)", () => {
 	});
 });
 
+/** The text of every user message the `addMessageToChat` calls received, in call order. */
+function renderedUserTexts(calls: ReadonlyArray<readonly [AgentMessage, ...unknown[]]>): string[] {
+	return calls.map(([message]) => {
+		if (message.role !== "user") throw new Error(`Expected user message, got ${message.role}`);
+		return typeof message.content === "string"
+			? message.content
+			: message.content
+					.filter(content => content.type === "text")
+					.map(content => content.text)
+					.join("\n");
+	});
+}
+
+describe("EventController message_start (optimistic submission on InteractiveMode)", () => {
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
+	let mode: InteractiveMode;
+	let session: AgentSession;
+	let tempDir: TempDir;
+
+	beforeAll(async () => {
+		resetSettingsForTest();
+		tempDir = TempDir.createSync("@pi-message-start-optimistic-");
+		await Settings.init({ inMemory: true, cwd: tempDir.path() });
+		authStorage = createInMemoryAuthStorage();
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	beforeEach(() => {
+		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
+			settings: Settings.isolated(),
+			modelRegistry,
+		});
+		mode = new InteractiveMode(
+			session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
+		mode.isInitialized = true;
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		mode?.stop();
+		await session?.dispose();
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		tempDir.removeSync();
+		resetSettingsForTest();
+	});
+
+	it("replaces raw slash optimistic text when message_start carries expanded content", async () => {
+		const controller = new EventController(mode);
+		const addMessageSpy = vi.spyOn(mode, "addMessageToChat");
+
+		mode.startPendingSubmission({ text: "/jira-task" });
+		mode.rebuildChatFromMessages();
+		await controller.handleEvent({
+			type: "message_start",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "Expanded Jira task prompt" }],
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		});
+
+		expect(renderedUserTexts(addMessageSpy.mock.calls)).toEqual([
+			"/jira-task",
+			"/jira-task",
+			"Expanded Jira task prompt",
+		]);
+		expect(mode.shell.transcript.blocks()).toHaveLength(1);
+		expect(mode.optimisticUserMessageSignature).toBeUndefined();
+		expect(mode.locallySubmittedUserSignatures.has("/jira-task\u00000")).toBe(false);
+	});
+
+	it("does not replace a pending optimistic prompt with another local user event", async () => {
+		const controller = new EventController(mode);
+		const addMessageSpy = vi.spyOn(mode, "addMessageToChat");
+
+		mode.startPendingSubmission({ text: "/jira-task" });
+		mode.locallySubmittedUserSignatures.add("queued before prompt\u00000");
+
+		await controller.handleEvent({
+			type: "message_start",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "queued before prompt" }],
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		});
+
+		expect(mode.optimisticUserMessageSignature).toBe("/jira-task\u00000");
+		expect(mode.shell.transcript.blocks()).toHaveLength(2);
+		expect(mode.locallySubmittedUserSignatures.has("queued before prompt\u00000")).toBe(false);
+
+		await controller.handleEvent({
+			type: "message_start",
+			message: {
+				role: "user",
+				content: [{ type: "text", text: "Expanded Jira task prompt" }],
+				attribution: "user",
+				timestamp: Date.now(),
+			},
+		});
+
+		expect(renderedUserTexts(addMessageSpy.mock.calls)).toEqual([
+			"/jira-task",
+			"queued before prompt",
+			"Expanded Jira task prompt",
+		]);
+		expect(mode.shell.transcript.blocks()).toHaveLength(2);
+		expect(mode.optimisticUserMessageSignature).toBeUndefined();
+	});
+});
+
 function createIrcMessage(timestamp: number): CustomMessage<{ from: string; message: string }> {
 	return {
 		role: "custom",
@@ -178,24 +318,17 @@ function createIrcMessage(timestamp: number): CustomMessage<{ from: string; mess
 
 function createIrcContext(options: { liveBlockAbove?: boolean } = {}) {
 	const ctx = createInteractiveModeContext();
-	const { chatContainer } = ctx;
 	if (options.liveBlockAbove) {
 		// A still-running tool above the cards: they sit in the live region,
-		// where their rows cannot have committed to native scrollback.
-		chatContainer.addChild({
-			render: () => ["running tool"],
-			invalidate: () => {},
-			isTranscriptBlockFinalized: () => false,
-		} as Component);
+		// where their rows cannot have reached terminal scrollback.
+		ctx.present(() => recapBlock("running tool"), { live: true });
 	}
-	const helpers = new UiHelpers(ctx);
-	ctx.addMessageToChat = vi.fn((message, options) => helpers.addMessageToChat(message, options));
-	return {
-		ctx,
-		chatContainer,
-		requestRender: ctx.ui.requestRender,
-		addMessageToChat: ctx.addMessageToChat,
-	};
+	// The card a delivered IRC message draws: its text in one block.
+	ctx.addMessageToChat = vi.fn(message => {
+		const details = (message as CustomMessage<{ message: string }>).details;
+		return [ctx.present(() => recapBlock(details?.message ?? ""))];
+	});
+	return { ctx, transcript: ctx.shell.transcript, addMessageToChat: ctx.addMessageToChat };
 }
 
 describe("EventController IRC expiry", () => {
@@ -207,37 +340,31 @@ describe("EventController IRC expiry", () => {
 	it("renders IRC messages immediately and removes live-region cards after the TTL", async () => {
 		vi.useFakeTimers();
 		const message = createIrcMessage(1);
-		const { ctx, chatContainer, requestRender } = createIrcContext({ liveBlockAbove: true });
+		const { ctx, transcript } = createIrcContext({ liveBlockAbove: true });
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent({ type: "irc_message", message });
 
-		expect(chatContainer.children).toHaveLength(2);
-		// One requestRender from the IRC handler mounting the card. The blanket
-		// pre-render that `handleEvent` used to fire before every dispatch was
-		// removed in #4353 (it doubled the paint rate during streaming and did no
-		// visible work beyond what the handlers already trigger).
-		expect(requestRender).toHaveBeenCalledTimes(1);
+		expect(transcript.blocks()).toHaveLength(2);
 
 		vi.advanceTimersByTime(9_999);
-		expect(chatContainer.children).toHaveLength(2);
+		expect(transcript.blocks()).toHaveLength(2);
 
 		vi.advanceTimersByTime(1);
-		expect(chatContainer.children).toHaveLength(1);
-		expect(requestRender).toHaveBeenCalledTimes(2);
+		expect(transcript.blocks()).toHaveLength(1);
 	});
 
 	it("evicts the oldest live-region card beyond the cap", async () => {
 		vi.useFakeTimers();
-		const { ctx, chatContainer } = createIrcContext({ liveBlockAbove: true });
+		const { ctx, transcript } = createIrcContext({ liveBlockAbove: true });
 		const controller = new EventController(ctx);
 
 		for (let i = 0; i < 5; i++) {
 			await controller.handleEvent({ type: "irc_message", message: createIrcMessage(100 + i) });
 		}
 		// live block + MAX_LIVE_IRC_CARDS (4): the 5th card evicted the 1st.
-		expect(chatContainer.children).toHaveLength(5);
-		const rendered = chatContainer.children.map(child => child.render(80).join("\n"));
+		expect(transcript.blocks()).toHaveLength(5);
+		const rendered = transcript.blocks().map(block => blockText(block, 80));
 		expect(rendered.some(text => text.includes("100"))).toBe(false);
 		expect(rendered.some(text => text.includes("104"))).toBe(true);
 	});
@@ -245,30 +372,29 @@ describe("EventController IRC expiry", () => {
 	it("does not schedule duplicate expiry for duplicate IRC events", async () => {
 		vi.useFakeTimers();
 		const message = createIrcMessage(2);
-		const { ctx, chatContainer, addMessageToChat } = createIrcContext({ liveBlockAbove: true });
+		const { ctx, transcript, addMessageToChat } = createIrcContext({ liveBlockAbove: true });
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent({ type: "irc_message", message });
 		await controller.handleEvent({ type: "irc_message", message });
 
 		expect(addMessageToChat).toHaveBeenCalledTimes(1);
-		expect(chatContainer.children).toHaveLength(2);
+		expect(transcript.blocks()).toHaveLength(2);
 		vi.advanceTimersByTime(10_000);
-		expect(chatContainer.children).toHaveLength(1);
+		expect(transcript.blocks()).toHaveLength(1);
 	});
 
 	it("clears pending IRC expiry timers on dispose", async () => {
 		vi.useFakeTimers();
 		const message = createIrcMessage(3);
-		const { ctx, chatContainer, requestRender } = createIrcContext();
+		const { ctx, transcript } = createIrcContext();
 		const controller = new EventController(ctx);
 
 		await controller.handleEvent({ type: "irc_message", message });
 		controller.dispose();
 		vi.advanceTimersByTime(10_000);
 
-		expect(chatContainer.children).toHaveLength(1);
-		expect(requestRender).toHaveBeenCalledTimes(1);
+		expect(transcript.blocks()).toHaveLength(1);
 	});
 });
 
@@ -294,29 +420,63 @@ describe("EventController message_start (assistant role)", () => {
 	it("seals tool cards no result can reach, so they cannot block transcript retirement, and leaves a running call alone", async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		const pendingTools = new Map<string, ToolExecutionHandle>();
+		const pendingTools = new Map<string, PendingTool>();
 		const ctx = createInteractiveModeContext({ pendingTools });
 		const controller = new EventController(ctx);
 		const card = (id: string) =>
-			new ToolExecutionComponent("bash", { command: "echo hi" }, {}, undefined, ctx.ui, process.cwd(), id);
+			ctx.presentToolCall({ name: "bash", args: { command: "echo hi" }, tool: undefined, id, cwd: process.cwd() });
 		// No call id routes to it: a preview left behind by a stream that never ended.
 		const untracked = card("gone");
-		ctx.chatContainer.addChild(untracked);
 		// Streamed by an earlier message, never started.
 		const stale = card("stale");
-		ctx.chatContainer.addChild(stale);
 		pendingTools.set("stale", stale);
 		await controller.handleEvent({ type: "tool_execution_start", toolCallId: "run", toolName: "bash", args: {} });
-		const running = pendingTools.get("run") as ToolExecutionComponent;
+		const running = pendingTools.get("run")!;
 
 		await controller.handleEvent({ type: "message_start", message: opening });
 
-		expect(untracked.isTranscriptBlockFinalized()).toBe(true);
-		expect(stale.isTranscriptBlockFinalized()).toBe(true);
+		expect(isSettled(untracked.block.node)).toBe(true);
+		expect(isSettled(stale.block.node)).toBe(true);
 		expect(pendingTools.has("stale")).toBe(false);
-		expect(running.isTranscriptBlockFinalized()).toBe(false);
+		expect(isSettled(running.block.node)).toBe(false);
 		expect(pendingTools.get("run")).toBe(running);
 		running.seal();
+		resetSettingsForTest();
+	});
+
+	it("leaves a finished todo snapshot displaceable, so the next todo update replaces its card", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		const ctx = createInteractiveModeContext();
+		const controller = new EventController(ctx);
+		const todo = async (id: string, status: string) => {
+			const call = { type: "toolCall" as const, id, name: "todo", arguments: { op: "update" } };
+			await controller.handleEvent({ type: "message_start", message: { ...opening, content: [] } });
+			await controller.handleEvent({ type: "message_end", message: { ...opening, content: [call] } });
+			await controller.handleEvent({ type: "tool_execution_start", toolCallId: id, toolName: "todo", args: {} });
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: id,
+				toolName: "todo",
+				result: {
+					content: [{ type: "text", text: "ok" }],
+					details: { phases: [{ name: "Work", tasks: [{ content: "task", status }] }] },
+				},
+				isError: false,
+			});
+		};
+		const todoCards = () =>
+			ctx.shell.transcript
+				.blocks()
+				.map(block => ctx.transcriptEntry(block))
+				.filter(entry => entry?.kind === "tool" && entry.tool.call?.name === "todo");
+
+		await todo("todo-1", "pending");
+		// The next assistant message opens: the finished snapshot is not an orphan to seal.
+		await todo("todo-2", "in_progress");
+
+		expect(todoCards()).toHaveLength(1);
+		controller.dispose();
 		resetSettingsForTest();
 	});
 });

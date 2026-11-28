@@ -5,7 +5,7 @@
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { configHelp as commandHelp } from "../cli/command-help";
 import { type ConfigAction, type ConfigCommandArgs, type ConfigScope, runConfigCommand } from "../cli/config-cli";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme } from "../ui/theme/service";
 
 const ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg"];
 
@@ -35,6 +35,10 @@ export default class Config extends Command {
 				'With list: only the keys the "global" (config.yml in the agent dir) or "project" (<cwd>/.omp) layer sets, as written',
 			options: ["global", "project"],
 		}),
+		config: Flags.string({
+			description: "Load an extra config.yml-style overlay for get/list (repeatable)",
+			multiple: true,
+		}),
 	};
 
 	async run(): Promise<void> {
@@ -49,10 +53,11 @@ export default class Config extends Command {
 			flags: {
 				json: flags.json,
 				scope: flags.scope as ConfigScope | undefined,
+				config: flags.config,
 			},
 		};
 
-		await initTheme();
+		initTheme();
 		await runConfigCommand(cmd);
 	}
 }

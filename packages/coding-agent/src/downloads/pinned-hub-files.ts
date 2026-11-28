@@ -10,7 +10,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, withFileLock } from "@oh-my-pi/pi-utils";
 import { sha256File } from "../utils/file-hash";
-import { downloadFile } from "../utils/tools-manager";
+import { downloadFile } from "./file";
 
 /** One file fetched from `repo` at `revision` into the install directory. */
 export interface PinnedHubFile {

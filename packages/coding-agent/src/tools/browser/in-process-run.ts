@@ -7,7 +7,7 @@
  */
 import { AsyncLocalStorage } from "node:async_hooks";
 import { logger, postmortem } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
 import { callSessionTool } from "../../eval/js/tool-bridge";
 import type { ToolSession } from "../index";
@@ -23,6 +23,7 @@ import {
 } from "../run-scope";
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
 import { cloneSafe, RunOutput } from "./run-output";
+import { materializeTabCallArgs, type ParsedTabCall, parseTabCall, type TabCallStep } from "./tab-call";
 import type { RunResultOk, ScreenshotResult, SessionSnapshot } from "./tab-protocol";
 
 /** What a tab facade may use while one run is active. */
@@ -49,6 +50,8 @@ export interface InProcessRunTab {
 	readonly page: object;
 	/** The `browser` facade in scope. */
 	readonly browser: object;
+	/** Fatal renderer failure requiring close/reopen, when the backend tracks one. */
+	readonly rendererFailure?: Error;
 	/** The tab's JavaScript runtime (created once per tab). */
 	ensureRuntime(session: SessionSnapshot): JsRuntime;
 	/** Publish the active run to the facades. */
@@ -57,6 +60,18 @@ export interface InProcessRunTab {
 	clearRunContext(context: InProcessRunContext): void;
 	/** Dispose the tab's runtime, so a run that never settled stops holding this process's realm. */
 	discardRuntime(): void;
+}
+
+/** Inputs of {@link callInProcessTab}. */
+export interface CallInProcessOptions {
+	/** Allowlisted tab helper or handle call chain (`action: "call"`). */
+	chain: readonly TabCallStep[];
+	/** The call's budget. */
+	timeoutMs: number;
+	/** Cancels the call. */
+	signal?: AbortSignal;
+	/** Session facts for the facades. */
+	snapshot: SessionSnapshot;
 }
 
 /** Inputs of {@link runInProcessTab}. */
@@ -71,6 +86,8 @@ export interface RunInProcessOptions {
 	session: ToolSession;
 	/** Session facts for the facades. */
 	snapshot: SessionSnapshot;
+	/** Managed tab name, used in diagnostics when a run times out waiting for the shared JS realm. */
+	tabName?: string;
 }
 
 interface ActiveRun {
@@ -134,13 +151,22 @@ function rememberRunFile(filename: string): void {
 postmortem.interceptUnhandledRejections(consumeRunRejection);
 
 /**
- * Every in-process run executes in this process's one realm, where only one `JsRuntime` may run at a time: runs of
- * different tabs (`Promise.all` over tabs, parallel subagents) take turns here instead of failing. The tail settles
- * once the latest queued run has had its turn.
+ * Every in-process `tab.run` executes in this process's one realm, where only one `JsRuntime` may run at a time:
+ * runs of different tabs (`Promise.all` over tabs, parallel subagents) take turns here instead of failing. Direct
+ * helper calls (`callInProcessTab`) bypass `JsRuntime` and therefore never enter this queue.
  */
 let runQueueTail: Promise<void> = Promise.resolve();
 /** Set inside a run: a run its code starts (through a tool call) cannot wait for its own turn to end. */
 const insideRun = new AsyncLocalStorage<true>();
+
+interface ActiveRunHolder {
+	tabName?: string;
+	agentId?: string;
+	startedAt: number;
+}
+
+/** The `tab.run` currently holding this process's shared `JsRuntime` realm, if any. */
+let activeRunHolder: ActiveRunHolder | undefined;
 
 /** Queue for a turn: `ready` settles when every earlier run has finished; call `release` when this one has. */
 function queueRunTurn(): { ready: Promise<void>; release: () => void } {
@@ -151,41 +177,178 @@ function queueRunTurn(): { ready: Promise<void>; release: () => void } {
 	return { ready: previous, release: () => turn.resolve() };
 }
 
-/** Run `opts.code` against `tab`'s facades in this process. */
-export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOptions): Promise<RunResultOk> {
-	const deadline = Date.now() + opts.timeoutMs;
+function formatQueueTimeoutMessage(
+	tabName: string | undefined,
+	timeoutMs: number,
+	holder: ActiveRunHolder | undefined,
+): string {
+	const base = `Browser code execution timed out after ${timeoutMs}ms`;
+	if (!holder) {
+		return `${base} before starting while waiting for another in-process tab.run() to finish`;
+	}
+	const target = tabName ? ` on tab ${JSON.stringify(tabName)}` : "";
+	const blockerTab = holder.tabName ? `tab ${JSON.stringify(holder.tabName)}` : "another tab";
+	const blockerAgent = holder.agentId ? `, agent ${JSON.stringify(holder.agentId)}` : "";
+	const elapsedSeconds = Math.max(0, Math.round((Date.now() - holder.startedAt) / 1000));
+	return (
+		`${base} before starting${target}: waited for an in-process tab.run() on ${blockerTab}` +
+		` (running ${elapsedSeconds}s${blockerAgent}) to finish. ` +
+		`Direct tab helper calls (tab.goto, tab.click, tab.evaluate, ...) do not wait on this queue.`
+	);
+}
+
+interface InProcessBudget {
+	deadline: number;
+	signal: AbortSignal;
+	cancelRejection: Promise<never>;
+	endRun: () => void;
+	dispose: () => void;
+}
+
+function createInProcessBudget(
+	timeoutMs: number,
+	outerSignal: AbortSignal | undefined,
+	timeoutError: () => ToolError,
+): InProcessBudget {
+	const deadline = Date.now() + timeoutMs;
 	const runAc = new AbortController();
 	// A plain timer, not `AbortSignal.timeout`: under Bun that signal's timer may never fire while the run awaits a
 	// promise that never settles (see `raceWithTimeout` in the tab supervisor), which would hold the tab busy.
 	const timeoutAc = new AbortController();
-	const timeoutTimer = setTimeout(() => timeoutAc.abort(), opts.timeoutMs);
+	const timeoutTimer = setTimeout(() => timeoutAc.abort(), timeoutMs);
 	const timeoutSignal = timeoutAc.signal;
 	const signal = AbortSignal.any(
-		opts.signal ? [timeoutSignal, opts.signal, runAc.signal] : [timeoutSignal, runAc.signal],
+		outerSignal ? [timeoutSignal, outerSignal, runAc.signal] : [timeoutSignal, runAc.signal],
 	);
 	const runEndedError = postmortem.markExpectedCleanupError(new ToolAbortError("Browser run ended"));
+	const { promise: cancelRejection, reject } = Promise.withResolvers<never>();
+	// If setup throws while `signal` is already aborted, `Promise.race` never attaches a handler to this promise;
+	// keep its armed rejection from surfacing as an unhandled rejection — the postmortem-fatal path this guards.
+	cancelRejection.catch(() => {});
+	const onAbort = (): void => {
+		if (timeoutSignal.aborted) {
+			reject(timeoutError());
+		} else {
+			reject(
+				signal.reason instanceof ToolAbortError
+					? signal.reason
+					: new ToolAbortError(undefined, { cause: signal.reason }),
+			);
+		}
+	};
+	if (signal.aborted) onAbort();
+	else signal.addEventListener("abort", onAbort, { once: true });
+	const endRun = (): void => {
+		runAc.abort(runEndedError);
+	};
+	return {
+		deadline,
+		signal,
+		cancelRejection,
+		endRun,
+		dispose: () => {
+			clearTimeout(timeoutTimer);
+			signal.removeEventListener("abort", onAbort);
+			endRun();
+		},
+	};
+}
+
+async function invokeMethod(target: object, method: string, args: unknown[], targetLabel: string): Promise<unknown> {
+	const fn = Reflect.get(target, method, target);
+	if (typeof fn !== "function") {
+		throw new TypeError(`${targetLabel}.${method} is not a function`);
+	}
+	return await Reflect.apply(fn, target, args);
+}
+
+async function executeTabCall(runTab: InProcessRunTab, parsed: ParsedTabCall, signal: AbortSignal): Promise<unknown> {
+	switch (parsed.kind) {
+		case "value":
+			return await invokeMethod(runTab, parsed.step.method, materializeTabCallArgs(parsed.step), "tab");
+		case "presence":
+			return (await invokeMethod(runTab, parsed.step.method, materializeTabCallArgs(parsed.step), "tab")) !== null;
+		case "handle": {
+			const handle = await invokeMethod(runTab, parsed.handle.method, materializeTabCallArgs(parsed.handle), "tab");
+			if (!handle || typeof handle !== "object") {
+				throw new TypeError(`tab.${parsed.handle.method}() did not return a handle`);
+			}
+			const boundHandle = bindRunFacade(handle, signal);
+			return await invokeMethod(
+				boundHandle,
+				parsed.step.method,
+				materializeTabCallArgs(parsed.step, !parsed.isFrame),
+				`tab.${parsed.handle.method}()`,
+			);
+		}
+	}
+}
+
+/**
+ * Invoke an allowlisted helper call chain (`action: "call"`) directly on `tab`, without `JsRuntime` or the
+ * process-wide `tab.run` queue. Concurrent helper calls on different tabs run in parallel even while another tab
+ * holds the shared JS realm.
+ */
+export async function callInProcessTab(tab: InProcessRunTab, opts: CallInProcessOptions): Promise<RunResultOk> {
+	const parsed = parseTabCall(opts.chain);
+	if (tab.rendererFailure) throw tab.rendererFailure;
+	// As a worker's timeout does: name the helper, without its arguments (an evaluate's whole source).
+	const stalled =
+		parsed.kind === "handle"
+			? `tab.${parsed.handle.method}(…).${parsed.step.method}()`
+			: `tab.${parsed.step.method}()`;
+	const budget = createInProcessBudget(
+		opts.timeoutMs,
+		opts.signal,
+		() => new ToolError(`Browser code execution timed out after ${opts.timeoutMs}ms (stalled on ${stalled})`),
+	);
+	const output = new RunOutput();
+	const screenshots: ScreenshotResult[] = [];
+	const runContext: InProcessRunContext = {
+		session: opts.snapshot,
+		output,
+		screenshots,
+		signal: budget.signal,
+		timeoutMs: opts.timeoutMs,
+		deadline: budget.deadline,
+	};
+	tab.setRunContext(runContext);
+	try {
+		throwIfAborted(budget.signal);
+		const runTab = bindRunFacade(tab, budget.signal);
+		const executing = executeTabCall(runTab, parsed, budget.signal);
+		// If `cancelRejection` wins (timeout or tab close), a later backend rejection must not escape unhandled.
+		executing.catch(() => undefined);
+		const returnValue = await Promise.race([executing, budget.cancelRejection]);
+		return { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots };
+	} finally {
+		budget.dispose();
+		tab.clearRunContext(runContext);
+	}
+}
+
+/** Run `opts.code` against `tab`'s facades in this process. */
+export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOptions): Promise<RunResultOk> {
+	let started = false;
+	const budget = createInProcessBudget(
+		opts.timeoutMs,
+		opts.signal,
+		() =>
+			new ToolError(
+				started
+					? `Browser code execution timed out after ${opts.timeoutMs}ms`
+					: formatQueueTimeoutMessage(opts.tabName, opts.timeoutMs, activeRunHolder),
+			),
+	);
+	const { signal, cancelRejection } = budget;
 	const output = new RunOutput();
 	const screenshots: ScreenshotResult[] = [];
 	const runId = crypto.randomUUID();
 	const filename = `${tab.runLabel}-${runId}.js`;
 	const activeRun: ActiveRun = { filename, floatingRejections: [] };
 	activeRuns.set(filename, activeRun);
-	const runContext: InProcessRunContext = {
-		session: opts.snapshot,
-		output,
-		screenshots,
-		signal,
-		timeoutMs: opts.timeoutMs,
-		deadline,
-	};
-	tab.setRunContext(runContext);
+	let runContext: InProcessRunContext | undefined;
 
-	const { promise: cancelRejection, reject } = Promise.withResolvers<never>();
-	// If the synchronous setup below throws (same-realm ownership conflict)
-	// while `signal` is already aborted, `Promise.race` never attaches a
-	// handler to this promise; keep its armed rejection from surfacing as an
-	// unhandled rejection — the postmortem-fatal path this run guards against.
-	cancelRejection.catch(() => {});
 	const rejectionOwner = {};
 	const { promise: floatingFailure, reject: rejectFloatingFailure } = Promise.withResolvers<never>();
 	floatingFailure.catch(() => {});
@@ -208,24 +371,32 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 		recordFloatingFailure(reason);
 		return true;
 	});
-	const onAbort = (): void => {
-		if (timeoutSignal.aborted) {
-			reject(new ToolError(`Browser code execution timed out after ${opts.timeoutMs}ms`));
-		} else {
-			reject(
-				signal.reason instanceof ToolAbortError
-					? signal.reason
-					: new ToolAbortError(undefined, { cause: signal.reason }),
-			);
-		}
-	};
-	if (signal.aborted) onAbort();
-	else signal.addEventListener("abort", onAbort, { once: true });
 
 	const turn = queueRunTurn();
+	let holder: ActiveRunHolder | undefined;
+	let prevHolder: ActiveRunHolder | undefined;
 	try {
 		// The wait for this run's turn counts against its budget; a cancel or timeout ends it.
 		await Promise.race([turn.ready, cancelRejection]);
+		started = true;
+		holder = {
+			tabName: opts.tabName,
+			agentId: opts.session.getAgentId?.() ?? undefined,
+			startedAt: Date.now(),
+		};
+		prevHolder = activeRunHolder;
+		activeRunHolder = holder;
+		const remainingMs = Math.max(1, budget.deadline - Date.now());
+		runContext = {
+			session: opts.snapshot,
+			output,
+			screenshots,
+			signal,
+			timeoutMs: remainingMs,
+			deadline: budget.deadline,
+		};
+		tab.setRunContext(runContext);
+
 		const runtime = tab.ensureRuntime(opts.snapshot);
 		// setCwd is non-exclusive; setRunScope/run still assert same-realm ownership.
 		// Keep both inside try so a concurrent in-process eval/browser run surfaces as
@@ -247,7 +418,7 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 						typeof msOrPredicate === "number"
 							? waitOpts
 							: {
-									timeout: resolvePredicateTimeout(opts.timeoutMs, waitOpts?.timeout),
+									timeout: resolvePredicateTimeout(remainingMs, waitOpts?.timeout),
 									interval: waitOpts?.interval,
 								},
 					).catch(error => {
@@ -301,7 +472,7 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 		}
 		// Code still running past its cancel or timeout holds the realm: drop its runtime so other tabs can run.
 		if (!runSettled) tab.discardRuntime();
-		runAc.abort(runEndedError);
+		budget.endRun();
 		// Let rejection callbacks run while this run can still own guest-created promises.
 		await Bun.sleep(0);
 		if (hasFloatingFailure && !runFailed) await floatingFailure;
@@ -321,14 +492,13 @@ export async function runInProcessTab(tab: InProcessRunTab, opts: RunInProcessOp
 		}
 		return { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots };
 	} finally {
+		if (holder && activeRunHolder === holder) activeRunHolder = prevHolder;
 		turn.release();
-		clearTimeout(timeoutTimer);
 		runActive = false;
 		uninstallRejectionInterceptor();
-		signal.removeEventListener("abort", onAbort);
-		runAc.abort(runEndedError);
+		budget.dispose();
 		activeRuns.delete(filename);
 		rememberRunFile(filename);
-		tab.clearRunContext(runContext);
+		if (runContext) tab.clearRunContext(runContext);
 	}
 }

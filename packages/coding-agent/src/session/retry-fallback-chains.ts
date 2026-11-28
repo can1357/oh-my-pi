@@ -2,15 +2,11 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../config/model-registry";
 import { cfgModelRoles } from "../config/model-settings";
-import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { formatModelSelectorValue, parseModelString } from "../config/model-selector";
 import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
-import {
-	AUTO_THINKING,
-	type ConfiguredThinkingLevel,
-	concreteThinkingLevel,
-	resolveThinkingLevelForModel,
-} from "@oh-my-pi/pi-tui/thinking";
+import { AUTO_THINKING, concreteThinkingLevel, resolveThinkingLevelForModel } from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import {
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
@@ -561,9 +557,9 @@ export function resolveRetryFallbackChainKey(
 
 /**
  * Parse one configured chain entry. A `provider/*` entry keeps the failing
- * model's id and swaps the provider (google-antigravity/x → google/x); an
+ * model's id and swaps the provider (openrouter/x → google/x); an
  * id-prefixed `provider/prefix/*` entry re-prefixes the failing model's
- * bare id instead (openrouter/google/* : google-antigravity/x →
+ * bare id instead (openrouter/google/* : google-vertex/x →
  * openrouter/google/x). Ids the target provider lacks are skipped by the
  * candidate loop's registry lookup.
  */

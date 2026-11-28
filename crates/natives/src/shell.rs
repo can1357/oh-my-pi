@@ -24,6 +24,11 @@ use omp_shell::{
 	MinimizerResult as CoreMinimizerResult, PipeTaps, Shell as CoreShell,
 	ShellExecuteOptions as CoreShellExecuteOptions, ShellOptions as CoreShellOptions,
 	ShellRunOptions as CoreShellRunOptions, ShellRunResult as CoreShellRunResult,
+	approval::{
+		ApprovalAndClause as CoreApprovalAndClause, ApprovalDialect,
+		ApprovalSimpleCommand as CoreApprovalSimpleCommand,
+		BashApprovalAnalysis as CoreBashApprovalAnalysis, analyze_approval,
+	},
 	bash::trace::viz::{self, model},
 	execute_shell as core_execute_shell, minimizer,
 };
@@ -184,6 +189,105 @@ pub fn shell_builtins(session_env: Option<Object<'_>>) -> Vec<&'static str> {
 #[napi]
 pub fn shell_reserved_command_names() -> Vec<&'static str> {
 	omp_shell::reserved_command_names()
+}
+
+/// Repairs `\` continuations after here-document operators in `script`.
+///
+/// Drops the `\` after each `<<EOF &&` (or `||`, `|`, `|&`) so the
+/// here-document body starts on the next line; `null` when nothing needs
+/// repair or the result would not parse. omp's bash tool runs commands
+/// through it.
+#[napi]
+pub fn repair_heredoc_continuations(script: String) -> Option<String> {
+	let fixed = omp_shell::bash::syntax::repair_heredoc_continuations(script.as_bytes())?;
+	String::from_utf8(fixed).ok()
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ApprovalSimpleCommand {
+	pub text:                 String,
+	pub without_assigns_text: String,
+	pub assign_names:         Vec<String>,
+	pub argv:                 Vec<String>,
+	pub glob_word_indices:    Vec<u32>,
+	pub expansion_free:       bool,
+	pub strictly_literal:     bool,
+}
+
+impl From<CoreApprovalSimpleCommand> for ApprovalSimpleCommand {
+	fn from(v: CoreApprovalSimpleCommand) -> Self {
+		Self {
+			text:                 v.text,
+			without_assigns_text: v.without_assigns_text,
+			assign_names:         v.assign_names,
+			argv:                 v.argv,
+			glob_word_indices:    v.glob_word_indices,
+			expansion_free:       v.expansion_free,
+			strictly_literal:     v.strictly_literal,
+		}
+	}
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ApprovalAndClause {
+	pub text:                   String,
+	pub simple:                 Option<ApprovalSimpleCommand>,
+	pub syntactically_stateful: bool,
+	pub stage_commands:         Vec<Vec<String>>,
+	pub restriction_segments:   Vec<String>,
+}
+
+impl From<CoreApprovalAndClause> for ApprovalAndClause {
+	fn from(v: CoreApprovalAndClause) -> Self {
+		Self {
+			text:                   v.text,
+			simple:                 v.simple.map(Into::into),
+			syntactically_stateful: v.syntactically_stateful,
+			stage_commands:         v.stage_commands,
+			restriction_segments:   v.restriction_segments,
+		}
+	}
+}
+
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct BashApprovalAnalysis {
+	pub valid:                  bool,
+	pub has_control_chars:      bool,
+	pub has_comment:            bool,
+	pub single:                 Option<ApprovalSimpleCommand>,
+	pub and_chain:              Option<Vec<ApprovalAndClause>>,
+	pub restriction_segments:   Vec<String>,
+	pub restriction_incomplete: bool,
+}
+
+impl From<CoreBashApprovalAnalysis> for BashApprovalAnalysis {
+	fn from(v: CoreBashApprovalAnalysis) -> Self {
+		Self {
+			valid:                  v.valid,
+			has_control_chars:      v.has_control_chars,
+			has_comment:            v.has_comment,
+			single:                 v.single.map(Into::into),
+			and_chain:              v.and_chain.map(|c| c.into_iter().map(Into::into).collect()),
+			restriction_segments:   v.restriction_segments,
+			restriction_incomplete: v.restriction_incomplete,
+		}
+	}
+}
+
+/// Parses and classifies a bash or zsh command for `bash` tool approval.
+#[napi]
+pub fn analyze_bash_approval(
+	command: String,
+	#[napi(ts_arg_type = "'bash' | 'zsh'")] dialect: Option<String>,
+) -> BashApprovalAnalysis {
+	let d = match dialect.as_deref() {
+		Some("zsh") => ApprovalDialect::Zsh,
+		_ => ApprovalDialect::Bash,
+	};
+	analyze_approval(&command, d).into()
 }
 
 /// N-API opt-in handle for the minimizer.
@@ -648,6 +752,20 @@ impl Shell {
 		self.inner.live_background_job_count().await
 	}
 
+	/// Every live external this shell session holds, whether a run is in
+	/// flight or not: background jobs (`cmd &`, `nohup cmd &`) earlier runs
+	/// left running included. Each is unreaped while held, so its pid names
+	/// it. Empty once the session is gone.
+	#[napi]
+	pub fn held_processes(&self) -> Vec<HeldProcess> {
+		self
+			.inner
+			.held_processes()
+			.into_iter()
+			.map(|(pid, detached)| HeldProcess { pid, detached })
+			.collect()
+	}
+
 	/// Pids of the still-alive processes spawned by this session's in-flight
 	/// `run`, in spawn order: foreground commands, pipeline stages, and `&`
 	/// jobs started by that run. Builtins run in-process and never appear.
@@ -658,6 +776,16 @@ impl Shell {
 	pub fn pids(&self) -> Vec<i32> {
 		self.inner.pids()
 	}
+}
+
+/// A live external a shell session holds ([`Shell::held_processes`]).
+#[napi(object)]
+pub struct HeldProcess {
+	/// OS process id.
+	pub pid:      i32,
+	/// It runs in a detached tree: started under the shell's `nohup`, which
+	/// does not mask `SIGHUP`, so this is how such a process is told apart.
+	pub detached: bool,
 }
 
 /// Run the shell engine as a process shell in this process (`omp zsh`,
@@ -673,7 +801,11 @@ impl Shell {
 /// their defaults for the run and restored after it.
 #[napi]
 pub fn run_shell_main(argv: Vec<String>) -> i32 {
-	let opts = omp_shell::process::ProcessOptions { embedded: true };
+	// On Windows pi's utilities stand in for the Unix tools `PATH` lacks.
+	let opts = omp_shell::process::ProcessOptions {
+		embedded: true,
+		extras:   cfg!(windows).then_some(omp_shell::process::ExtrasOrder::AfterPath),
+	};
 	std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| omp_shell::process::main(argv, opts)))
 		.unwrap_or(101)
 }

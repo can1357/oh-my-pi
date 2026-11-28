@@ -5,7 +5,6 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-
 import {
 	type Api,
 	type AssistantMessage,
@@ -15,26 +14,25 @@ import {
 	retryTransientCompletion,
 } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
-import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
-import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
-import { theme } from "@oh-my-pi/pi-tui/theme";
-import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
+import { SPINNER_FRAMES } from "../modes/view-model/theme/symbols";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
-
 import { roleCandidatePool } from "../config/model-roles";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
-import { formatTitleUserMessage } from "../tiny/message-preproc";
+import { cfgRetryModelFallback } from "../session/settings";
 import { isLowSignalTitleInput, isNoTitleSentinel, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
-
-import { cfgRetryModelFallback } from "../session/settings";
-import { DEFAULT_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "@oh-my-pi/pi-tui/spinner-clock";
+import { DEFAULT_TITLE_SPINNER_INTERVAL_MS, SPINNER_INTERVAL_STATIC } from "../config/spinner-interval";
+import { createRoot, effect, nativeRendering, untrack } from "@oh-my-pi/pi-tui";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui/driver/session";
+import { reportProgramResume } from "./program-resume";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { formatTitleUserMessage } from "../tiny/message-preproc";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
@@ -758,7 +756,10 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	// cancel. Releasing here would let the emit below, and a re-armed spinner,
 	// write into the parent shell's tab. Only `initTerminalTitleState()`, the
 	// explicit terminal-ownership path, releases the latch.
+	const hadOverride = terminalTitleRuntime.extensionOverride !== undefined;
 	terminalTitleRuntime.extensionOverride = undefined;
+	if (hadOverride && terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled)
+		startTerminalTitleSpinner();
 	terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(sessionName);
 	terminalTitleRuntime.label = terminalTitleRuntime.sessionName ?? getFallbackTerminalTitle(cwd);
 	emitTerminalTitle();
@@ -770,17 +771,11 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
  * the title fork then asks the model for a Nerd Fonts glyph to head the title.
  */
 export function nerdGlyphsActive(): boolean {
-	return typeof theme !== "undefined" && theme.getSymbolPreset() === "nerd";
+	return currentTheme().symbols.preset === "nerd";
 }
 
-/** The OSC 1337 user variable Tern reads the session file from. */
+/** The OSC 1337 user variable Tern reads the session file from (for `/fork`, cloud, and session links). */
 const TERN_SESSION_FILE_VAR = "omp_session_file";
-/**
- * The OSC 1337 user variable telling Tern this omp understands `--restore`, set to
- * `1` before each session file report: Tern's daemon then relaunches it after a
- * crash with `--restore <file>` instead of `--resume <file>`.
- */
-const TERN_RESTORE_VAR = "omp_restore";
 
 /** The live session as Tern hears about it (read from the interactive session manager). */
 export interface TerminalSessionSource {
@@ -816,6 +811,8 @@ export function setTerminalSessionSource(source: TerminalSessionSource | undefin
  * directory as OSC 7 (`file://host/path`), as a shell reports it at each prompt.
  */
 export function reportTernSession(): void {
+	// OSC 7577 works in any supporting terminal (Tern, Rex, ...), gated by OSC7577_TOKEN.
+	reportProgramResume();
 	if (terminalTitleRuntime.disposed || $env.TERM_PROGRAM?.toLowerCase() !== "tern") return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	const file = sessionSource?.file();
@@ -823,7 +820,6 @@ export function reportTernSession(): void {
 	if (resolvedFile !== reportedSessionFile) {
 		reportedSessionFile = resolvedFile;
 		const value = resolvedFile ? `=${Buffer.from(resolvedFile).toString("base64")}` : "";
-		if (resolvedFile) writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_RESTORE_VAR}=MQ==\x07`);
 		writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_SESSION_FILE_VAR}${value}\x07`);
 	}
 	// Without a session the shell takes the directory back at its next prompt.
@@ -858,22 +854,27 @@ export function setExtensionTerminalTitle(title: string): void {
 	// "releases its claim" means the same thing here as it does at the sink, and
 	// so the stored override is the value that will actually render.
 	terminalTitleRuntime.extensionOverride = sanitizeTerminalTitlePart(title);
+	if (terminalTitleRuntime.extensionOverride !== undefined) stopTerminalTitleSpinner();
+	else if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
 	emitTerminalTitle();
 }
 
 export type TerminalTitleState = "idle" | "working" | "attention";
 
-export type TerminalTitleSpinnerStyle = "braille" | "pulse" | "dots" | "line";
+export type TerminalTitleSpinnerStyle = "braille" | "centered" | "pulse" | "dots" | "line";
 
 /**
- * Working-state spinner frames per `tui.titleSpinner` style. `braille` is the
- * historical default; `pulse` fills and empties a moon; `dots` cycles single
- * braille dots; `line` is plain ASCII (`- \ | /`) for fonts without braille
- * coverage. Every frame is a single column so the separator never reflows the
- * title.
+ * Working-state spinner frames per `tui.titleSpinner` style. `centered` (the
+ * default) runs a three-dot snake around the full 8-dot braille cell, so each
+ * lap centers on the title text; `braille` is the classic sweep, drawn in the
+ * top three rows of the cell; `pulse` fills and empties a moon; `dots` cycles
+ * single braille dots; `line` is plain ASCII (`- \ | /`) for fonts without
+ * braille coverage. Every frame is a single column so the separator never
+ * reflows the title.
  */
 export const TERMINAL_TITLE_SPINNER_STYLES: Record<TerminalTitleSpinnerStyle, readonly string[]> = {
 	braille: SPINNER_FRAMES.unicode.activity,
+	centered: ["⠙", "⠸", "⢰", "⣠", "⣄", "⡆", "⠇", "⠋"],
 	pulse: ["○", "◔", "◑", "◕", "●", "◕", "◑", "◔"],
 	dots: ["⠁", "⠂", "⠄", "⠠", "⠐", "⠈"],
 	line: ["-", "\\", "|", "/"],
@@ -923,6 +924,8 @@ const terminalTitleRuntime: {
 	 *  While latched the working separator stays `:` and no interval is
 	 *  scheduled. */
 	nativeTitleFailed: boolean;
+	/** Another program holds the terminal (see {@link setTerminalTitleHandoff}). */
+	handoff: boolean;
 	/** The console title `initTerminalTitleState()` read on a Windows console.
 	 *  The console has no title stack, so teardown puts it back through
 	 *  `SetConsoleTitleW`. */
@@ -939,12 +942,13 @@ const terminalTitleRuntime: {
 	state: "idle",
 	frame: 0,
 	enabled: true,
-	style: "braille",
-	intervalMs: DEFAULT_SPINNER_INTERVAL_MS,
+	style: "centered",
+	intervalMs: DEFAULT_TITLE_SPINNER_INTERVAL_MS,
 	timer: undefined,
 	extensionOverride: undefined,
 	disposed: false,
 	nativeTitleFailed: false,
+	handoff: false,
 	initialWindowsConsoleTitle: undefined,
 	nativeTitleRestored: false,
 };
@@ -953,12 +957,12 @@ const terminalTitleRuntime: {
  * Compose the terminal title from the `π` brand, a state-carrying separator, and
  * the session label. Pure (no I/O) so the state→separator contract is testable:
  *   - `idle` (user's turn):  `π > label`;
- *   - `working`:             `π ⠋ label` (static `π : label` under WSL, or when `staticSpinner` is set);
+ *   - `working`:             `π ⠙ label` (static `π : label` under WSL, or when `staticSpinner` is set);
  *   - `attention`:           `π ! label`;
  *   - disabled:              `π: label`.
  * Without a label the separator trails the brand (`π >`) so the state stays visible.
  * The `working` separator cycles `TERMINAL_TITLE_SPINNER_STYLES[style]`; `style`
- * defaults to `braille` so existing 5-arg callers keep the historical frames.
+ * defaults to `centered`, the `tui.titleSpinner` default.
  * `staticSpinner` is the caller's own reasons to pin the working separator: the
  * Windows native-title path has failed, or `tui.spinnerInterval` is `0`.
  */
@@ -968,12 +972,12 @@ export function buildTerminalTitleWithState(
 	frame: number,
 	enabled: boolean,
 	platform: NodeJS.Platform = process.platform,
-	style: TerminalTitleSpinnerStyle = "braille",
+	style: TerminalTitleSpinnerStyle = "centered",
 	env: NodeJS.ProcessEnv = $env as NodeJS.ProcessEnv,
 	staticSpinner = false,
 ): string {
 	if (!enabled) return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
-	const frames = TERMINAL_TITLE_SPINNER_STYLES[style] ?? TERMINAL_TITLE_SPINNER_STYLES.braille;
+	const frames = TERMINAL_TITLE_SPINNER_STYLES[style] ?? TERMINAL_TITLE_SPINNER_STYLES.centered;
 	const staticHost = staticSpinner || isStaticTitleHost(platform, env);
 	const separator =
 		state === "working"
@@ -1001,7 +1005,7 @@ function emitTerminalTitle(): void {
 	// here is covered without a second check.
 	// An extension override owns the terminal verbatim; the terminal sink
 	// deduplicates repeated state updates.
-	const native = isNativeRendering();
+	const native = untrack(nativeRendering) && !terminalTitleRuntime.handoff;
 	const next =
 		terminalTitleRuntime.extensionOverride ??
 		(native
@@ -1037,10 +1041,11 @@ function stopTerminalTitleSpinner(): void {
 
 function startTerminalTitleSpinner(): void {
 	if (
-		isNativeRendering() ||
+		untrack(nativeRendering) ||
 		isStaticTitleHost() ||
 		terminalTitleRuntime.disposed ||
 		terminalTitleRuntime.timer ||
+		terminalTitleRuntime.extensionOverride !== undefined ||
 		terminalTitleRuntime.nativeTitleFailed ||
 		terminalTitleRuntime.intervalMs === SPINNER_INTERVAL_STATIC ||
 		!process.stdout.isTTY
@@ -1050,8 +1055,7 @@ function startTerminalTitleSpinner(): void {
 	terminalTitleRuntime.timer = setInterval(() => {
 		terminalTitleRuntime.frame =
 			(terminalTitleRuntime.frame + 1) % TERMINAL_TITLE_SPINNER_STYLES[terminalTitleRuntime.style].length;
-		// An extension override is frame-independent; the sink would dedupe it anyway.
-		if (terminalTitleRuntime.extensionOverride === undefined) emitTerminalTitle();
+		emitTerminalTitle();
 	}, terminalTitleRuntime.intervalMs);
 	// Never keep the event loop alive for a cosmetic animation.
 	terminalTitleRuntime.timer.unref?.();
@@ -1069,6 +1073,17 @@ export function setTerminalTitleState(state: TerminalTitleState): void {
 	emitTerminalTitle();
 }
 
+/**
+ * The terminal is handed to another program (an external editor, a suspend)
+ * or taken back. A Tern pane shows no surface meanwhile, so its tab gets the
+ * title terminal rows use until the surface is back; in rows nothing changes.
+ */
+export function setTerminalTitleHandoff(on: boolean): void {
+	if (terminalTitleRuntime.handoff === on) return;
+	terminalTitleRuntime.handoff = on;
+	emitTerminalTitle();
+}
+
 /** Enable/disable the run-state separator (driven by the `tui.titleState` setting). */
 export function setTerminalTitleStateEnabled(enabled: boolean): void {
 	terminalTitleRuntime.enabled = enabled;
@@ -1079,13 +1094,15 @@ export function setTerminalTitleStateEnabled(enabled: boolean): void {
 
 /**
  * Select the working-state spinner glyph set (driven by `tui.titleSpinner`).
- * Unknown values fall back to `braille`; switching style resets the frame so a
+ * Unknown values fall back to `centered`; switching style resets the frame so a
  * shorter set never indexes out of range, and re-arms the live interval when
  * `working` so the tick cadence stays on the new frames.
  */
 export function setTerminalTitleSpinnerStyle(style: string | undefined): void {
 	const next: TerminalTitleSpinnerStyle =
-		style === "braille" || style === "pulse" || style === "dots" || style === "line" ? style : "braille";
+		style === "braille" || style === "centered" || style === "pulse" || style === "dots" || style === "line"
+			? style
+			: "centered";
 	if (next === terminalTitleRuntime.style) return;
 	terminalTitleRuntime.style = next;
 	terminalTitleRuntime.frame = 0;
@@ -1146,10 +1163,20 @@ export function initTerminalTitleState(): void {
 	if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
 	// A TSP terminal takes the plain native title while it renders; the
 	// classic `π > label` (and its spinner) comes back when it stops.
-	terminalTitleRuntime.unwatchNative ??= onNativeRenderingChange(native => {
-		if (native) stopTerminalTitleSpinner();
-		else if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
-		emitTerminalTitle();
+	terminalTitleRuntime.unwatchNative ??= createRoot(dispose => {
+		let previous = untrack(nativeRendering);
+		effect(() => {
+			const native = nativeRendering();
+			if (native === previous) return;
+			previous = native;
+			untrack(() => {
+				if (native) stopTerminalTitleSpinner();
+				else if (terminalTitleRuntime.state === "working" && terminalTitleRuntime.enabled)
+					startTerminalTitleSpinner();
+				emitTerminalTitle();
+			});
+		});
+		return dispose;
 	});
 }
 

@@ -234,6 +234,93 @@ describe("countMessage", () => {
 	});
 });
 
+// Contract: the coding-agent's app roles count what its `convertToLlm` sends
+// for them. A `$` Python cell or an `@file` mention that counts as free lets the
+// rate-limit fallback, compaction and the status line read a large context as
+// small; a `!!` run, which no request carries, counted as sent and read a small
+// context as large.
+describe("countMessage app roles", () => {
+	const COMMAND = "cat build.log";
+	const CODE = "print(open('build.log').read())";
+	const OUTPUT = "build step finished without warnings\n".repeat(400);
+	const IMAGE = { type: "image", data: "A".repeat(40_000), mimeType: "image/png" };
+	/** Tokens the rendering's fixed framing (lead-in, fences, `<file>` tags) may add. */
+	const FRAMING = 50;
+	const tokenizer = new Tokenizer();
+
+	/** What a user message carrying `texts` counts; the request sends each app role as such text. */
+	function asUserText(...texts: string[]): number {
+		return tokenizer.countMessage({
+			role: "user",
+			content: texts.map(text => ({ type: "text", text })),
+			timestamp: 0,
+		} as AgentMessage);
+	}
+
+	function execution(
+		role: "bashExecution" | "pythonExecution",
+		fields: { excludeFromContext?: boolean; images?: unknown[] } = {},
+	): AgentMessage {
+		return {
+			role,
+			...(role === "bashExecution" ? { command: COMMAND } : { code: CODE }),
+			output: OUTPUT,
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			timestamp: 0,
+			...fields,
+		} as unknown as AgentMessage;
+	}
+
+	function fileMention(files: Array<{ path: string; content: string; image?: unknown }>): AgentMessage {
+		return { role: "fileMention", files, timestamp: 0 } as unknown as AgentMessage;
+	}
+
+	test.each([
+		{ role: "bashExecution", source: COMMAND },
+		{ role: "pythonExecution", source: CODE },
+	] as const)("$role counts its source and output, and 0 when excluded from context", ({ role, source }) => {
+		const content = asUserText(source, OUTPUT);
+		const included = tokenizer.countMessage(execution(role));
+		expect(included).toBeGreaterThanOrEqual(content);
+		expect(included).toBeLessThan(content + FRAMING);
+		expect(tokenizer.countMessage(execution(role, { excludeFromContext: true }))).toBe(0);
+	});
+
+	test("an @file mention counts each file's path and content", () => {
+		const second = "export const answer = 42;\n".repeat(200);
+		const content = asUserText("build.log", OUTPUT, "src/answer.ts", second);
+		const mention = tokenizer.countMessage(
+			fileMention([
+				{ path: "build.log", content: OUTPUT },
+				{ path: "src/answer.ts", content: second },
+			]),
+		);
+		expect(mention).toBeGreaterThanOrEqual(content);
+		expect(mention).toBeLessThan(content + 2 * FRAMING);
+	});
+
+	test("charges a bash run's terminal images and an @file image as a user message charges them", () => {
+		const image = inToolResultImageEstimate(tokenizer);
+		expect(tokenizer.countMessage(execution("bashExecution", { images: [IMAGE] }))).toBe(
+			tokenizer.countMessage(execution("bashExecution")) + image,
+		);
+		const screenshot = { path: "screenshot.png", content: "" };
+		expect(tokenizer.countMessage(fileMention([{ ...screenshot, image: IMAGE }]))).toBe(
+			tokenizer.countMessage(fileMention([screenshot])) + image,
+		);
+	});
+
+	// A persisted custom message whose content is neither text nor blocks is
+	// dropped from every request; counting it threw, and the context figure
+	// with it.
+	test("counts 0 for custom content no request carries", () => {
+		const custom = { role: "custom", customType: "note", content: undefined, display: false, timestamp: 0 };
+		expect(tokenizer.countMessage(custom as unknown as AgentMessage)).toBe(0);
+	});
+});
+
 // Ollama chat drops historical assistant thinking even when the stored turn
 // contains it; a false compaction floor can discard most of a usable window.
 describe("Ollama chat history estimate", () => {
@@ -490,7 +577,8 @@ describe("countMessage replayed thinking", () => {
 
 	const opus = reader("anthropic", "claude-opus-5-5");
 	const bedrockOpus = reader("amazon-bedrock", "global.anthropic.claude-opus-5-5");
-	const openRouterOpus = reader("openrouter", "~anthropic/claude-opus-latest");
+	// OpenRouter's Muse Spark route filters reasoning history and rejects a synthetic item.
+	const openRouterMuse = reader("openrouter", "meta/muse-spark-1.3");
 
 	test.each([
 		["on the Claude API", opus, opus, VISIBLE, "toolUse"],
@@ -528,10 +616,10 @@ describe("countMessage replayed thinking", () => {
 	});
 
 	test("charges nothing for a filtered reader's own thinking, which its request never sends", () => {
-		// OpenRouter strips the turn's reasoning items from the request and its
+		// The route strips the turn's reasoning items from the request and its
 		// encoder drops the same-model thinking block outright, so neither the
 		// signature nor the thinking text is part of the reading model's input.
-		expect(new Tokenizer(openRouterOpus).countMessage(signedTurn(openRouterOpus, VISIBLE, SIGNATURE))).toBe(
+		expect(new Tokenizer(openRouterMuse).countMessage(signedTurn(openRouterMuse, VISIBLE, SIGNATURE))).toBe(
 			DONE_TOKENS,
 		);
 	});
@@ -643,7 +731,6 @@ describe("countMessage replayed thinking", () => {
 		["another Gemini model's turn to Gemini", gemini, reader("google", "gemini-3-flash-preview"), false],
 		["a Claude turn to Factory Gemini", factoryGemini, reader("anthropic", "claude-opus-5-5"), false],
 		["Factory Gemini's own turn", factoryGemini, { ...factoryGemini, api: "google-generative-ai" }, true],
-		["a Gemini CLI turn to Factory Gemini", factoryGemini, { ...gemini, api: "google-gemini-cli" }, true],
 		["another GLM's turn to a compatible Anthropic endpoint", glm, getBundledModel("zai", "glm-5.2") as Model, true],
 		[
 			"a MiniMax turn to a compatible Anthropic endpoint",
@@ -825,11 +912,13 @@ describe("replayed Responses reasoning", () => {
 	});
 
 	test("prices the thinking a filtered route rebuilds into a synthetic item for a tool-call turn", async () => {
-		// 42 OpenRouter Anthropic routes filter reasoning history out of the
-		// request, and all of them require reasoning content on tool calls while
-		// accepting a synthetic item. Their encoder therefore rebuilds the dropped
-		// reasoning item out of the turn's own thinking text.
-		const openRouter = bundledModel("openrouter", "anthropic/claude-sonnet-4.5");
+		// A route that filters reasoning history out of the request, requires
+		// reasoning content on tool calls, and accepts a synthetic item: its
+		// encoder rebuilds the dropped reasoning item out of the turn's own
+		// thinking text. OpenRouter's Claude routes require and accept it; the
+		// filter is set here since they now replay their reasoning natively.
+		const claude = bundledModel<"openrouter">("openrouter", "anthropic/claude-sonnet-4.5");
+		const openRouter = { ...claude, compat: { ...claude.compat, filterReasoningHistory: true } };
 		const thinkingText = "Read the guard, patch the branch, then rerun the suite. ".repeat(40).trim();
 		const toolTurn = responsesTurn(
 			openRouter,

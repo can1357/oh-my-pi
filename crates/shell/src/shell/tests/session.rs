@@ -1,4 +1,10 @@
 #[cfg(unix)]
+use std::{
+	pin::{Pin, pin},
+	task::Poll,
+};
+
+#[cfg(unix)]
 use tokio::task::JoinHandle;
 
 use super::*;
@@ -633,15 +639,17 @@ async fn one_shot_completion_aborts_internal_background_jobs() {
 	);
 }
 
-/// A background builtin started in a subshell ends with the subshell, as an
-/// external one does. Left running it was out of reach — no process for
-/// `pkill`, no job for `kill %N` — and spun for the life of the host.
+/// A background builtin started in a subshell ends with the subshell. Left
+/// running it was out of reach — no process for `pkill`, no job for `kill
+/// %N` — and spun for the life of the host. The group keeps `yes` the
+/// builtin: a lone `yes &` runs `PATH`'s program, which runs on as its own
+/// process, as in bash.
 #[tokio::test(flavor = "multi_thread")]
 async fn subshell_exit_ends_its_background_builtins() {
 	let _guard = shell_test_lock().lock().await;
 	let output = tempfile::NamedTempFile::new().expect("output file");
 	let shell = Shell::new(None);
-	let command = format!("(yes > {} &)", quote_arg(&output.path().to_string_lossy()));
+	let command = format!("({{ yes; }} > {} &)", quote_arg(&output.path().to_string_lossy()));
 
 	shell
 		.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
@@ -652,13 +660,14 @@ async fn subshell_exit_ends_its_background_builtins() {
 }
 
 /// `kill %N` ends a background job running inside the shell, which has no
-/// process to deliver the signal to.
+/// process to deliver the signal to. The group keeps `yes` the builtin (a
+/// lone `yes &` runs `PATH`'s program).
 #[tokio::test(flavor = "multi_thread")]
 async fn kill_jobspec_ends_in_process_background_job() {
 	let _guard = shell_test_lock().lock().await;
 	let output = tempfile::NamedTempFile::new().expect("output file");
 	let shell = Shell::new(None);
-	let command = format!("yes > {} & kill %1", quote_arg(&output.path().to_string_lossy()));
+	let command = format!("{{ yes; }} > {} & kill %1", quote_arg(&output.path().to_string_lossy()));
 
 	let result = shell
 		.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
@@ -1009,7 +1018,10 @@ async fn errexit_and_cd_last_one_segmented_command() {
 	let start = root.path().to_string_lossy().into_owned();
 	let run = async |command: String| {
 		let options = ShellRunOptions { command, cwd: Some(start.clone()), ..Default::default() };
-		shell.run(options, None, CancelToken::default()).await.expect("run")
+		shell
+			.run(options, None, CancelToken::default())
+			.await
+			.expect("run")
 	};
 	let repeated = format!("printf '{}'", "hello\\n".repeat(200));
 
@@ -2274,13 +2286,131 @@ async fn abort_state_signals_cancel_token() {
 	let mut cancel_token = CancelToken::default();
 	let abort_token = cancel_token.emplace_abort_token();
 
-	abort_state.set(abort_token).await;
+	abort_state.set(abort_state.next_run(), abort_token).await;
 	abort_state.abort().await;
 
 	let reason = time::timeout(Duration::from_millis(100), cancel_token.wait())
 		.await
 		.expect("cancel token should be signalled");
 	assert!(matches!(reason, AbortReason::Signal));
+}
+
+/// Poll `future` once: its output if that finished it.
+#[cfg(unix)]
+async fn poll_once<F: Future + Unpin>(future: &mut F) -> Option<F::Output> {
+	std::future::poll_fn(|cx| {
+		Poll::Ready(match Pin::new(&mut *future).poll(cx) {
+			Poll::Ready(output) => Some(output),
+			Poll::Pending => None,
+		})
+	})
+	.await
+}
+
+/// Spawn a run of the external `sleep` on `shell`.
+#[cfg(unix)]
+fn spawn_sleep_run(shell: &Arc<Shell>) -> JoinHandle<Result<ShellRunResult>> {
+	let shell = shell.clone();
+	let sleep = test_executable("sleep");
+	tokio::spawn(async move {
+		shell
+			.run(
+				ShellRunOptions { command: format!("'{}' 30", sleep.display()), ..Default::default() },
+				None,
+				CancelToken::default(),
+			)
+			.await
+	})
+}
+
+/// The in-flight run's one live child once it is not `other`.
+#[cfg(unix)]
+async fn wait_for_run_pid(shell: &Shell, other: Option<i32>) -> i32 {
+	time::timeout(Duration::from_secs(5), async {
+		loop {
+			if let [pid] = shell.pids()[..]
+				&& Some(pid) != other
+			{
+				break pid;
+			}
+			time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("run never reported its child")
+}
+
+/// `Shell::abort` must end `run`, which then reaps its child.
+#[cfg(unix)]
+async fn assert_abort_ends(shell: &Shell, run: JoinHandle<Result<ShellRunResult>>) {
+	shell.abort().await;
+	let result = time::timeout(Duration::from_secs(5), run)
+		.await
+		.expect("Shell::abort did not end the run")
+		.expect("run task")
+		.expect("run result");
+	assert!(result.cancelled, "run was aborted");
+	assert!(shell.pids().is_empty(), "the run's child was reaped");
+}
+
+/// A run ends its command and releases the session before its outer future
+/// cleans up, so a queued run can publish its abort token in between. That
+/// cleanup must leave the token alone, or `Shell::abort` misses the queued
+/// run. The first run's future is held at that point by not polling it.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn finished_run_cleanup_keeps_queued_runs_abort_token() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Arc::new(Shell::new(None));
+	let dir = tempfile::tempdir().expect("temp dir");
+	let marker = dir.path().join("ran");
+	let mut first = pin!(shell.run(
+		ShellRunOptions {
+			command: format!(": > {}", quote_arg(&marker.to_string_lossy())),
+			..Default::default()
+		},
+		None,
+		CancelToken::default(),
+	));
+	assert!(poll_once(&mut first).await.is_none(), "first run is in flight");
+	time::timeout(Duration::from_secs(5), async {
+		while !marker.exists() {
+			time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("first run never ran its command");
+
+	let second = spawn_sleep_run(&shell);
+	wait_for_run_pid(&shell, None).await;
+	first.await.expect("first run");
+	assert_abort_ends(&shell, second).await;
+}
+
+/// As above, for a run that is cancelled: its cleanup waits for its command
+/// to wind down, after which the queued run publishes its token.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_run_cleanup_keeps_queued_runs_abort_token() {
+	let _guard = shell_test_lock().lock().await;
+	let shell = Arc::new(Shell::new(None));
+	let sleep = test_executable("sleep");
+	let mut cancel_token = CancelToken::default();
+	let cancel_first = cancel_token.emplace_abort_token();
+	let mut first = pin!(shell.run(
+		ShellRunOptions { command: format!("'{}' 30", sleep.display()), ..Default::default() },
+		None,
+		cancel_token,
+	));
+	assert!(poll_once(&mut first).await.is_none(), "first run is in flight");
+	let first_pid = wait_for_run_pid(&shell, None).await;
+
+	let second = spawn_sleep_run(&shell);
+	cancel_first.abort(AbortReason::Signal);
+	assert!(poll_once(&mut first).await.is_none(), "first run waits for its command");
+	wait_for_run_pid(&shell, Some(first_pid)).await;
+	assert!(first.await.expect("first run").cancelled, "first run was cancelled");
+	assert_abort_ends(&shell, second).await;
 }
 
 #[cfg(unix)]

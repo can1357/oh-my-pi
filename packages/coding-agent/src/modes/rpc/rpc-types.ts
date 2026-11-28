@@ -26,13 +26,13 @@ import type { CacheWarmingMode } from "../../session/cache-warmer";
 import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import type { UsageLimitState } from "../../session/usage-limit";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
+import type { ConfiguredThinkingLevel } from "../../utils/render-utils";
+import type { AgentProgress } from "../../task/task-details";
 import type { RpcModelPickerResult } from "./rpc-model-picker";
 import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
-import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
+import type { TodoPhase } from "../../tools/details/todo";
+import type { LogoutAccount } from "../view-model/overlays/logout-account-selector";
+import type { LivePhase } from "../view-model/apps/live-visualizer";
 import type { RpcMessagesPage } from "./rpc-messages";
 import type { GoalModeState } from "../../goals/state";
 import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
@@ -64,6 +64,7 @@ export type RpcCommand =
 	| { id?: string; type: "abort_and_deliver_queue" }
 	| { id?: string; type: "resume" }
 	| { id?: string; type: "new_session"; parentSession?: string }
+	| { id?: string; type: "clear_context" }
 	| { id?: string; type: "open_session"; sessionDir: string; provider?: string; modelId?: string }
 
 	// State
@@ -222,8 +223,10 @@ export interface RpcSessionState {
 	/** Displayable queue-chip text for pending user-authored messages, mirroring
 	 *  `AgentSession.getQueuedMessages()`. Render the queue from this snapshot
 	 *  (and the `queue_update` event) instead of tracking chips independently.
-	 *  `liveSteered` counts the leading `steering` entries already sent into the
-	 *  streaming response; `remove_queued_message` cannot reach them. */
+	 *  Input the agent already took leads its list until the transcript records
+	 *  it; `liveSteered` counts the leading `steering` entries among it (live
+	 *  steering inside the streaming response, or steering on its way into the
+	 *  next request), which `remove_queued_message` cannot reach. */
 	queuedMessages: { steering: string[]; followUp: string[]; liveSteered: number };
 	todoPhases: TodoPhase[];
 	/** For session dump / export (plain-text parity with /dump). */
@@ -478,6 +481,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "abort_and_deliver_queue"; success: true; data: { aborted: boolean } }
 	| { id?: string; type: "response"; command: "resume"; success: true }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
+	| { id?: string; type: "response"; command: "clear_context"; success: true; data: { droppedCount: number } }
 	| { id?: string; type: "response"; command: "open_session"; success: true; data: RpcOpenSessionResult }
 
 	// State
@@ -681,7 +685,13 @@ export type RpcResponse =
 			success: true;
 			data: { accounts: LogoutAccount[] };
 	  }
-	| { id?: string; type: "response"; command: "logout"; success: true; data: { remainingSource?: string } }
+	| {
+			id?: string;
+			type: "response";
+			command: "logout";
+			success: true;
+			data: { remainingSource?: string; signOutError?: string };
+	  }
 
 	// Word prediction
 	| { id?: string; type: "response"; command: "predict_word"; success: true; data: { suffix: string | null } }

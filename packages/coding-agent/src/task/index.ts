@@ -1,6 +1,3 @@
-import { subprocessToolRegistry } from "./subprocess-tool-registry";
-import { isTaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { taskSubprocessRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
 /**
  * Task tool - Delegate tasks to specialized agents.
  *
@@ -16,6 +13,8 @@ import { taskSubprocessRenderer } from "@oh-my-pi/pi-tui/tools/subprocess";
  *   - Progress tracking via JSON events
  *   - Session artifacts for debugging
  */
+import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import { isTaskToolDetails } from "./task-details";
 import * as path from "node:path";
 import type {
 	AgentTool,
@@ -28,14 +27,13 @@ import { $env, isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { Settings } from "../config/settings";
-import type { Theme } from "@oh-my-pi/pi-tui/theme";
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" with { type: "text" };
 import taskCoordinationAdvisoryTemplate from "../prompts/tools/task-coordination-advisory.md" with { type: "text" };
+import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
 import taskSpawnFeedbackTemplate from "../prompts/tools/task-spawn-feedback.md" with { type: "text" };
 import taskSpecializationAdvisoryTemplate from "../prompts/tools/task-specialization-advisory.md" with { type: "text" };
-import taskFollowUpTemplate from "../prompts/tools/task-follow-up.md" with { type: "text" };
-import { TASK_EFFORTS, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import { AgentRegistry, isResumable } from "../registry/agent-registry";
 import { truncateForPrompt } from "../tools/approval";
 import { hasWaitTool } from "../tools/wait";
 import { IrcBus } from "../irc/bus";
@@ -44,19 +42,17 @@ import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
 import { type AgentDefinition, canSpawnAtDepth, getTaskSchema, type TaskToolSchemaInstance } from "./types";
-import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails } from "./task-details";
 import { AsyncJobError, type AsyncJobManagerApi } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
-import { AgentRegistry, isResumable } from "../registry/agent-registry";
-import { type DiscoveryResult, discoverAgents } from "./discovery";
+import { type DiscoveryResult, discoverAgents, getAgentDiscoverySources } from "./discovery";
 import { createEvalCustomTools, describeEvalTools, evalToolsEnabled } from "./eval-tools";
 import { getPerCallModelAdvertisement, type PerCallModelAdvertisement } from "./model-approval";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderStepsBrief } from "./steps";
-import { renderResult, renderCall as renderTaskCall } from "@oh-my-pi/pi-tui/tools/task";
-import { repairTaskParams } from "@oh-my-pi/pi-tui/tools/task-repair-args";
+import { repairTaskParams } from "./repair-args";
 import {
 	invalidModelSelectorReason,
 	normalizeModelSelector,
@@ -66,12 +62,11 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "./structured-subagent";
-import { SpawnRun, type SpawnPermit } from "./spawn-run";
+import { type SpawnPermit, SpawnRun } from "./spawn-run";
 import { type TaskLauncher, TaskLaunchSession } from "./speculative-launch";
 import type { TextTap } from "../job-widgets/text-tap";
 import type { SubagentToolResult } from "./executor";
 import { appendToolResult, createTaskWidgetInputs } from "./widget-inputs";
-
 import { cfgAsyncEnabled } from "../tools/settings";
 import {
 	cfgTaskBatch,
@@ -87,6 +82,8 @@ import {
 	cfgTaskStructured,
 	perCallModelEnabled,
 } from "./settings";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { TASK_EFFORTS, type TaskEffort } from "../thinking/levels";
 
 function createUsageTotals(): Usage {
 	return {
@@ -134,7 +131,7 @@ export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
 export * from "./read-only-policy";
 export type { AgentDefinition, SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "./types";
-export type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
+export type { AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./task-details";
 export * from "./result-summary";
 export {
 	TASK_SUBAGENT_EVENT_CHANNEL,
@@ -179,6 +176,9 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		name: agent.name,
 		description: agent.description,
 		readOnly: isReadOnlyAgent(agent),
+		// Declared grant so the spawner routes on capability (e.g. no shell); unset = full toolset.
+		// `yield` is internal plumbing, never a capability the spawner routes on.
+		tools: agent.tools?.filter(tool => tool !== "yield"),
 		blocking: agent.blocking === true,
 		// Marked only while `task.structured` is off; with it on, every agent's result is structured.
 		structured: !options.structured && agent.structured === true,
@@ -600,53 +600,58 @@ class TaskJobError extends AsyncJobError {}
 
 /**
  * Process-level create-time discovery memo and published reload snapshots,
- * keyed by resolved cwd plus the exact effective `extensions` array.
+ * keyed by resolved cwd, effective extension roots and discovery providers.
  *
- * `TaskTool.create` runs for every (sub)agent session in this process. Sessions
- * may share a cwd while carrying different overlay/runtime extension settings,
- * so cwd alone is not an isolation boundary. Explicit plugin reloads replace
- * only the matching cwd+extensions snapshot. Execution-time discovery
- * (`#runSpawn`) intentionally stays fresh. The memo also tracks the live
- * `discoverAgents` binding: test spies swap that binding, which invalidates
+ * Startup can begin the scan before a ToolSession exists. `TaskTool.create`
+ * looks up the session's current identity so it shares that work only if the
+ * scope and settings still match. Explicit reloads replace only the matching
+ * snapshot; execution-time discovery stays fresh.
+ * The memo tracks the live `discoverAgents` binding, so a test spy invalidates
  * both caches automatically.
  */
 const discoveryMemo = new Map<string, Promise<DiscoveryResult>>();
 const discoverySnapshots = new Map<string, AgentDefinition[]>();
 let discoveryMemoFn: typeof discoverAgents | undefined;
 
-/** Stable cache identity for the filesystem root and the full effective extension-root struct. */
-function discoveryCacheKey(cwd: string, extensionRoots?: EffectiveExtensionRoots): string {
-	return `${path.resolve(cwd)}\0${JSON.stringify(extensionRoots ?? null)}`;
+function discoveryCacheKey(
+	cwd: string,
+	extensionRoots?: EffectiveExtensionRoots,
+	sources = getAgentDiscoverySources(),
+): string {
+	return `${path.resolve(cwd)}\0${sources}\0${JSON.stringify(extensionRoots ?? null)}`;
 }
 
-function discoverAgentsForCreate(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<DiscoveryResult> {
+function discoverAgentsForCreate(
+	cwd: string,
+	extensionRoots?: EffectiveExtensionRoots,
+	refresh = false,
+): Promise<DiscoveryResult> {
 	const fn = discoverAgents;
 	if (discoveryMemoFn !== fn) {
 		discoveryMemoFn = fn;
 		discoveryMemo.clear();
 		discoverySnapshots.clear();
 	}
-	const key = discoveryCacheKey(cwd, extensionRoots);
-	let pending = discoveryMemo.get(key);
+	const sources = getAgentDiscoverySources();
+	const key = discoveryCacheKey(cwd, extensionRoots, sources);
+	let pending = refresh ? undefined : discoveryMemo.get(key);
 	if (!pending) {
-		pending = fn(cwd, undefined, extensionRoots);
+		pending = fn(cwd, undefined, extensionRoots, sources);
 		discoveryMemo.set(key, pending);
 		pending.catch(() => {
 			if (discoveryMemo.get(key) === pending) discoveryMemo.delete(key);
 		});
 	}
-	return pending;
+	if (!refresh) return pending;
+	return pending.then(result => {
+		if (discoveryMemo.get(key) === pending) discoverySnapshots.set(key, result.agents);
+		return result;
+	});
 }
 
 /** Rescan one cwd and publish its definitions to existing and future task tools. */
 export async function refreshAgentDiscovery(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<void> {
-	const key = discoveryCacheKey(cwd, extensionRoots);
-	discoveryMemo.delete(key);
-	const pending = discoverAgentsForCreate(cwd, extensionRoots);
-	const { agents } = await pending;
-	if (discoveryMemo.get(key) === pending) {
-		discoverySnapshots.set(key, agents);
-	}
+	await discoverAgentsForCreate(cwd, extensionRoots, true);
 }
 
 /** A spawn's `assignment`, labelling and displaying the run: its `task`, or every step as one brief. */
@@ -749,11 +754,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	// calls still normalize through arktype; `execute()` resolves `agent`
 	// defaults independently, so the success path is unchanged.
 	readonly lenientArgValidation = true;
-	readonly renderResult = renderResult;
-	// Suppress the streaming call preview once a (partial or final) result exists
-	// so the task renders as ONE block that transitions in place — not a pending
-	// call frame stacked above the result frame. Mirrors `taskToolRenderer`.
-	readonly mergeCallAndResult = true;
 	readonly #discoveredAgents: AgentDefinition[];
 	readonly #blockedAgent: string | undefined;
 	/**
@@ -823,10 +823,6 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			perCallModel: perCallModelEnabled(this.session.settings, "task"),
 			defaultAgent: this.#defaultAgent(),
 		});
-	}
-
-	renderCall(args: unknown, options: Parameters<typeof renderTaskCall>[1], theme: Theme) {
-		return renderTaskCall(repairTaskParams(args as TaskParams), options, theme);
 	}
 
 	/** Background-job lifecycle contract; inherited by extension replacements that delegate to Task. */
@@ -1023,8 +1019,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		});
 	}
 
-	/** Agents a TaskTool for `session` offers at construction; memoized per cwd and extension roots. */
-	static async discoverAgents(session: ToolSession): Promise<AgentDefinition[]> {
+	/** Start or reuse discovery of the agents a TaskTool will offer for this session scope. */
+	static async discoverAgents(session: Pick<ToolSession, "cwd" | "effectiveExtensionRoots">): Promise<AgentDefinition[]> {
 		return (await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.())).agents;
 	}
 
@@ -1980,6 +1976,5 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 }
 
 subprocessToolRegistry.register<TaskToolDetails>("task", {
-	...taskSubprocessRenderer,
 	extractData: event => (isTaskToolDetails(event.result?.details) ? event.result.details : undefined),
 });

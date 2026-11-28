@@ -191,21 +191,24 @@ function mainRegisterOptions(options: WireRegisterOptions | undefined, feed: Job
 }
 
 /** Everything workers registered on main managers (sinks, listeners, subscriptions). */
-const cleanups = new PeerCleanups(ASYNC_JOB_MANAGER_KIND);
+let cleanups: PeerCleanups | undefined;
 
-function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobManagerProtocol> {
+function serveManager(
+	threadId: ThreadId,
+	subscriptions: PeerCleanups,
+): RpcServe<AsyncJobManager, AsyncJobManagerProtocol> {
 	return {
 		hasWidgets: manager => manager.widgets !== undefined,
 		atCapacity: manager => manager.atCapacity,
 		onJobSettled: (manager, listener) =>
-			cleanups.track(
+			subscriptions.track(
 				threadId,
 				manager.onJobSettled(() => ignoreSettle(listener())),
 			),
-		onJobsChanged: (manager, listener) =>
-			cleanups.track(
+		onJobsChanged: (manager, listener, ids) =>
+			subscriptions.track(
 				threadId,
-				manager.onJobsChanged(() => ignoreSettle(listener())),
+				manager.onJobsChanged(() => ignoreSettle(listener()), ids),
 			),
 		register: (manager, type, label, run, options) => {
 			const feed = options?.feed ? new JobFeedMirror(options.feed) : undefined;
@@ -252,7 +255,7 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 		getEvictedJobs: (manager, filter) => manager.getEvictedJobs(filter),
 		waitForAll: manager => manager.waitForAll(),
 		registerDeliverySink: (manager, ownerId, sink) =>
-			cleanups.track(
+			subscriptions.track(
 				threadId,
 				manager.registerDeliverySink(ownerId, (jobId, text, job) =>
 					sink(jobId, text, job ? toJobWire(job) : undefined),
@@ -290,7 +293,7 @@ function serveManager(threadId: ThreadId): RpcServe<AsyncJobManager, AsyncJobMan
 		widgetSubscribe: (manager, listener) => {
 			const widgets = manager.widgets;
 			if (!widgets) return () => {};
-			return cleanups.track(
+			return subscriptions.track(
 				threadId,
 				widgets.subscribe(() => ignoreSettle(listener())),
 			);
@@ -303,7 +306,7 @@ function installMain(peer: WorkerPeer): void {
 	peer.link.exportClass<AsyncJobManager, AsyncJobManagerProtocol>(
 		ASYNC_JOB_MANAGER_KIND,
 		(value): value is AsyncJobManager => value instanceof AsyncJobManager,
-		serveManager(peer.threadId),
+		serveManager(peer.threadId, (cleanups ??= new PeerCleanups(ASYNC_JOB_MANAGER_KIND))),
 	);
 }
 
@@ -314,7 +317,7 @@ function installMain(peer: WorkerPeer): void {
 export const asyncJobsThreadService: ThreadService = {
 	name: ASYNC_JOB_MANAGER_KIND,
 	installMain,
-	onWorkerExit: peer => cleanups.release(peer.threadId),
+	onWorkerExit: peer => cleanups?.release(peer.threadId),
 	installWorker(link) {
 		link.importClass<RemoteAsyncJobManager, AsyncJobManagerProtocol>(
 			ASYNC_JOB_MANAGER_KIND,

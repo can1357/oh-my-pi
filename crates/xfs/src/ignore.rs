@@ -3,9 +3,11 @@
 //! Semantics follow the `ignore` crate as pi has always driven it:
 //!
 //! - Each directory may contribute `.ignore`, `.gitignore`, and (when it has a
-//!   `.git` entry) `.git/info/exclude`. For each of the three kinds the nearest
-//!   directory with a matching rule decides; `.ignore` beats `.gitignore` beats
-//!   the exclude file beats git's global excludes file.
+//!   `.git` entry) `.git/info/exclude`, or for a linked worktree or submodule
+//!   (`.git` is a file) the exclude file of the git dir it points to. For each
+//!   of the three kinds the nearest directory with a matching rule decides;
+//!   `.ignore` beats `.gitignore` beats the exclude file beats git's global
+//!   excludes file.
 //! - A walk may name one more per-directory file ([`Sources::custom`], `fd`'s
 //!   `.fdignore`), which beats them all, applies in and out of repositories,
 //!   and is read from every ancestor of the walk root.
@@ -37,7 +39,7 @@ use std::{
 };
 
 use crate::{
-	fs::{Dir, FileType, Fs, Session, Stamp},
+	fs::{Dir, FileInfo, FileType, Fs, Session, Stamp},
 	pattern::{Dialect, Glob},
 };
 
@@ -98,7 +100,7 @@ impl Rules {
 				None => std::mem::take(&mut data),
 			};
 			let Ok(mut line) = std::str::from_utf8(raw) else {
-				break;
+				continue;
 			};
 			if first {
 				line = line.trim_start_matches('\u{feff}');
@@ -197,11 +199,7 @@ fn parse_rule(line: &str) -> Option<Rule> {
 	if line.starts_with('#') {
 		return None;
 	}
-	let mut line = if line.ends_with("\\ ") {
-		line
-	} else {
-		line.trim_end()
-	};
+	let mut line = trim_trailing_unescaped_spaces(line);
 	if line.is_empty() {
 		return None;
 	}
@@ -219,6 +217,10 @@ fn parse_rule(line: &str) -> Option<Rule> {
 			absolute = true;
 		}
 	}
+	// A bare `!` or `/` leaves no pattern: git treats the line as a no-op.
+	if line.is_empty() {
+		return None;
+	}
 	let mut dir_only = false;
 	if let Some(rest) = line.strip_suffix('/') {
 		dir_only = true;
@@ -235,6 +237,34 @@ fn parse_rule(line: &str) -> Option<Rule> {
 	}
 	let glob = Glob::with_dialect(&actual, RULE_DIALECT).ok()?;
 	Some(Rule { glob, dir_only, whitelist })
+}
+
+/// Drops trailing spaces unless backslash-escaped, as gitignore(5) says;
+/// `foo\  ` keeps its escaped space and loses the rest.
+fn trim_trailing_unescaped_spaces(line: &str) -> &str {
+	let bytes = line.as_bytes();
+	let mut last_space = None;
+	let mut i = 0;
+	while i < bytes.len() {
+		match bytes[i] {
+			b'\\' => {
+				if i + 1 >= bytes.len() {
+					return line;
+				}
+				i += 2;
+				last_space = None;
+			},
+			b' ' => {
+				last_space.get_or_insert(i);
+				i += 1;
+			},
+			_ => {
+				last_space = None;
+				i += 1;
+			},
+		}
+	}
+	&line[..last_space.unwrap_or(line.len())]
 }
 
 /// Which ignore files a walk honours.
@@ -272,13 +302,15 @@ const HAS_DOT_IGNORE: u8 = 2;
 const HAS_GITIGNORE: u8 = 4;
 const HAS_GIT_DIR: u8 = 8;
 const HAS_REPO_MARKER: u8 = 16;
+/// `.git` is a file: a linked worktree or submodule root.
+const HAS_GIT_FILE: u8 = 32;
 
 /// Per-directory ignore sources after the custom one (index 0), in
 /// precedence order.
 const SOURCES: [&str; 4] = ["", ".ignore", ".gitignore", ".git/info/exclude"];
 
 /// Index of `.git/info/exclude`, which applies only inside a repository.
-const EXCLUDE: usize = 3;
+pub(crate) const EXCLUDE: usize = 3;
 
 /// Listing names that make each source worth reading: the file itself, or a
 /// `.git` entry for the exclude file.
@@ -297,6 +329,9 @@ impl Names {
 		match name {
 			b".ignore" if file_type != FileType::Dir => self.0 |= HAS_DOT_IGNORE,
 			b".gitignore" if file_type != FileType::Dir => self.0 |= HAS_GITIGNORE,
+			b".git" if file_type == FileType::File => {
+				self.0 |= HAS_GIT_DIR | HAS_REPO_MARKER | HAS_GIT_FILE;
+			},
 			b".git" => self.0 |= HAS_GIT_DIR | HAS_REPO_MARKER,
 			b".jj" => self.0 |= HAS_REPO_MARKER,
 			_ => {},
@@ -318,8 +353,11 @@ impl Names {
 /// they were read at (default when absent).
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DirIgnores {
-	pub(crate) files:  [Option<Arc<Rules>>; 4],
-	pub(crate) stamps: [Stamp; 4],
+	pub(crate) files:          [Option<Arc<Rules>>; 4],
+	pub(crate) stamps:         [Stamp; 4],
+	/// Where the exclude file was read from when `.git` is a file (see
+	/// [`linked_exclude`]), for cache revalidation.
+	pub(crate) linked_exclude: Option<PathBuf>,
 }
 
 /// Reads up to [`MAX_IGNORE_BYTES`] of an opened file into `buf`.
@@ -347,12 +385,45 @@ async fn open_exclude(
 	session.open_file_at(&info, b"exclude").await
 }
 
+/// The exclude file git reads for the worktree at `root`, whose `.git` is a
+/// file: its `gitdir: <path>` names the worktree's git dir (a linked
+/// worktree's or a submodule's), whose `commondir`, when present, names the
+/// repository's shared git dir. Relative paths resolve the way git resolves
+/// them, from `root` and from the git dir. `None` when `.git` names no git
+/// dir. `buf` is scratch.
+async fn linked_exclude(session: &mut Session, root: &Path, buf: &mut Vec<u8>) -> Option<PathBuf> {
+	let dot_git = omp_vfs::child_path(root, OsStr::new(".git"));
+	read_opened(session.open_file(&dot_git).await, buf)
+		.await
+		.ok()?;
+	let git_dir = pointer_path(buf, b"gitdir: ", root)?;
+	let commondir = omp_vfs::child_path(&git_dir, OsStr::new("commondir"));
+	let common_dir = match read_opened(session.open_file(&commondir).await, buf).await {
+		Ok(_) => pointer_path(buf, b"", &git_dir)?,
+		Err(_) => git_dir,
+	};
+	let info = omp_vfs::child_path(&common_dir, OsStr::new("info"));
+	Some(omp_vfs::child_path(&info, OsStr::new("exclude")))
+}
+
+/// The path a git pointer file (`.git`, `commondir`) holding `data` names
+/// after `prefix`, without trailing line breaks, resolved against `base`.
+fn pointer_path(data: &[u8], prefix: &[u8], base: &Path) -> Option<PathBuf> {
+	let end = data
+		.iter()
+		.rposition(|&b| b != b'\n' && b != b'\r')
+		.map_or(0, |last| last + 1);
+	let path = std::str::from_utf8(data[..end].strip_prefix(prefix)?).ok()?;
+	(!path.is_empty()).then(|| omp_vfs::join_path(base, Path::new(path)))
+}
+
 impl DirIgnores {
-	/// Reads the `sources` that `names` calls for, relative to the open `dir`;
-	/// `stamped` also records their stamps.
+	/// Reads the `sources` that `names` calls for, relative to the open `dir`
+	/// at absolute `abs`; `stamped` also records their stamps.
 	pub(crate) async fn load(
 		session: &mut Session,
 		dir: &Dir,
+		abs: &Path,
 		names: Names,
 		sources: Sources,
 		stamped: bool,
@@ -360,10 +431,17 @@ impl DirIgnores {
 		let mut out = Self::default();
 		let mut buf = Vec::new();
 		for (k, name) in Self::source_names(names, sources) {
-			let opened = if k == EXCLUDE {
-				open_exclude(session, dir).await
-			} else {
+			let opened = if k != EXCLUDE {
 				session.open_file_at(dir, name.as_bytes()).await
+			} else if names.has(HAS_GIT_FILE) {
+				let Some(path) = linked_exclude(session, abs, &mut buf).await else {
+					continue;
+				};
+				let opened = session.open_file(&path).await;
+				out.linked_exclude = Some(path);
+				opened
+			} else {
+				open_exclude(session, dir).await
 			};
 			let Ok(stamp) = read_opened(opened, &mut buf).await else {
 				continue;
@@ -657,11 +735,11 @@ async fn ancestor_frames(
 	sources: Sources,
 	buf: &mut Vec<u8>,
 ) -> Option<Arc<Frame>> {
-	async fn exists(session: &mut Session, dir: &Path, name: &str) -> bool {
+	async fn stat(session: &mut Session, dir: &Path, name: &str) -> Option<FileInfo> {
 		session
 			.stat(&omp_vfs::child_path(dir, OsStr::new(name)), true)
 			.await
-			.is_ok()
+			.ok()
 	}
 	if !sources.parents {
 		return None;
@@ -670,6 +748,8 @@ async fn ancestor_frames(
 	let mut ancestors: Vec<(&Path, Vec<u8>)> = Vec::new();
 	let mut up: Vec<u8> = Vec::new();
 	let mut repo = None;
+	// The repository root's `.git` is a file (see `linked_exclude`).
+	let mut linked = false;
 	let mut cur = root;
 	while let Some(parent) = omp_vfs::parent_path(cur) {
 		let Some(name) = omp_vfs::file_name(cur) else {
@@ -682,14 +762,15 @@ async fn ancestor_frames(
 		}
 		up = next;
 		ancestors.push((parent, up.clone()));
-		if sources.vcs
-			&& repo.is_none()
-			&& (exists(session, parent, ".git").await || exists(session, parent, ".jj").await)
-		{
-			repo = Some(ancestors.len() - 1);
-			// Only the custom file applies above the repository.
-			if sources.custom.is_none() {
-				break;
+		if sources.vcs && repo.is_none() {
+			let git = stat(session, parent, ".git").await;
+			if git.is_some() || stat(session, parent, ".jj").await.is_some() {
+				linked = git.is_some_and(|info| info.file_type == Some(FileType::File));
+				repo = Some(ancestors.len() - 1);
+				// Only the custom file applies above the repository.
+				if sources.custom.is_none() {
+					break;
+				}
 			}
 		}
 		cur = parent;
@@ -700,12 +781,22 @@ async fn ancestor_frames(
 		let vcs = repo.is_some_and(|repo| i <= repo);
 		let mut files: [Option<Arc<Rules>>; 4] = Default::default();
 		if let Some(custom) = sources.custom {
-			files[0] = load_ancestor(session, dir, custom, up, buf).await;
+			let path = omp_vfs::join_path(dir, Path::new(custom));
+			files[0] = load_ancestor(session, &path, up, buf).await;
 		}
 		for k in 1..SOURCES.len() {
-			if vcs && (k != EXCLUDE || has_git) {
-				files[k] = load_ancestor(session, dir, SOURCES[k], up, buf).await;
+			if !vcs || (k == EXCLUDE && !has_git) {
+				continue;
 			}
+			let path = if k == EXCLUDE && linked {
+				let Some(path) = linked_exclude(session, dir, buf).await else {
+					continue;
+				};
+				path
+			} else {
+				omp_vfs::join_path(dir, Path::new(SOURCES[k]))
+			};
+			files[k] = load_ancestor(session, &path, up, buf).await;
 		}
 		if has_git || files.iter().any(Option::is_some) {
 			let up = up.as_slice().into();
@@ -715,17 +806,15 @@ async fn ancestor_frames(
 	frame
 }
 
-/// Reads and compiles the rule file `rel` of ancestor `dir` (see
+/// Reads and compiles the rule file at `path` of an ancestor (see
 /// [`ancestor_rules`]).
 async fn load_ancestor(
 	session: &mut Session,
-	dir: &Path,
-	rel: &str,
+	path: &Path,
 	up: &[u8],
 	buf: &mut Vec<u8>,
 ) -> Option<Arc<Rules>> {
-	let path = omp_vfs::join_path(dir, Path::new(rel));
-	let opened = session.open_file(&path).await;
+	let opened = session.open_file(path).await;
 	read_opened(opened, buf).await.ok()?;
 	ancestor_rules(buf, up)
 }
@@ -780,7 +869,8 @@ fn git_configs() -> GitConfigs {
 /// Extracts `core.excludesFile` from raw git config contents: byte-for-byte
 /// the `ignore` crate's lazy
 /// `(?im-u)^\s*excludesfile\s*=\s*"?\s*(\S+?)\s*"?\s*$` (first match wins),
-/// then every `~` replaced with the home directory.
+/// then a leading `~` (alone or before a separator) replaced with the home
+/// directory; `C:/PROGRA~1` and `~user` stay as written.
 fn parse_excludes_file(data: &[u8], home: Option<&Path>) -> Option<PathBuf> {
 	const KEY: &[u8] = b"excludesfile";
 	let is_space = |b: u8| matches!(b, b'\t' | b'\n' | 0x0b | 0x0c | b'\r' | b' ');
@@ -826,10 +916,12 @@ fn parse_excludes_file(data: &[u8], home: Option<&Path>) -> Option<PathBuf> {
 			.or_else(|| capture_at(value_start))
 	})?;
 	let value = std::str::from_utf8(value).ok()?;
-	Some(PathBuf::from(match home {
-		Some(home) => value.replace('~', &home.to_string_lossy()),
-		None => value.to_owned(),
-	}))
+	let expanded = value
+		.strip_prefix('~')
+		.filter(|rest| rest.is_empty() || rest.starts_with(std::path::is_separator))
+		.zip(home)
+		.map(|(rest, home)| format!("{}{rest}", home.display()));
+	Some(PathBuf::from(expanded.unwrap_or_else(|| value.to_owned())))
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@
    - `packages/coding-agent/src/session/todo-tracker.ts` — owns canonical phases, restores branch snapshots, and manages completion reminders.
    - `packages/coding-agent/src/session/agent-session.ts` — exposes todo state hooks and emits failure reminders.
    - `packages/coding-agent/src/modes/controllers/todo-command-controller.ts` — `/todo` command path, custom-entry persistence, transcript reminder injection.
-   - `packages/tui/src/render/render-utils.ts` — collapsed-preview cap for renderer trees.
+   - `packages/coding-agent/src/utils/render-utils.ts` — collapsed-preview cap for renderer trees.
 
 ## Inputs
 
@@ -78,10 +78,10 @@ The TUI renderer (`todoToolRenderer`) merges call and result into one transcript
 6. After a successful mutation, `normalizeInProgressTask(...)` enforces the single-active-task invariant:
    - if multiple tasks are `in_progress`, only the first stays active and the rest become `pending`;
    - if none are `in_progress`, the first `pending` task in phase/task order is auto-promoted to `in_progress`;
-7. `execute(...)` stores the updated phases with `session.setTodoPhases?.(...)` only when the op produced no errors and was not a `view`; a failed op is discarded. `storage` is `"session"` when `session.getSessionFile()` exists, else `"memory"`.
+7. `execute(...)` stores the updated phases with `session.setTodoPhases?.(...)` only when the op produced no errors and was not a `view`; a failed op is discarded. In the main session, with a selected backend that defines `apply`, the change is committed only once the backend accepts it. `storage` is `"session"` when `session.getSessionFile()` exists, else `"memory"`.
 8. `getCompletionTransitions(...)` compares the previous and updated phases (skipped for failed or `view` calls); newly completed tasks are returned in `details.completedTasks`.
 9. Details include the resolved `op` on success or op-specific failure, including an op inferred from omitted input. A payload that cannot be schema-validated returns before an op is available.
-10.   The agent runtime watches `todo` tool results in `packages/coding-agent/src/session/agent-session.ts`; successful results refresh cached todos, failed results inject a hidden next-turn reminder telling the model that todo progress is not visible until it retries.
+10.   The agent runtime watches `todo` tool results in `packages/coding-agent/src/session/agent-session.ts`; successful results refresh cached todos, failed results inject a hidden next-turn reminder telling the model that todo progress is not visible until it retries. A call a todo backend kept from committing (refused by `apply`, or failed there for another reason) is the exception: it gets no reminder, since the payload was fine.
 11.   The event controller updates the visible todo UI from `result.details.phases` on success, or shows a warning on error (`packages/coding-agent/src/modes/controllers/event-controller.ts`).
 
 ## Modes / Variants
@@ -123,7 +123,7 @@ The same file also exposes non-tool helpers used by `/todo`:
    - Successful state-changing tool-result messages carry `details.phases`; `getLatestTodoPhasesFromEntries(...)` restores the latest canonical snapshot. Failed and pure-`view` results are skipped.
    - Eval callers use `committedTodoPhases(...)` to persist mutations separately when there is no direct `todo` tool-result entry.
    - Failed `todo` results cause `agent-session` to enqueue a hidden next-turn reminder (`customType: "todo-error-reminder"`).
-   - With `todo.backend` set to an extension's backend, every committed change to the main session's list is then handed to it as a whole list (`docs/extensions.md`, Todo backends). The backend is told after the commit and cannot refuse it.
+   - With `todo.backend` set to an extension's backend, every committed change to the main session's list is then handed to it as a whole list (`docs/extensions.md`, Todo backends). `replace` is told after the commit and cannot refuse it; a backend's optional `apply` is asked before the model's `todo` call commits and can refuse it.
 - User-visible prompts / interactive UI
    - Transcript block is rendered by `todoToolRenderer` and merged with the call line.
    - `event-controller` updates the visible todo panel from successful results.
@@ -137,7 +137,7 @@ The same file also exposes non-tool helpers used by `/todo`:
 - `init.list`: applies to a single op (`todoSchema`). The params object carries exactly one op.
 - `init.list[*].items`: schema-level `minItems: 1`.
 - Flat `init.items` and `append.items`: the shared schema allows any array length, but op-specific execution rejects missing/empty lists.
-- Renderer collapsed preview: `PREVIEW_LIMITS.COLLAPSED_ITEMS = 8` (`packages/tui/src/render/render-utils.ts`).
+- Renderer collapsed preview: `PREVIEW_LIMITS.COLLAPSED_ITEMS = 8` (`packages/coding-agent/src/utils/render-utils.ts`).
 - Execution-time repair: an omitted `op` is inferred only for the unambiguous payloads described above; the schema itself still requires `op`.
 - HUD auto-hide delay: `tasks.todoClearDelay` default `60` seconds; `< 0` disables hiding, `0` hides immediately. Applies only when all tasks are closed; pending or in-progress work keeps the HUD visible. Canonical state survives the display change and session resume.
 - Tool execution mode: `concurrency = "exclusive"`, `strict = true`, `loadMode = "discoverable"`.

@@ -139,11 +139,8 @@ describe("resolveImageTokenization", () => {
 		}
 	});
 
-	it("marks the Gemini, Sonnet and Grok rules measured on Antigravity, xAI and Devin as verified", () => {
-		// Cloud Code Assist bills every Gemini image 1,089 tokens; Google's own API keeps the documented 1,120.
-		for (const id of ["gemini-2.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash"]) {
-			expect(ruleFor("google-antigravity", id)).toEqual({ regime: "fixed", verified: true, tokens: 1089 });
-		}
+	it("marks the Gemini, Sonnet and Grok rules measured on xAI and Devin as verified", () => {
+		// Google's own API keeps the documented 1,120.
 		expect(ruleFor("google", "gemini-3.8-flash")).toEqual({ regime: "fixed", tokens: 1120 });
 		// Devin bills the Gemini models measured across sizes 1,089 (raw effort uids included); 3.6 Flash keeps the
 		// unverified lineage rule.
@@ -163,10 +160,8 @@ describe("resolveImageTokenization", () => {
 			expect(ruleFor("devin", id)).toEqual({ regime: "fixed", verified: true, tokens: 1089 });
 		}
 		expect(ruleFor("devin", "gemini-3-6-flash")).toEqual({ regime: "fixed", tokens: 1120 });
-		// Sonnet's standard tier is verified on every host; Opus 4.6 is not measured.
-		expect(ruleFor("google-antigravity", "claude-sonnet-4-6")).toEqual({ ...STANDARD, verified: true });
+		// Sonnet's standard tier is verified on every host.
 		expect(ruleFor("anthropic", "claude-sonnet-4-6").verified).toBe(true);
-		expect(ruleFor("google-antigravity", "claude-opus-4-6").verified).toBeUndefined();
 		// Grok 4.6 through 4.20 bill 32px patches resized past 2,401, plus a few tokens per image.
 		for (const [provider, id] of [
 			["xai-oauth", "grok-4.6"],
@@ -222,7 +217,7 @@ describe("resolveImageTokenization", () => {
 				GPT_PATCH,
 			);
 		}
-		for (const api of ["google-generative-ai", "google-gemini-cli", "google-vertex"]) {
+		for (const api of ["google-generative-ai", "google-vertex"]) {
 			expect(resolveImageTokenization({ provider: "google", api, id: "gemini-2.5-pro" })).toEqual({
 				regime: "fixed",
 				tokens: 1120,

@@ -4,7 +4,6 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -17,6 +16,9 @@ import { InteractiveMode, shouldEnterPlanModeOnStartup } from "../src/modes/inte
 import { resolveToolCommand, type ToolCommandState } from "../src/tools/tool-commands";
 
 import { cfgStartupQuiet } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgPlanEnabled } from "@oh-my-pi/pi-coding-agent/plan-mode/settings";
+import { initTheme } from "../src/ui/theme/service";
+import { createModeTerminal } from "./helpers/mode-terminal";
 
 function makeTool(name: string): AgentTool {
 	return {
@@ -142,7 +144,15 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 			toolCommands,
 		});
 		session = createdSession;
-		mode = new InteractiveMode(createdSession, "test");
+		mode = new InteractiveMode(
+			createdSession,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
 		return mode;
 	}
 
@@ -194,7 +204,16 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 			},
 		});
 
-		const resumedMode = new InteractiveMode(currentSession, "test");
+		const resumedMode = new InteractiveMode(
+			currentSession,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createModeTerminal().frame,
+		);
+		mode?.stop();
 		mode = resumedMode;
 		await resumedMode.init({ suppressWelcomeIntro: true });
 		expect(resumedMode.planModeEnabled).toBe(true);
@@ -221,6 +240,101 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(created.planModeEnabled).toBe(false);
 		expect(currentSession.model?.id).toBe(switched.id);
 		expect(currentSession.configuredThinkingLevel()).toBe(Effort.High);
+	});
+
+	it("does not switch to the plan-role model after exit when the entry switch was deferred by streaming", async () => {
+		const created = createHarness(Settings.isolated());
+		const currentSession = session;
+		const planModel = currentSession?.modelRegistry.find("anthropic", "claude-haiku-4-5");
+		if (!currentSession || !planModel) throw new Error("Expected claude-haiku-4-5 in registry");
+
+		// Stream is active throughout entry: #applyPlanModeModel snapshots the
+		// previous (default) model and queues a pending switch to the plan model
+		// instead of applying it immediately.
+		Object.defineProperty(currentSession, "isStreaming", { configurable: true, get: () => true });
+		vi.spyOn(currentSession, "resolveRoleModelWithThinking").mockReturnValue({
+			model: planModel,
+			thinkingLevel: undefined,
+			explicitThinkingLevel: false,
+			warning: undefined,
+		});
+		// Avoid kicking off real session work during plan mode entry.
+		vi.spyOn(currentSession, "sendPlanModeContext").mockResolvedValue(undefined);
+
+		const setModelSpy = vi.spyOn(currentSession, "setModelTemporary").mockResolvedValue(undefined);
+
+		await created.handlePlanModeCommand();
+		expect(created.planModeEnabled).toBe(true);
+
+		vi.spyOn(created, "showHookConfirm").mockResolvedValue(true);
+		await created.handlePlanModeCommand();
+		expect(created.planModeEnabled).toBe(false);
+
+		// Stream ends → event-controller flushes any queued model switch.
+		await created.flushPendingModelSwitch();
+
+		// The deferred plan-role switch must be discarded on exit; otherwise the
+		// next user turn lands on the plan-role model outside plan mode.
+		expect(setModelSpy).not.toHaveBeenCalled();
+	});
+
+	it("discards a deferred plan-role change when the role returns to the active model", async () => {
+		const created = createHarness(Settings.isolated());
+		const currentSession = session;
+		if (!currentSession) throw new Error("Expected harness session");
+		await created.init({ suppressWelcomeIntro: true });
+		await created.handlePlanModeCommand();
+		const activePlanModel = currentSession.model;
+		const haiku = currentSession.modelRegistry.find("anthropic", "claude-haiku-4-5");
+		const opus = currentSession.modelRegistry.find("anthropic", "claude-opus-4-5");
+		if (!activePlanModel || !haiku || !opus) throw new Error("Expected plan models");
+		const replacementPlanModel =
+			activePlanModel.provider === haiku.provider && activePlanModel.id === haiku.id ? opus : haiku;
+
+		let isStreaming = false;
+		Object.defineProperty(currentSession, "isStreaming", { configurable: true, get: () => isStreaming });
+
+		isStreaming = true;
+		currentSession.settings.setModelRole("plan", `${replacementPlanModel.provider}/${replacementPlanModel.id}`);
+		currentSession.settings.setModelRole("plan", `${activePlanModel.provider}/${activePlanModel.id}`);
+		isStreaming = false;
+
+		const setModelSpy = vi.spyOn(currentSession, "setModelTemporary").mockResolvedValue(undefined);
+		await created.flushPendingModelSwitch();
+
+		expect(setModelSpy).not.toHaveBeenCalled();
+	});
+
+	it("applies a plan-role reassignment to an active plan session", async () => {
+		const created = createHarness(Settings.isolated());
+		const currentSession = session;
+		if (!currentSession) throw new Error("Expected harness session");
+		await created.init({ suppressWelcomeIntro: true });
+		await created.handlePlanModeCommand();
+		const activePlanModel = currentSession.model;
+		const haiku = currentSession.modelRegistry.find("anthropic", "claude-haiku-4-5");
+		const opus = currentSession.modelRegistry.find("anthropic", "claude-opus-4-5");
+		if (!activePlanModel || !haiku || !opus) throw new Error("Expected plan models");
+		const replacementPlanModel =
+			activePlanModel.provider === haiku.provider && activePlanModel.id === haiku.id ? opus : haiku;
+
+		const setModelSpy = vi.spyOn(currentSession, "setModelTemporary").mockResolvedValue(undefined);
+		currentSession.settings.setModelRole("plan", `${replacementPlanModel.provider}/${replacementPlanModel.id}`);
+		await Promise.resolve();
+
+		expect(setModelSpy).toHaveBeenCalledWith(replacementPlanModel, undefined);
+	});
+
+	it("does not enter plan mode when plan.enabled is false", async () => {
+		const created = createHarness(Settings.isolated());
+		if (!session) throw new Error("Expected harness session");
+		cfgPlanEnabled.set(session.settings, false);
+		const warning = vi.spyOn(created, "showWarning").mockImplementation(() => {});
+
+		await created.handlePlanModeCommand();
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(warning).toHaveBeenCalledWith("Plan mode is disabled. Enable it in settings (plan.enabled).");
 	});
 
 	it("activates write when entering plan mode even if it was hidden by discoveryMode (issue #3165)", async () => {

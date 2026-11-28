@@ -12,7 +12,7 @@ import * as vm from "node:vm";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 
-import type { EvalTableColumn } from "@oh-my-pi/pi-tui/tools/eval";
+import type { EvalTableColumn } from "../../../tools/details/eval";
 import { type EvalDisplayOutput, evalImageMetadata } from "../../types";
 import type { EvalPreludeSource } from "../worker-protocol";
 import { createHelpers, type HelperBundle } from "./helpers";
@@ -22,11 +22,6 @@ import { JAVASCRIPT_PRELUDE_SOURCE } from "./prelude";
 import { diagnoseCellSyntaxError, wrapCode } from "./rewrite-imports";
 import type { JsStatusEvent } from "./types";
 
-export interface RuntimeCallIdentity {
-	siteId: string;
-	occurrence: number;
-}
-
 /**
  * Per-run callbacks. Runtime globals resolve these from AsyncLocalStorage so
  * overlapping async cells can route output/tool calls back to their own run.
@@ -34,7 +29,7 @@ export interface RuntimeCallIdentity {
 export interface RuntimeHooks {
 	onText(chunk: string): void;
 	onDisplay(output: EvalDisplayOutput): void;
-	callTool(name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown>;
+	callTool(name: string, args: unknown): Promise<unknown>;
 	/**
 	 * Called by `run` right before the cell's code is evaluated, once compiling it (which may load Babel) finished;
 	 * a throw fails the run without evaluating the cell.
@@ -72,7 +67,6 @@ export interface RunContext {
 	/** Internal-URL roots the run started with; a later run's {@link JsRuntime.setLocalRoots} must not move them. */
 	localRoots: Record<string, string>;
 	filename?: string;
-	callOccurrences: Map<string, number>;
 	finalExpressionSet: boolean;
 	finalExpressionValue: unknown;
 }
@@ -121,108 +115,12 @@ const PRELUDE_GLOBAL_KEYS = [
 	"WorkPool",
 	"log",
 	"phase",
-	"__omp_with_call_site__",
 	"budget",
 	"read",
 	"write",
 	"env",
 	"sh",
 ];
-
-/**
- * Which mutable global intrinsics still have their original identity.
- *
- * A retained cell can replace e.g. `String` with an arbitrary value; the shadow
- * projector models `String(...)`/`JSON.stringify(...)`/`Array.prototype.join`
- * calls as pure transforms only for names flagged intact here, so speculation
- * never performs I/O from a branch the real cell cannot reach.
- */
-export type ShadowInitialGlobals = Readonly<{
-	String: boolean;
-	JSON: boolean;
-	"JSON.stringify": boolean;
-	"Array.prototype.join": boolean;
-	/**
-	 * Whether `Object.prototype.toString` still has its original identity.
-	 * Implicit string coercion (templates, `+`) dispatches it for objects
-	 * (including arrays containing objects); a retained replacement changes
-	 * authoritative paths while leaving no snapshot trace. Absent only for
-	 * hand-built snapshots, where the intrinsic is assumed intact.
-	 */
-	"Object.prototype.toString"?: boolean;
-	/**
-	 * Whether the prelude tool bridge dispatcher still has its installed
-	 * identity. The proxy resolves `__omp_call_tool__` per call, so the flag
-	 * must track this binding; it also joins the snapshot digest, invalidating
-	 * plans if the installation ever changes under them. Absent only for
-	 * hand-built snapshots, where the bridge is assumed intact.
-	 */
-	__omp_call_tool__?: boolean;
-}>;
-
-export type ShadowSnapshot = Readonly<{
-	revision: number;
-	values: Readonly<Record<string, unknown>>;
-	initialGlobals: ShadowInitialGlobals;
-}>;
-
-export function shadowSnapshotDigest(snapshot: ShadowSnapshot): string {
-	// Intrinsic-identity flags participate: an async `globalThis.String = null` that
-	// lands after planning changes no value and bumps no revision, so a
-	// values-only digest would still match at verify time while projections made
-	// against the builtin no longer describe the cell. The template conversion
-	// avoids the mutable `String` global this function itself must survive.
-	return `${Bun.hash(JSON.stringify({ values: snapshot.values, initialGlobals: snapshot.initialGlobals }))}`;
-}
-
-const SHADOW_SNAPSHOT_MAX_DEPTH = 16;
-const SHADOW_SNAPSHOT_MAX_NODES = 2_000;
-const SHADOW_SNAPSHOT_MAX_STRING_BYTES = 8 * 1024 * 1024;
-
-function copyShadowValue(
-	value: unknown,
-	depth: number,
-	state: { nodes: number; bytes: number; seen: Set<object> },
-): unknown | undefined {
-	if (depth > SHADOW_SNAPSHOT_MAX_DEPTH || ++state.nodes > SHADOW_SNAPSHOT_MAX_NODES) return undefined;
-	if (value === null || typeof value === "boolean") return value;
-	if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
-	if (typeof value === "string") {
-		state.bytes += Buffer.byteLength(value);
-		return state.bytes <= SHADOW_SNAPSHOT_MAX_STRING_BYTES ? value : undefined;
-	}
-	if (typeof value !== "object" || util.types.isProxy(value) || state.seen.has(value)) return undefined;
-	state.seen.add(value);
-	try {
-		if (Array.isArray(value)) {
-			const keys = Reflect.ownKeys(value);
-			if (keys.length !== value.length + 1 || !keys.includes("length")) return undefined;
-			const copied: unknown[] = [];
-			for (let index = 0; index < value.length; index++) {
-				const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-				if (!descriptor || !("value" in descriptor)) return undefined;
-				const next = copyShadowValue(descriptor.value, depth + 1, state);
-				if (next === undefined) return undefined;
-				copied.push(next);
-			}
-			return copied;
-		}
-		if (Object.getPrototypeOf(value) !== Object.prototype) return undefined;
-		const keys = Object.keys(value);
-		if (Reflect.ownKeys(value).length !== keys.length) return undefined;
-		const copied: Record<string, unknown> = {};
-		for (const key of keys) {
-			const descriptor = Object.getOwnPropertyDescriptor(value, key);
-			if (!descriptor || !("value" in descriptor)) return undefined;
-			const next = copyShadowValue(descriptor.value, depth + 1, state);
-			if (next === undefined) return undefined;
-			copied[key] = next;
-		}
-		return copied;
-	} finally {
-		state.seen.delete(value);
-	}
-}
 
 function isStrictBase64(s: string): boolean {
 	if (s.length === 0 || s.length % 4 !== 0) return false;
@@ -336,54 +234,9 @@ export class JsRuntime {
 	readonly sessionId: string;
 	#env: Map<string, string>;
 	#als = new AsyncLocalStorage<RunContext>();
-	#callSiteAls = new AsyncLocalStorage<RuntimeCallIdentity>();
 	#moduleLoader: LocalModuleLoader;
 	#localRoots: Record<string, string>;
-	#namespaceRevision = 0;
-	#initialGlobalKeys = new Set<string>();
-	#initialIntrinsics = {
-		String: globalThis.String,
-		JSON: globalThis.JSON,
-		stringify: globalThis.JSON.stringify,
-		arrayJoin: Array.prototype.join,
-		objectToString: Object.prototype.toString,
-	};
-	#installedCallTool: unknown;
 
-	snapshotUserGlobals(): ShadowSnapshot {
-		this.#activateGlobals("snapshot user globals");
-		const values: Record<string, unknown> = {};
-		const snapshotState = { nodes: 0, bytes: 0, seen: new Set<object>() };
-		for (const key of Object.getOwnPropertyNames(globalThis)) {
-			if (this.#ownedGlobalKeys.has(key) || this.#initialGlobalKeys.has(key)) continue;
-			const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
-			if (!descriptor || !("value" in descriptor)) continue;
-			const copied = copyShadowValue(descriptor.value, 0, snapshotState);
-			if (copied !== undefined) values[key] = copied;
-		}
-		// A retained cell may replace these without leaving any snapshot trace
-		// (functions are never JSON-safe, and `delete` removes the key entirely),
-		// so record their identity explicitly. The `JSON` short-circuit guards the
-		// property access when a prior cell nulled the whole object.
-		const currentJSON = globalThis.JSON;
-		const initialGlobals: ShadowInitialGlobals = {
-			String: globalThis.String === this.#initialIntrinsics.String,
-			JSON: currentJSON === this.#initialIntrinsics.JSON,
-			"JSON.stringify":
-				typeof currentJSON === "object" &&
-				currentJSON !== null &&
-				currentJSON === this.#initialIntrinsics.JSON &&
-				currentJSON.stringify === this.#initialIntrinsics.stringify,
-			"Array.prototype.join": Array.prototype.join === this.#initialIntrinsics.arrayJoin,
-			"Object.prototype.toString": Object.prototype.toString === this.#initialIntrinsics.objectToString,
-			__omp_call_tool__: (globalThis as Record<string, unknown>).__omp_call_tool__ === this.#installedCallTool,
-		};
-		return Object.freeze({
-			revision: this.#namespaceRevision,
-			values: Object.freeze(values),
-			initialGlobals: Object.freeze(initialGlobals),
-		});
-	}
 	constructor(opts: RuntimeOptions) {
 		this.#cwd = opts.initialCwd;
 		this.#session = { cwd: opts.initialCwd, sessionId: opts.sessionId };
@@ -398,7 +251,6 @@ export class JsRuntime {
 			localRoots: () => this.#als.getStore()?.localRoots ?? this.#localRoots,
 			emitStatus: event => this.#activeHooks("emitStatus")?.onDisplay({ type: "status", event }),
 		});
-		this.#initialGlobalKeys = new Set(Object.getOwnPropertyNames(globalThis));
 		this.#install(opts.extraGlobals);
 	}
 
@@ -518,7 +370,6 @@ export class JsRuntime {
 			localRoots: this.#localRoots,
 			finalExpressionSet: false,
 			finalExpressionValue: undefined,
-			callOccurrences: new Map(),
 		};
 		try {
 			return await this.#als.run(context, callback);
@@ -535,7 +386,6 @@ export class JsRuntime {
 		options: { runId?: string; cwd?: string; localRoots?: Record<string, string> } = {},
 	): Promise<unknown> {
 		this.#activateGlobals("run code");
-		this.#namespaceRevision++;
 		const leaveRun = enterGlobalRun(this.#globalOwner, "run code");
 		const context: RunContext = {
 			runId: options.runId ?? crypto.randomUUID(),
@@ -545,7 +395,6 @@ export class JsRuntime {
 			filename,
 			finalExpressionSet: false,
 			finalExpressionValue: undefined,
-			callOccurrences: new Map(),
 		};
 		try {
 			return await this.#als.run(context, async () => {
@@ -655,17 +504,10 @@ export class JsRuntime {
 		const injected: Record<string, unknown> = {
 			__omp_session__: this.#session,
 			__omp_helpers__: this.helpers,
-			__omp_with_call_site__: <T>(siteId: string, action: () => T): T => {
-				const context = this.#als.getStore();
-				if (!context) return action();
-				const occurrence = context.callOccurrences.get(siteId) ?? 0;
-				context.callOccurrences.set(siteId, occurrence + 1);
-				return this.#callSiteAls.run({ siteId, occurrence }, action);
-			},
 			__omp_call_tool__: async (name: string, args: unknown) => {
 				const hooks = this.#activeHooks("tool");
 				if (!hooks) return undefined;
-				return surfaceBridgedToolImages(await hooks.callTool(name, args, this.#callSiteAls.getStore()), hooks);
+				return surfaceBridgedToolImages(await hooks.callTool(name, args), hooks);
 			},
 			__omp_prelude__: async (name: string, parameters: unknown) => {
 				const hooks = this.#activeHooks("prelude");
@@ -751,14 +593,6 @@ export class JsRuntime {
 		// onto globalThis. Must run after helpers are in place.
 		indirectEval(JAVASCRIPT_PRELUDE_SOURCE);
 		for (const key of allGlobalKeys) recordGlobalValue(key, this.#globalOwner);
-		// Capture the installed bridge dispatcher for the snapshot identity
-		// flag below. The prelude tool proxy resolves `__omp_call_tool__` per
-		// call, so the flag must track this binding. (Steady-state retained
-		// replacements self-heal: owned-global activation restores the recorded
-		// value before any observation. The `tool` binding itself needs no
-		// flag: the prelude declares it as a lexical const, which shadows any
-		// `globalThis.tool` replacement for bare references.)
-		this.#installedCallTool = (globalThis as Record<string, unknown>).__omp_call_tool__;
 		RUN_HOOK_RESOLVERS.add(this.#runHookResolver);
 		patchStdioOnce();
 	}

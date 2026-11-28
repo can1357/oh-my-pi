@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { hasFsCode, removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 function createSession(cwd: string): ToolSession {
@@ -27,7 +27,7 @@ function createSession(cwd: string): ToolSession {
 async function writeInChild(
 	target: string,
 	cwd: string,
-): Promise<{ code: number | null; signal: string | null; output: string }> {
+): Promise<{ code: number | null; signal: NodeJS.Signals | number | null; output: string }> {
 	const script = `
 		import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 		import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";

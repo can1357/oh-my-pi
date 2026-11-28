@@ -1,17 +1,12 @@
 /**
  * OpenCode Discovery Provider
  *
- * Loads configuration from OpenCode's config directories:
- * - User: ~/.config/opencode/
- * - Project: .opencode/ (cwd) and opencode.json/opencode.jsonc (project root)
+ * Loads project-level OpenCode configuration:
+ * - mcps: the "mcp" key of `opencode.json[c]` at the project root and in `.opencode/`
+ * - skills: `.opencode/skills/`
+ * - slash-commands: `.opencode/commands/`
  *
- * Capabilities:
- * - context-files: AGENTS.md (user-level only at ~/.config/opencode/AGENTS.md)
- * - mcps: From opencode.json and opencode.jsonc "mcp" keys
- * - settings: From opencode.json and opencode.jsonc
- * - skills: From skills/ subdirectories
- * - slash-commands: From commands/ subdirectories
- * - extension-modules: From plugins/ subdirectories
+ * OpenCode's user-level config (`~/.config/opencode`) is not read.
  *
  * Priority: 55 (tool-specific provider)
  */
@@ -20,48 +15,26 @@ import * as path from "node:path";
 import { isRecord, logger, parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { JSONC } from "bun";
 import { registerProvider } from "../capability";
-import { type ContextFile, contextFileCapability } from "../capability/context-file";
-import { type ExtensionModule, extensionModuleCapability } from "../capability/extension-module";
 import { readFile } from "../capability/fs";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
-import { type Settings, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
-import { slashCommandFrontmatterDisplay } from "@oh-my-pi/pi-tui/overlays/extensions/inspector-model";
-import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
+import type { LoadContext, LoadResult } from "../capability/types";
 import { settings } from "../config/settings";
-
-import {
-	buildExtensionModuleItems,
-	createSourceMeta,
-	discoverExtensionModulePaths,
-	getProjectPath,
-	getUserPath,
-	loadFilesFromDir,
-	resolveUserPath,
-	scanSkillsFromDir,
-} from "./helpers";
-
-import { cfgCommandsEnableOpencodeProject, cfgCommandsEnableOpencodeUser } from "../extensibility/settings";
+import { slashCommandFrontmatterDisplay } from "../extensibility/inventory/inspector-model";
+import { cfgCommandsEnableOpencodeProject } from "../extensibility/settings";
+import { createSourceMeta, getProjectPath, loadFilesFromDir, scanSkillsFromDir } from "./helpers";
 
 const PROVIDER_ID = "opencode";
 const DISPLAY_NAME = "OpenCode";
 const PRIORITY = 55;
 const CONFIG_FILENAMES = ["opencode.json", "opencode.jsonc"] as const;
 
-interface OpenCodeConfigSource {
-	path: string;
-	level: "user" | "project";
-}
-
 // =============================================================================
 // JSON Config Loading
 // =============================================================================
 
-async function loadJsonConfig(
-	configPath: string,
-	onInvalid: (configPath: string) => void,
-): Promise<Record<string, unknown> | null> {
+async function loadJsonConfig(configPath: string): Promise<Record<string, unknown> | null> {
 	const content = await readFile(configPath);
 	if (!content) return null;
 
@@ -69,11 +42,11 @@ async function loadJsonConfig(
 	try {
 		parsed = JSONC.parse(await substituteConfigVars(content, configPath));
 	} catch {
-		onInvalid(configPath);
+		logger.warn("Failed to parse OpenCode config", { path: configPath });
 		return null;
 	}
 	if (!isRecord(parsed)) {
-		onInvalid(configPath);
+		logger.warn("Failed to parse OpenCode config", { path: configPath });
 		return null;
 	}
 	return parsed;
@@ -133,56 +106,18 @@ async function substituteConfigVars(text: string, configPath: string): Promise<s
 }
 
 /**
- * OpenCode config sources in ascending effective precedence (lowest first):
- * user `opencode.json` → user `opencode.jsonc` → project-root
- * `opencode.json` → project-root `opencode.jsonc` → project `.opencode/opencode.json`
- * → project `.opencode/opencode.jsonc`. This matches how OpenCode merges configs:
- * project overrides user, `.opencode` overrides project-root config, and within
- * a directory `opencode.jsonc` overrides `opencode.json`.
- *
- * Both consumers apply this order low-to-high: settings deep-merge in item
- * order (last wins) and `loadMCPServers` deep-merges each server across layers
- * (later overrides earlier), so higher-precedence sources win in both.
+ * OpenCode config files in ascending effective precedence (lowest first):
+ * project-root `opencode.json` → project-root `opencode.jsonc` →
+ * `.opencode/opencode.json` → `.opencode/opencode.jsonc`. This matches how
+ * OpenCode merges configs: `.opencode` overrides project-root config, and within
+ * a directory `opencode.jsonc` overrides `opencode.json`. `loadMCPServers`
+ * deep-merges each server across these layers (later overrides earlier).
  */
-function getConfigSources(ctx: LoadContext): OpenCodeConfigSource[] {
-	const sources: OpenCodeConfigSource[] = [];
-	for (const filename of CONFIG_FILENAMES) {
-		const configPath = getUserPath(ctx, "opencode", filename);
-		if (configPath) sources.push({ path: configPath, level: "user" });
-	}
-	for (const filename of CONFIG_FILENAMES) {
-		sources.push({ path: path.join(ctx.cwd, filename), level: "project" });
-	}
-	for (const filename of CONFIG_FILENAMES) {
-		const configPath = getProjectPath(ctx, "opencode", filename);
-		if (configPath) sources.push({ path: configPath, level: "project" });
-	}
-	return sources;
-}
-
-// =============================================================================
-// Context Files (AGENTS.md)
-// =============================================================================
-
-async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFile>> {
-	const items: ContextFile[] = [];
-	const warnings: string[] = [];
-
-	// User-level only: ~/.config/opencode/AGENTS.md
-	const userAgentsMd = getUserPath(ctx, "opencode", "AGENTS.md");
-	if (userAgentsMd) {
-		const content = await readFile(userAgentsMd);
-		if (content) {
-			items.push({
-				path: userAgentsMd,
-				content,
-				level: "user",
-				_source: createSourceMeta(PROVIDER_ID, userAgentsMd, "user"),
-			});
-		}
-	}
-
-	return { items, warnings };
+function getConfigPaths(ctx: LoadContext): string[] {
+	return [
+		...CONFIG_FILENAMES.map(filename => path.join(ctx.cwd, filename)),
+		...CONFIG_FILENAMES.map(filename => getProjectPath(ctx, "opencode", filename)),
+	];
 }
 
 // =============================================================================
@@ -270,12 +205,10 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	// command/url from lower-precedence layers instead of shadowing the complete
 	// definition and being rejected by mcpCapability.validate.
 	const mergedByName = new Map<string, Record<string, unknown>>();
-	const sourceByName = new Map<string, OpenCodeConfigSource>();
+	const sourceByName = new Map<string, string>();
 
-	for (const source of getConfigSources(ctx)) {
-		const config = await loadJsonConfig(source.path, configPath => {
-			logger.warn("Failed to parse OpenCode config", { path: configPath });
-		});
+	for (const configPath of getConfigPaths(ctx)) {
+		const config = await loadJsonConfig(configPath);
 		if (!config || !isRecord(config.mcp)) continue;
 
 		// OpenCode v2 nests servers under mcp.servers; older configs use mcp directly.
@@ -291,20 +224,20 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 		for (const name in serverConfigs) {
 			const raw = serverConfigs[name];
 			if (!isRecord(raw)) {
-				warnings.push(`Invalid MCP config for "${name}" in ${source.path}`);
+				warnings.push(`Invalid MCP config for "${name}" in ${configPath}`);
 				continue;
 			}
 			const previous = mergedByName.get(name);
 			mergedByName.set(name, previous ? mergeConfigRecords(previous, raw) : raw);
-			sourceByName.set(name, source);
+			sourceByName.set(name, configPath);
 		}
 	}
 
 	const items: MCPServer[] = [];
 	for (const [name, config] of mergedByName) {
 		const serverConfig = config as OpenCodeMCPConfig;
-		const source = sourceByName.get(name)!;
-		items.push(buildMCPServer(name, serverConfig, source));
+		const configPath = sourceByName.get(name)!;
+		items.push(buildMCPServer(name, serverConfig, configPath));
 	}
 
 	return { items, warnings };
@@ -322,7 +255,7 @@ function mergeConfigRecords(base: Record<string, unknown>, override: Record<stri
 }
 
 /** Translate one merged OpenCode MCP entry into the canonical MCPServer shape. */
-function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: OpenCodeConfigSource): MCPServer {
+function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, configPath: string): MCPServer {
 	// Determine transport from OpenCode's "type" field
 	let transport: "stdio" | "sse" | "http" | undefined;
 	if (serverConfig.type === "local") {
@@ -349,7 +282,7 @@ function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: O
 		timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 		oauth: normalizeOAuth(serverConfig.oauth),
 		transport,
-		_source: createSourceMeta(PROVIDER_ID, source.path, source.level),
+		_source: createSourceMeta(PROVIDER_ID, configPath, "project"),
 	};
 }
 
@@ -357,55 +290,12 @@ function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: O
 // Skills (skills/)
 // =============================================================================
 
-async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
-	const userSkillsDir = getUserPath(ctx, "opencode", "skills");
-	const projectSkillsDir = getProjectPath(ctx, "opencode", "skills");
-
-	const promises: Promise<LoadResult<Skill>>[] = [];
-
-	if (userSkillsDir) {
-		promises.push(
-			scanSkillsFromDir(ctx, {
-				dir: userSkillsDir,
-				providerId: PROVIDER_ID,
-				level: "user",
-			}),
-		);
-	}
-
-	if (projectSkillsDir) {
-		promises.push(
-			scanSkillsFromDir(ctx, {
-				dir: projectSkillsDir,
-				providerId: PROVIDER_ID,
-				level: "project",
-			}),
-		);
-	}
-
-	const results = await Promise.all(promises);
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
-}
-
-// =============================================================================
-// Extension Modules (plugins/)
-// =============================================================================
-
-async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<ExtensionModule>> {
-	const userPluginsDir = getUserPath(ctx, "opencode", "plugins");
-	const projectPluginsDir = getProjectPath(ctx, "opencode", "plugins");
-
-	const [userPaths, projectPaths] = await Promise.all([
-		userPluginsDir ? discoverExtensionModulePaths(ctx, userPluginsDir) : Promise.resolve([]),
-		projectPluginsDir ? discoverExtensionModulePaths(ctx, projectPluginsDir) : Promise.resolve([]),
-	]);
-
-	const items = buildExtensionModuleItems(PROVIDER_ID, userPaths, projectPaths);
-
-	return { items, warnings: [] };
+function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
+	return scanSkillsFromDir(ctx, {
+		dir: getProjectPath(ctx, "opencode", "skills"),
+		providerId: PROVIDER_ID,
+		level: "project",
+	});
 }
 
 // =============================================================================
@@ -413,31 +303,23 @@ async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<Extens
 // =============================================================================
 
 /**
- * Read the OpenCode command-loading toggles from settings.
- * Falls back to true (current behavior) when settings are not initialized,
- * e.g. inside discovery unit tests that run without Settings.init().
+ * Read the OpenCode project command-loading toggle. Falls back to true when
+ * settings are not initialized, e.g. inside discovery unit tests without Settings.init().
  */
-function readOpencodeCommandToggles(): { enableUser: boolean; enableProject: boolean } {
+function readOpencodeProjectCommandsToggle(): boolean {
 	try {
-		return {
-			enableUser: cfgCommandsEnableOpencodeUser.get(settings) === true,
-			enableProject: cfgCommandsEnableOpencodeProject.get(settings),
-		};
+		return cfgCommandsEnableOpencodeProject.get(settings);
 	} catch {
-		return { enableUser: false, enableProject: true };
+		return true;
 	}
 }
 
 async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashCommand>> {
-	const { enableUser, enableProject } = readOpencodeCommandToggles();
-	// The legacy commands toggle is a commands-only opt-in for ~/.config/opencode.
-	const userCommandsDir = enableUser
-		? resolveUserPath(ctx, "opencode", "commands")
-		: getUserPath(ctx, "opencode", "commands");
-	const projectCommandsDir = enableProject ? getProjectPath(ctx, "opencode", "commands") : null;
+	if (!readOpencodeProjectCommandsToggle()) return { items: [], warnings: [] };
 
-	const transformCommand =
-		(level: "user" | "project") => (name: string, content: string, filePath: string, source: SourceMeta) => {
+	return loadFilesFromDir<SlashCommand>(ctx, getProjectPath(ctx, "opencode", "commands"), PROVIDER_ID, "project", {
+		extensions: ["md"],
+		transform: (name, content, filePath, source) => {
 			const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
 			const commandName = frontmatter.name || name.replace(/\.md$/, "");
 			return {
@@ -446,79 +328,21 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 				content: body,
 				...slashCommandFrontmatterDisplay(frontmatter),
 				...(frontmatter.side === true ? { side: true } : {}),
-				level,
+				level: "project",
 				_source: source,
 			};
-		};
-
-	const promises: Promise<LoadResult<SlashCommand>>[] = [];
-
-	if (userCommandsDir) {
-		promises.push(
-			loadFilesFromDir(ctx, userCommandsDir, PROVIDER_ID, "user", {
-				extensions: ["md"],
-				transform: transformCommand("user"),
-			}),
-		);
-	}
-
-	if (projectCommandsDir) {
-		promises.push(
-			loadFilesFromDir(ctx, projectCommandsDir, PROVIDER_ID, "project", {
-				extensions: ["md"],
-				transform: transformCommand("project"),
-			}),
-		);
-	}
-
-	const results = await Promise.all(promises);
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
-}
-
-// =============================================================================
-// Settings (opencode.json/opencode.jsonc)
-// =============================================================================
-
-async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
-	const items: Settings[] = [];
-	const warnings: string[] = [];
-
-	for (const source of getConfigSources(ctx)) {
-		const parsed = await loadJsonConfig(source.path, configPath => {
-			warnings.push(`Invalid JSON in ${configPath}`);
-		});
-		if (!parsed) continue;
-
-		items.push({
-			path: source.path,
-			data: parsed,
-			level: source.level,
-			_source: createSourceMeta(PROVIDER_ID, source.path, source.level),
-		});
-	}
-
-	return { items, warnings };
+		},
+	});
 }
 
 // =============================================================================
 // Provider Registration
 // =============================================================================
 
-registerProvider(contextFileCapability.id, {
-	id: PROVIDER_ID,
-	displayName: DISPLAY_NAME,
-	description: "Load AGENTS.md from ~/.config/opencode/",
-	priority: PRIORITY,
-	load: loadContextFiles,
-});
-
 registerProvider(mcpCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load MCP servers from OpenCode config files",
+	description: "Load MCP servers from opencode.json[c] and .opencode/opencode.json[c]",
 	priority: PRIORITY,
 	load: loadMCPServers,
 });
@@ -526,31 +350,15 @@ registerProvider(mcpCapability.id, {
 registerProvider(skillCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load skills from ~/.config/opencode/skills/ and .opencode/skills/",
+	description: "Load skills from .opencode/skills/",
 	priority: PRIORITY,
 	load: loadSkills,
-});
-
-registerProvider(extensionModuleCapability.id, {
-	id: PROVIDER_ID,
-	displayName: DISPLAY_NAME,
-	description: "Load extension modules from ~/.config/opencode/plugins/ and .opencode/plugins/",
-	priority: PRIORITY,
-	load: loadExtensionModules,
 });
 
 registerProvider(slashCommandCapability.id, {
 	id: PROVIDER_ID,
 	displayName: DISPLAY_NAME,
-	description: "Load slash commands from ~/.config/opencode/commands/ and .opencode/commands/",
+	description: "Load slash commands from .opencode/commands/",
 	priority: PRIORITY,
 	load: loadSlashCommands,
-});
-
-registerProvider(settingsCapability.id, {
-	id: PROVIDER_ID,
-	displayName: DISPLAY_NAME,
-	description: "Load settings from OpenCode config files",
-	priority: PRIORITY,
-	load: loadSettings,
 });

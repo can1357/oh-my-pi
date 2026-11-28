@@ -1,4 +1,4 @@
-import { type DebugToolDetails, formatLocation, formatSessionSnapshot } from "@oh-my-pi/pi-tui/tools/debug";
+import { type DebugToolDetails, formatLocation, formatSessionSnapshot } from "./details/debug";
 import * as fs from "node:fs/promises";
 import { type } from "@oh-my-pi/omptype";
 import type {
@@ -10,40 +10,36 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
-import {
-	type DapBreakpointRecord,
-	type DapCapabilities,
-	type DapContinueOutcome,
-	type DapDataBreakpointInfoResponse,
-	type DapDataBreakpointRecord,
-	type DapDisassembledInstruction,
-	type DapEvaluateArguments,
-	type DapEvaluateResponse,
-	type DapFunctionBreakpointRecord,
-	type DapInstructionBreakpointRecord,
-	type DapModule,
-	type DapResolvedAdapter,
-	type DapScope,
-	type DapSessionSummary,
-	type DapSource,
-	type DapStackFrame,
-	type DapThread,
-	type DapVariable,
-	dapSessionManager,
-	getAdapterConfigs,
-	getAvailableAdapters,
-	type LaunchProgramKind,
-	resolveLaunchOverrides,
-	selectAttachAdapter,
-	selectLaunchAdapter,
+import type {
+	DapBreakpointRecord,
+	DapCapabilities,
+	DapContinueOutcome,
+	DapDataBreakpointInfoResponse,
+	DapDataBreakpointRecord,
+	DapDisassembledInstruction,
+	DapEvaluateArguments,
+	DapEvaluateResponse,
+	DapFunctionBreakpointRecord,
+	DapInstructionBreakpointRecord,
+	DapModule,
+	DapResolvedAdapter,
+	DapScope,
+	DapSessionManager,
+	DapSessionSummary,
+	DapSource,
+	DapStackFrame,
+	DapThread,
+	DapVariable,
+	LaunchProgramKind,
 } from "../dap";
 import debugDescription from "../prompts/tools/debug.md" with { type: "text" };
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
-import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
+import type { OutputMeta } from "./output-meta-format";
 import { formatPathRelativeToCwd, resolveToCwd } from "./path-utils";
-import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { replaceTabs, truncateToWidth } from "../utils/text-width";
+import { shortenPath, TRUNCATE_LENGTHS } from "../utils/render-utils";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -455,8 +451,8 @@ function buildOutcomeText(outcome: DapContinueOutcome, timeoutSec: number, verb:
 	return lines.join("\n");
 }
 
-function getConfiguredAdapters(cwd: string): string {
-	const adapters = getAvailableAdapters(cwd).map(adapter => adapter.name);
+function getConfiguredAdapters(available: readonly DapResolvedAdapter[]): string {
+	const adapters = available.map(adapter => adapter.name);
 	const names = adapters.length > 0 ? adapters.join(", ") : "none";
 	return truncateToWidth(replaceTabs(names), TRUNCATE_LENGTHS.LONG);
 }
@@ -476,7 +472,12 @@ const ADAPTER_CANONICAL_COMMANDS: Readonly<Record<string, string>> = {
 	"js-debug-adapter": "js-debug-adapter",
 };
 
-function formatAdapterUnavailable(adapterName: string, command: string, cwd: string): string {
+function formatAdapterUnavailable(
+	adapterName: string,
+	command: string,
+	cwd: string,
+	getAvailableAdapters: (cwd: string) => DapResolvedAdapter[],
+): string {
 	const displayName = truncateToWidth(replaceTabs(adapterName), TRUNCATE_LENGTHS.SHORT);
 	const canonicalCommand = ADAPTER_CANONICAL_COMMANDS[adapterName] ?? adapterName;
 	if (command !== canonicalCommand) {
@@ -485,7 +486,7 @@ function formatAdapterUnavailable(adapterName: string, command: string, cwd: str
 	}
 	return (
 		ADAPTER_UNAVAILABLE_MESSAGES[adapterName] ??
-		`adapter '${displayName}' is not available. Installed adapters: ${getConfiguredAdapters(cwd)}`
+		`adapter '${displayName}' is not available. Installed adapters: ${getConfiguredAdapters(getAvailableAdapters(cwd))}`
 	);
 }
 
@@ -511,7 +512,7 @@ function validateLaunchProgram(
 	);
 }
 
-function getActiveSessionSnapshot(): DapSessionSummary {
+function getActiveSessionSnapshot(dapSessionManager: DapSessionManager): DapSessionSummary {
 	const snapshot = dapSessionManager.getActiveSession();
 	if (!snapshot) {
 		throw new ToolError("No active debug session. Launch or attach first.");
@@ -519,19 +520,22 @@ function getActiveSessionSnapshot(): DapSessionSummary {
 	return snapshot;
 }
 
-function requireCapability(capability: keyof DapCapabilities, description: string): DapSessionSummary {
-	const snapshot = getActiveSessionSnapshot();
+function requireCapability(
+	dapSessionManager: DapSessionManager,
+	capability: keyof DapCapabilities,
+	description: string,
+): void {
+	getActiveSessionSnapshot(dapSessionManager);
 	if (dapSessionManager.getCapabilities()?.[capability] !== true) {
 		throw new ToolError(`Current adapter does not support ${description}`);
 	}
-	return snapshot;
 }
 
-function resolveDisassemblyReference(memoryReference: string | undefined): string {
+function resolveDisassemblyReference(dapSessionManager: DapSessionManager, memoryReference: string | undefined): string {
 	if (memoryReference) {
 		return memoryReference;
 	}
-	const snapshot = getActiveSessionSnapshot();
+	const snapshot = getActiveSessionSnapshot(dapSessionManager);
 	if (snapshot.instructionPointerReference) {
 		return snapshot.instructionPointerReference;
 	}
@@ -594,6 +598,16 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 		_onUpdate?: AgentToolUpdateCallback<DebugExecutionDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<DebugExecutionDetails>> {
+		// Keep adapter config and transport off the startup graph while leaving
+		// the wrapper, schema, and approval available to the tool registry.
+		const {
+			dapSessionManager,
+			getAdapterConfigs,
+			getAvailableAdapters,
+			resolveLaunchOverrides,
+			selectAttachAdapter,
+			selectLaunchAdapter,
+		} = await import("../dap");
 		const timeoutSec = clampTimeout("debug", params.timeout, cfgToolsMaxTimeout.get(this.session.settings));
 		const timeoutSignal = AbortSignal.timeout(timeoutSec * 1000);
 		const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
@@ -609,11 +623,13 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				const programKind = await classifyLaunchProgram(program);
 				const selection = selectLaunchAdapter(program, commandCwd, params.adapter, programKind);
 				if (selection.kind === "unavailable") {
-					throw new ToolError(formatAdapterUnavailable(selection.adapterName, selection.command, commandCwd));
+					throw new ToolError(
+						formatAdapterUnavailable(selection.adapterName, selection.command, commandCwd, getAvailableAdapters),
+					);
 				}
 				if (selection.kind === "none") {
 					throw new ToolError(
-						`No debugger adapter available. Installed adapters: ${getConfiguredAdapters(commandCwd)}`,
+						`No debugger adapter available. Installed adapters: ${getConfiguredAdapters(getAvailableAdapters(commandCwd))}`,
 					);
 				}
 				const { adapter } = selection;
@@ -641,10 +657,12 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				if (!adapter) {
 					if (params.adapter) {
 						const command = getAdapterConfigs(commandCwd)[params.adapter]?.command ?? params.adapter;
-						throw new ToolError(formatAdapterUnavailable(params.adapter, command, commandCwd));
+						throw new ToolError(
+							formatAdapterUnavailable(params.adapter, command, commandCwd, getAvailableAdapters),
+						);
 					}
 					throw new ToolError(
-						`No debugger adapter available. Installed adapters: ${getConfiguredAdapters(commandCwd)}`,
+						`No debugger adapter available. Installed adapters: ${getConfiguredAdapters(getAvailableAdapters(commandCwd))}`,
 					);
 				}
 				const snapshot = await dapSessionManager.attach(
@@ -709,7 +727,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				return result.text(formatBreakpoints(response.sourcePath, response.breakpoints)).done();
 			}
 			case "set_instruction_breakpoint": {
-				requireCapability("supportsInstructionBreakpoints", "instruction breakpoints");
+				requireCapability(dapSessionManager, "supportsInstructionBreakpoints", "instruction breakpoints");
 				if (!params.instruction_reference) {
 					throw new ToolError("instruction_reference is required for set_instruction_breakpoint");
 				}
@@ -726,7 +744,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				return result.text(formatInstructionBreakpoints(response.breakpoints)).done();
 			}
 			case "remove_instruction_breakpoint": {
-				requireCapability("supportsInstructionBreakpoints", "instruction breakpoints");
+				requireCapability(dapSessionManager, "supportsInstructionBreakpoints", "instruction breakpoints");
 				if (!params.instruction_reference) {
 					throw new ToolError("instruction_reference is required for remove_instruction_breakpoint");
 				}
@@ -741,7 +759,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				return result.text(formatInstructionBreakpoints(response.breakpoints)).done();
 			}
 			case "data_breakpoint_info": {
-				requireCapability("supportsDataBreakpoints", "data breakpoints");
+				requireCapability(dapSessionManager, "supportsDataBreakpoints", "data breakpoints");
 				if (!params.name) {
 					throw new ToolError("name is required for data_breakpoint_info");
 				}
@@ -757,7 +775,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				return result.text(formatDataBreakpointInfo(response.info)).done();
 			}
 			case "set_data_breakpoint": {
-				requireCapability("supportsDataBreakpoints", "data breakpoints");
+				requireCapability(dapSessionManager, "supportsDataBreakpoints", "data breakpoints");
 				if (!params.data_id) {
 					throw new ToolError("data_id is required for set_data_breakpoint");
 				}
@@ -774,7 +792,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				return result.text(formatDataBreakpoints(response.breakpoints)).done();
 			}
 			case "remove_data_breakpoint": {
-				requireCapability("supportsDataBreakpoints", "data breakpoints");
+				requireCapability(dapSessionManager, "supportsDataBreakpoints", "data breakpoints");
 				if (!params.data_id) {
 					throw new ToolError("data_id is required for remove_data_breakpoint");
 				}
@@ -865,12 +883,12 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				return result.text(formatVariables(response.variables)).done();
 			}
 			case "disassemble": {
-				requireCapability("supportsDisassembleRequest", "disassembly");
+				requireCapability(dapSessionManager, "supportsDisassembleRequest", "disassembly");
 				if (params.instruction_count === undefined) {
 					throw new ToolError("instruction_count is required for disassemble");
 				}
 				const response = await dapSessionManager.disassemble(
-					resolveDisassemblyReference(params.memory_reference),
+					resolveDisassemblyReference(dapSessionManager, params.memory_reference),
 					params.instruction_count,
 					params.offset,
 					params.instruction_offset,
@@ -883,7 +901,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				return result.text(formatDisassembly(response.instructions)).done();
 			}
 			case "read_memory": {
-				requireCapability("supportsReadMemoryRequest", "memory reads");
+				requireCapability(dapSessionManager, "supportsReadMemoryRequest", "memory reads");
 				if (!params.memory_reference) {
 					throw new ToolError("memory_reference is required for read_memory");
 				}
@@ -904,7 +922,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				return result.text(formatMemoryRead(response.address, response.data, response.unreadableBytes)).done();
 			}
 			case "write_memory": {
-				requireCapability("supportsWriteMemoryRequest", "memory writes");
+				requireCapability(dapSessionManager, "supportsWriteMemoryRequest", "memory writes");
 				if (!params.memory_reference) {
 					throw new ToolError("memory_reference is required for write_memory");
 				}
@@ -932,7 +950,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 					.done();
 			}
 			case "modules": {
-				requireCapability("supportsModulesRequest", "module introspection");
+				requireCapability(dapSessionManager, "supportsModulesRequest", "module introspection");
 				const response = await dapSessionManager.modules(
 					params.start_module,
 					params.module_count,
@@ -944,7 +962,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugExecutionDe
 				return result.text(formatModules(response.modules)).done();
 			}
 			case "loaded_sources": {
-				requireCapability("supportsLoadedSourcesRequest", "loaded sources");
+				requireCapability(dapSessionManager, "supportsLoadedSourcesRequest", "loaded sources");
 				const response = await dapSessionManager.loadedSources(combinedSignal, timeoutSec * 1000);
 				details.snapshot = response.snapshot;
 				details.sources = response.sources;

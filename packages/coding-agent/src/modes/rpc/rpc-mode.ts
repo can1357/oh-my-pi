@@ -14,9 +14,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { routedModelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { $env, isRecord, logger, Snowflake, toError } from "@oh-my-pi/pi-utils";
@@ -41,24 +40,22 @@ import {
 	type SkillPromptInput,
 	type SkillRediscoverySource,
 } from "../../extensibility/skills";
-import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import {
 	choiceValue,
 	defaultFormData,
-	fieldError,
 	type HtmlFormData,
 	type HtmlFormValue,
 	isArrayChoice,
 	textValue,
-} from "@oh-my-pi/pi-tui/html-form/data";
-import { type ChoiceField, type HtmlForm, parseHtmlForm, type TextField } from "@oh-my-pi/pi-tui/html-form/parse";
+} from "../../tools/html-form/data";
+import { type ChoiceField, type HtmlForm, parseHtmlForm, type TextField } from "../../tools/html-form/parse";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
 	type WordCompletionEngine,
 	type WordCompletionMethod,
 	type WordCompletionQuery,
 	wordCompletionQuery,
-} from "@oh-my-pi/pi-tui/prompt/word-completion";
+} from "../view-model/prompt/word-completion";
 import { requestTextPrediction, textPredictionBackend } from "../../predict/client";
 import { type AgentSession, type NavigateTreeResult, SessionBusyError } from "../../session/agent-session";
 import type { AgentSessionHandle } from "../../session/agent-session-handle";
@@ -126,6 +123,10 @@ import type {
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
+import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import type { ExtensionTheme } from "../../extensibility/extensions/render-types";
+import { extensionTheme } from "../../ui/extensions/render-output";
 
 const INVALID_TEXT_CURSOR_ERROR = "cursor must be an integer UTF-16 offset within text";
 
@@ -340,7 +341,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	onError: (error: Error) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
 	images?: ImageContent[];
-	isCurrent?: () => boolean;
+	isCurrent?: () => boolean | Promise<boolean>;
 }): Promise<RpcSkillCommandResult | "cancelled" | null> {
 	const invocation = resolveRpcSkillInvocation(input.session, input.message);
 	if (!invocation) return null;
@@ -349,7 +350,7 @@ export async function dispatchRpcSkillPrompt(input: {
 	// replacement first). Rendering (and authorizing model tags) happens
 	// only after the in-flight submission survives the currentness check.
 	const loaded = await loadSkillPrompt(invocation.skill, input.session);
-	if (input.isCurrent && !input.isCurrent()) return "cancelled";
+	if (input.isCurrent && !(await input.isCurrent())) return "cancelled";
 	const built = input.session.renderUserSkillPrompt(loaded.skill, invocation, loaded.body);
 	// A failure before admission still resolves this wait (without rejecting this
 	// call) — reportPromptResult already routed it to onError and a failed prompt_result.
@@ -536,6 +537,7 @@ const USER_INPUT_TYPES: Record<string, true> = {
 };
 
 const SESSION_CHANGE_TYPES: Record<string, true> = {
+	clear_context: true,
 	new_session: true,
 	switch_session: true,
 	branch: true,
@@ -934,8 +936,8 @@ export async function handleRpcSessionChange(
 
 export type RpcOpenSessionSession = Pick<
 	AgentSession,
-	"newSession" | "switchSession" | "sessionFile" | "sessionId" | "messages" | "model" | "setModel"
->;
+	"newSession" | "switchSession" | "sessionFile" | "messages" | "model" | "setModel"
+> & { sessionManager: Pick<AgentSession["sessionManager"], "getSessionId"> };
 
 /**
  * Continue the newest non-empty session in `sessionDir`, or start a fresh one
@@ -978,7 +980,7 @@ export async function openRpcSession(
 	return {
 		cancelled,
 		resumed: !cancelled && latest !== null,
-		sessionId: session.sessionId,
+		sessionId: session.sessionManager.getSessionId(),
 		sessionFile: session.sessionFile,
 	};
 }
@@ -1309,7 +1311,7 @@ function parseFormDialogResponse(
 	// One entry answers every field of its name, as in HTML form data. Each field that can carry the entry takes it;
 	// a same-name field of another shape (a radio group beside a checkbox group, a group without "Other" beside a
 	// text input) counts as unanswered, as it would in the TUI where the last field wins. At least one field must
-	// carry the entry, and every field must pass the rules the form dialogs apply on submit.
+	// carry the entry. Rules such as `required` or `pattern` are not checked: the form dialogs only flag them.
 	// A null prototype keeps a control named `__proto__` an ordinary key instead of hitting the inherited setter.
 	const data: HtmlFormData = Object.assign(Object.create(null), Object.fromEntries(form.hidden));
 	const hidden = new Map(form.hidden);
@@ -1334,9 +1336,7 @@ function parseFormDialogResponse(
 			}
 		});
 		if (!values.some(({ carried }) => carried)) throw mismatch;
-		for (const { field, value, carried } of values) {
-			const problem = fieldError(field, value);
-			if (problem) throw new Error(`Form field ${JSON.stringify(name)}: ${problem}`);
+		for (const { value, carried } of values) {
 			if (carried && value !== undefined) data[name] = value;
 		}
 	}
@@ -1883,15 +1883,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// Autocomplete provider composition is not supported in RPC mode
 		}
 
-		get theme(): Theme {
-			return theme;
+		get theme(): ExtensionTheme {
+			return extensionTheme(currentTheme());
 		}
 
 		getAllThemes(): Promise<{ name: string; path: string | undefined }[]> {
 			return Promise.resolve([]);
 		}
 
-		getTheme(_name: string): Promise<Theme | undefined> {
+		getTheme(_name: string): Promise<ExtensionTheme | undefined> {
 			return Promise.resolve(undefined);
 		}
 
@@ -1907,14 +1907,6 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 		setToolsExpanded(_expanded: boolean) {
 			// Tool expansion not supported in RPC mode - no TUI
-		}
-
-		setEditorComponent(): void {
-			// Custom editor components not supported in RPC mode
-		}
-
-		getEditorComponent() {
-			return undefined;
 		}
 	}
 
@@ -2094,6 +2086,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	await emitAvailableCommandsUpdate();
 
 	const inputGate = new RpcUserInputGate();
+	// A pre-clear hook or queued admission can finish *during* reset (e.g. while session_clear
+	// extensions run). Wait for its outcome before admitting that frame or discarding it.
+	let clearingContext: Promise<void> | undefined;
+	const isCurrentInput = async (command: RpcCommand): Promise<boolean> => {
+		if (clearingContext) await clearingContext;
+		return inputGate.isCurrent(command);
+	};
 	type OrderedUserInput = Extract<RpcCommand, { type: "prompt" | "steer" | "follow_up" | "abort_and_prompt" }>;
 	type OrderedInputOutcome = "local" | "cancelled" | "admitted" | "builtin-agent";
 	const dispatchOrderedUserInput = (
@@ -2102,20 +2101,20 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	): Promise<OrderedInputOutcome> =>
 		inputGate.enqueue(async () => {
 			const sessionId = session.sessionId;
-			const isCurrent = () =>
-				inputGate.isCurrent(command) && !shutdownState.requested && session.sessionId === sessionId;
-			if (!isCurrent()) return "cancelled";
+			const isCurrent = async () =>
+				(await isCurrentInput(command)) && !shutdownState.requested && session.sessionId === sessionId;
+			if (!(await isCurrent())) return "cancelled";
 			let text = command.message;
 			let images = command.images;
 			const runner = session.extensionRunner;
 			if (runner?.hasHandlers("input")) {
 				const result = await runner.emitInput(text, images, "rpc");
-				if (!isCurrent()) return "cancelled";
+				if (!(await isCurrent())) return "cancelled";
 				if (result.handled) return "local";
 				if (result.text !== undefined) text = result.text;
 				if (result.images !== undefined) images = result.images;
 			}
-			if (!isCurrent()) return "cancelled";
+			if (!(await isCurrent())) return "cancelled";
 			if (!text.trim() && !images?.length) return "local";
 			if (command.type === "steer") {
 				await session.steer(text, images);
@@ -2140,6 +2139,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				});
 				if (skillResult === "cancelled") return "cancelled";
 				if (skillResult) return "admitted";
+				if (!(await isCurrent())) return "cancelled";
 				const builtinAbort = new AbortController();
 				builtinCommandAborts.add(builtinAbort);
 				let backgroundedBuiltin = false;
@@ -2170,14 +2170,18 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 						shutdownCoordinator.track(task().finally(() => builtinCommandAborts.delete(builtinAbort)));
 					},
 					notifyTitleChanged: async () => {
-						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
+						output({
+							type: "session_info_update",
+							title: session.sessionName,
+							sessionId: session.sessionManager.getSessionId(),
+						});
 					},
 					notifyConfigChanged: async () => {
 						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 					},
 				});
 				if (!backgroundedBuiltin) builtinCommandAborts.delete(builtinAbort);
-				if (!isCurrent()) return "cancelled";
+				if (!(await isCurrent())) return "cancelled";
 				if (builtinResult !== false) {
 					if (!("prompt" in builtinResult)) {
 						if (builtinResult.agentInvoked === true && ticket) {
@@ -2196,7 +2200,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					text = builtinResult.prompt;
 				}
 			}
-			if (!isCurrent() || !ticket) return "cancelled";
+			if (!(await isCurrent()) || !ticket) return "cancelled";
 			await watchAndReportPromptResult({
 				ticket,
 				startPrompt: onPromptAdmitted =>
@@ -2302,7 +2306,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				const restored = session.clearQueue({ forInterrupt: true });
 				goalController.stopForHostAbort();
 				abortBuiltinCommands("RPC command aborted by host");
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await session.abort({
+					reason: USER_INTERRUPT_LABEL,
+					detachTools: restored.steering.length + restored.followUp.length > 0,
+				});
 				return fitAbortAndRestoreQueueResponse(id, restored, frameEncoder.maxIntactFrameBytes);
 			}
 
@@ -2310,10 +2317,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				// The TUI's empty Enter. Ordered behind earlier input, so a message sent just
 				// before is queued by the time this runs and is the one the continuation takes.
 				const aborted = await inputGate.enqueue(async () => {
-					if (!inputGate.isCurrent(command) || !session.isStreaming || !session.hasInterruptibleInput) {
+					if (!(await isCurrentInput(command)) || !session.isStreaming || !session.hasInterruptibleInput) {
 						return false;
 					}
-					await session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true });
+					await session.abort({ reason: USER_INTERRUPT_LABEL, deliverQueuedMessages: true, detachTools: true });
 					return true;
 				});
 				return success(id, "abort_and_deliver_queue", { aborted });
@@ -2323,7 +2330,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				// The TUI's `.`/`c`, ordered behind earlier input like abort_and_deliver_queue.
 				// Answer once the continuation is under way; a failure after that is a late error.
 				await inputGate.enqueue(async () => {
-					if (!inputGate.isCurrent(command) || shutdownState.requested) return;
+					if (!(await isCurrentInput(command)) || shutdownState.requested) return;
 					const admitted = Promise.withResolvers<void>();
 					const resuming = session.resume({ onAdmitted: admitted.resolve });
 					await Promise.race([resuming, admitted.promise]);
@@ -2350,6 +2357,29 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					},
 				);
 				return success(id, "abort_and_prompt");
+			}
+
+			case "clear_context": {
+				if (session.isCompacting) {
+					session.abortCompaction();
+					while (session.isCompacting) await Bun.sleep(10);
+				}
+				const clear = Promise.withResolvers<void>();
+				clearingContext = clear.promise;
+				try {
+					const result = await session.resetSessionContext();
+					if (!result) {
+						return error(id, "clear_context", new SessionBusyError("clear the context").message, "session_busy");
+					}
+					inputGate.commitSessionChange(command);
+					// Clearing can close a paused run without an agent_end for its prompts or settle subscribers.
+					promptResults.abortOpen();
+					void settleWatcher.check();
+					return success(id, "clear_context", { droppedCount: result.droppedCount });
+				} finally {
+					clearingContext = undefined;
+					clear.resolve();
+				}
 			}
 
 			case "new_session":
@@ -2501,7 +2531,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					followUpMode: session.followUpMode,
 					interruptMode: session.interruptMode,
 					sessionFile: session.sessionFile,
-					sessionId: session.sessionId,
+					sessionId: session.sessionManager.getSessionId(),
 					sessionName: session.sessionName,
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					queuedMessageCount: session.queuedMessageCount,
@@ -2899,6 +2929,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			// =================================================================
 
 			case "get_session_stats": {
+				// A resumed session's persisted subagents count toward its credits from the first call.
+				await session.hydratePersistedSubagents();
 				const stats = session.getSessionStats();
 				return success(id, "get_session_stats", stats);
 			}
@@ -2962,7 +2994,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 						pageRpcMessages(
 							messages,
 							{
-								sessionId: session.sessionId,
+								sessionId: session.sessionManager.getSessionId(),
 								leafId: session.sessionManager.getLeafId(),
 								messageCount: messages.length,
 							},
@@ -3073,7 +3105,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (typeof command.providerId !== "string" || !Number.isInteger(command.credentialId)) {
 					return error(id, "logout", "providerId must be a string and credentialId an integer");
 				}
-				const { removed, remainingSource } = await logoutCredential(
+				const { removed, remainingSource, signOutError } = await logoutCredential(
 					session,
 					command.providerId,
 					command.credentialId,
@@ -3081,7 +3113,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				if (!removed) {
 					return error(id, "logout", `Credential ${command.credentialId} is not stored for ${command.providerId}`);
 				}
-				return success(id, "logout", { remainingSource });
+				return success(id, "logout", { remainingSource, ...(signOutError === undefined ? {} : { signOutError }) });
 			}
 
 			// =================================================================

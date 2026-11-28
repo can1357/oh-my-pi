@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, describe, expect, it, spyOn } from "bun:test";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
@@ -926,5 +926,17 @@ await Promise.withResolvers().promise;`;
 		const download = returnedValue(await invoke({ action: "run", name, code })) as { path: string };
 		tempDirs.push(path.dirname(download.path));
 		expect(await Bun.file(download.path).text()).toBe("export payload");
+	});
+});
+
+describe("buildHeadlessLaunchArgs window placement", () => {
+	const OFFSCREEN = "--window-position=-10000,-10000";
+	const vp = { width: 800, height: 600 };
+
+	it("moves only the Windows headless window off-screen", () => {
+		expect(buildHeadlessLaunchArgs(vp, { headless: true, platform: "win32" })).toContain(OFFSCREEN);
+		expect(buildHeadlessLaunchArgs(vp, { headless: false, platform: "win32" })).not.toContain(OFFSCREEN);
+		expect(buildHeadlessLaunchArgs(vp, { headless: true, platform: "linux" })).not.toContain(OFFSCREEN);
+		expect(buildHeadlessLaunchArgs(vp, { headless: true, platform: "darwin" })).not.toContain(OFFSCREEN);
 	});
 });

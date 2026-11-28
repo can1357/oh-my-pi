@@ -19,7 +19,7 @@ import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { finalizeSubagentLifecycle } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
+import type { AdvisorConfig } from "@oh-my-pi/pi-coding-agent/advisor/advisor-config-types";
 import { AdvisorLoopGuard } from "../src/advisor/loop-guard";
 import { cfgAdvisorReviewInterval } from "../src/advisor/settings";
 import { activateTodoTool, createInMemoryAuthStorage, fixedAdvisorTools } from "./helpers/agent-session-setup";
@@ -314,7 +314,7 @@ describe("advisor tool-call loop guard", () => {
 		// thresholds' worth (6) with no request after the abort.
 		expect(contexts).toHaveLength(6);
 		const delivered = JSON.stringify(contexts[3]!.messages);
-		expect(delivered).toContain("You called `read` 3 consecutive times");
+		expect(delivered).toContain("The `read` call pattern repeated for 3 consecutive turns");
 		expect(delivered).toContain("ENOENT: no such file or directory");
 		const redirects = advisor.state.messages.filter(
 			message => message.role === "user" && JSON.stringify(message.content).includes("tool_call_loop_detected"),

@@ -6,7 +6,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { prompt } from "@oh-my-pi/pi-utils";
 import contextNotesDescription from "../prompts/tools/context-notes.md" with { type: "text" };
 import contextNotesTextDescription from "../prompts/tools/context-notes-text.md" with { type: "text" };
@@ -125,6 +125,10 @@ export class ContextNotesTool implements AgentTool<typeof contextNotesSchema, Co
 		}
 
 		const ownerId = this.session.getSessionId?.();
+		const navigationRevision = manager.branchNavigationRevision;
+		if (navigationRevision === undefined) {
+			throw new ToolError("Saving experimental context notes requires a journal that tracks branch navigation.");
+		}
 		const branchLeafId = manager.getBranch().at(-1)?.id;
 		await manager.ensureOnDisk();
 		throwIfAborted(signal);
@@ -135,7 +139,8 @@ export class ContextNotesTool implements AgentTool<typeof contextNotesSchema, Co
 			!ownerId ||
 			this.session.getSessionId?.() !== ownerId ||
 			manager.getSessionId?.() !== ownerId ||
-			manager.getBranch().at(-1)?.id !== branchLeafId
+			manager.branchNavigationRevision !== navigationRevision ||
+			(branchLeafId !== undefined && !manager.getBranch().some(entry => entry.id === branchLeafId))
 		) {
 			throw new ToolError("Experimental context notes were not saved because the session branch changed.");
 		}

@@ -15,7 +15,7 @@
  */
 import * as path from "node:path";
 import type { Judge, JudgmentResult, NoulQuestion } from "@oh-my-pi/pi-ai";
-import type { FindCoverage, FindHit, FindLexicalMatch, FindStats, FindTimeout } from "@oh-my-pi/pi-tui/tools/find";
+import type { FindCoverage, FindHit, FindLexicalMatch, FindStats, FindTimeout } from "../details/find";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
 import { type SpotlightClient, SpotlightError } from "../../spotlight/client";
@@ -224,6 +224,7 @@ class Cascade {
 		unanswered: 0,
 		judged: 0,
 		filesRead: 0,
+		filesVerified: 0,
 		fileBytes: 0,
 		inputTokens: 0,
 		outputTokens: 0,
@@ -492,9 +493,10 @@ class Cascade {
 
 		const threshold = this.#options.threshold ?? THRESHOLD;
 		const hits: FindHit[] = [];
+		this.stats.filesRead = files.length;
 		for (const [f, entry] of results) {
 			const plan = files[f]!;
-			this.stats.filesRead++;
+			if (entry.heat.length > 0) this.stats.filesVerified++;
 			this.stats.fileBytes += entry.bytes;
 			if (entry.score < threshold) continue;
 			hits.push({
@@ -507,7 +509,6 @@ class Cascade {
 			});
 		}
 		this.stats.fileBytes += sketchSentBytes;
-		this.stats.filesRead += files.length - results.size;
 		hits.sort((a, b) => b.contentScore - a.contentScore);
 		const { requests, failed } = this.stats;
 		const coverage: FindCoverage =

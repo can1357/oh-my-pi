@@ -1,207 +1,107 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import * as url from "node:url";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { MAGIC_KEYWORDS } from "@oh-my-pi/pi-coding-agent/modes/magic-keywords";
-import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import { UserMessageComponent } from "@oh-my-pi/pi-tui/chat/user-message";
-import { chipLabel, modelChipStyle, modelMentionChipLabel } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
-import { imageReferenceHyperlink } from "@oh-my-pi/pi-tui/prompt/image-references";
-import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
-import { getEditorTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
-import { Container } from "@oh-my-pi/pi-tui";
+import { cfgMagicKeywordsEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { imageLinksForMessage } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { presetSymbols } from "@oh-my-pi/pi-tui/theme/symbols";
+import { chipLabel } from "../../../src/ui/composer/attachments";
+import { enabledMagicKeywords } from "../../../src/ui/composer/magic-keywords";
+import { printRows } from "../../../src/ui/print-rows";
+import "../../../src/ui/styles/messages";
+import { UserMessage, type UserMessageModel } from "../../../src/ui/transcript/messages/user-message";
 
-import { cfgTuiHyperlinks } from "@oh-my-pi/pi-coding-agent/modes/settings";
+const restoreTheme = currentTheme();
 
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	cfgTuiHyperlinks.set(Settings.instance, "always");
-	await initTheme(false);
-	// The host registers keywords at startup; without this nothing glows.
-	setMagicKeywords(MAGIC_KEYWORDS);
+	cfgMagicKeywordsEnabled.set(Settings.instance, true);
 });
 
 afterAll(() => {
-	setMagicKeywords([]);
+	setCurrentTheme(restoreTheme);
 	resetSettingsForTest();
 });
 
-function render(text: string): string {
-	return new UserMessageComponent(text).render(80).join("\n");
+/** The sent bubble's rows at 80 columns, styled; the keywords the settings enable glow. */
+function bubbleRaw(model: UserMessageModel): string {
+	const glowing = { magicKeywords: () => enabledMagicKeywords(Settings.instance), ...model };
+	return printRows(() => UserMessage({ model: glowing }), 80).join("\n");
 }
 
-function countOccurrences(haystack: string, needle: string): number {
-	return haystack.split(needle).length - 1;
+/** The sent bubble's rows at 80 columns, ANSI stripped. */
+function bubbleText(model: UserMessageModel): string {
+	return Bun.stripANSI(bubbleRaw(model));
 }
 
-describe("UserMessageComponent magic-keyword highlighting", () => {
-	it("gradient-paints a magic keyword in the rendered (sent) message bubble", () => {
-		const raw = render("please orchestrate the rollout");
+describe("user message magic-keyword highlighting", () => {
+	it("gradient-paints a magic keyword in the sent message bubble", () => {
+		const raw = bubbleRaw({ text: "please orchestrate the rollout" });
 		// Visible text is preserved.
 		expect(Bun.stripANSI(raw)).toContain("please orchestrate the rollout");
-		// The keyword is gradient-painted: a per-character foreground sequence is emitted,
-		// and the word no longer survives as a contiguous run in the rendered bytes.
-		expect(raw).toContain("\x1b[38");
+		// The keyword is gradient-painted per character: the word no longer survives
+		// as a contiguous run in the styled rows.
 		expect(raw).not.toContain("orchestrate");
 	});
 
 	it("does not paint a keyword inside an inline code span", () => {
-		const raw = render("ship the `orchestrate` helper");
-		expect(Bun.stripANSI(raw)).toContain("orchestrate");
-		// Code spans render through the code style as a single run — the word stays intact.
+		const raw = bubbleRaw({ text: "ship the `orchestrate` helper" });
 		expect(raw).toContain("orchestrate");
 	});
 
 	it("does not paint a keyword inside a fenced code block", () => {
-		const raw = render("intro\n```\norchestrate\n```");
-		expect(Bun.stripANSI(raw)).toContain("orchestrate");
+		const raw = bubbleRaw({ text: "intro\n```\norchestrate\n```" });
 		expect(raw).toContain("orchestrate");
 	});
+});
 
-	it("closes the OSC 133 prompt zone and leaves no command zone open", () => {
-		const raw = render("first line\nsecond line");
-		expect(raw).toContain("\x1b]133;A\x07");
-		expect(raw).toContain("\x1b]133;B\x07");
-		// #8030: the command-start marker is required. Terminals latch a sticky
-		// `.input` cursor semantic on 133;B that only 133;C clears; without it every
-		// later cell stays tagged as prompt input and click-to-move injects arrow
-		// keys into the pty.
-		expect(raw).toContain("\x1b]133;C\x07");
-		// ...but the zone is closed inside the same render, so terminals still cannot
-		// group later assistant/tool output under the submitted prompt.
-		expect(raw).toContain("\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07");
-		expect(raw.endsWith("\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07")).toBe(true);
-		// Exactly one balanced command zone per bubble.
-		expect(countOccurrences(raw, "\x1b]133;C\x07")).toBe(1);
-		expect(countOccurrences(raw, "\x1b]133;D;0\x07")).toBe(1);
+describe("user message bubble", () => {
+	it("collapses model tags to the model's visible label", () => {
+		const text = bubbleText({ text: 'ask <model agent="m1" name="Claude (Fast)"/> then continue' });
+		expect(text).toContain("Claude (Fast) then continue");
+		expect(text).not.toContain("<model agent=");
 	});
 
-	it("closes the OSC 133 command zone for a single-line message too", () => {
-		const raw = render("only line");
-		expect(raw).toContain("\x1b]133;A\x07");
-		expect(raw.endsWith("\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07")).toBe(true);
-		expect(countOccurrences(raw, "\x1b]133;C\x07")).toBe(1);
-		expect(countOccurrences(raw, "\x1b]133;D;0\x07")).toBe(1);
+	it("collapses image markers to chips", () => {
+		const text = bubbleText({ text: "please inspect [Image #1, 800x600] before continuing" });
+		expect(text).toContain(`${chipLabel("image", 1)} before continuing`);
+		expect(text).not.toContain("[Image #1");
 	});
 
-	it("collapses image markers to identity-colored chip tokens in the rendered bubble", () => {
-		// Wire format stays `[Image #1, WxH]`; the bubble shows the composer's compact chip.
-		const raw = render("please inspect [Image #1, 800x600] before continuing");
-		expect(Bun.stripANSI(raw)).toContain(`${chipLabel("image", 1)} before continuing`);
-		expect(Bun.stripANSI(raw)).not.toContain("[Image #1");
-		expect(raw).toContain("\x1b[1m");
+	it("draws chips in the symbol preset's glyphs, the ones the composer drew them with", () => {
+		// A Nerd Font session (every Tern session is one) must not fall back to the unicode preset's emoji.
+		const nerd = presetSymbols("nerd");
+		setCurrentTheme(loadThemeSync("dark", { symbolPreset: "nerd" }));
+		try {
+			const text = bubbleText({
+				text: 'ask <model agent="m1" name="Fast"/> about [Image #1, 800x600] and [Video #2]',
+			});
+			expect(text).toContain(
+				`${nerd["mention.model"]} Fast about ${nerd["chip.image"]} #1 and ${nerd["chip.video"]} #2`,
+			);
+		} finally {
+			setCurrentTheme(restoreTheme);
+		}
 	});
+});
 
-	it("collapses model tags before Markdown and renders the visible label in model styling", () => {
-		const label = modelMentionChipLabel("Claude (Fast)");
-		const bubbleReset = `${theme.getFgOnBgAnsi("userMessageText", "userMessageBg")}${theme.getBgAnsi("userMessageBg")}`;
-		const raw = render('ask <model agent="m1" name="Claude (Fast)"/> then continue');
-		expect(Bun.stripANSI(raw)).toContain(`ask ${label} then continue`);
-		expect(raw).not.toContain("<model agent=");
-		expect(raw).toContain(modelChipStyle(label, bubbleReset));
-		expect(raw).toContain(theme.getFgAnsi("statusLineModel"));
-	});
-
-	it("wraps image references in file hyperlinks when a blob path is available", () => {
-		const imagePath = path.resolve("/tmp/omp-image.png");
-		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
-		const raw = new UserMessageComponent("please inspect [Image #1]", { imageLinks: [imagePath] })
-			.render(80)
-			.join("\n");
-		expect(Bun.stripANSI(raw)).toContain(chipLabel("image", 1));
-		expect(raw).toContain("\x1b]8;id=");
-		expect(raw).toContain(imageUri);
-	});
-
-	it("renders a video marker as a video chip linked to its source", () => {
-		const videoPath = path.resolve("/tmp/omp-video.mp4");
-		const videoUri = url.pathToFileURL(videoPath).href;
-		const raw = new UserMessageComponent("please inspect [Video #1, 960x480]", { imageLinks: [videoPath] })
-			.render(80)
-			.join("\n");
-		expect(Bun.stripANSI(raw)).toContain(chipLabel("video", 1));
-		expect(Bun.stripANSI(raw)).not.toContain("[Video #1");
-		expect(raw).toContain("\x1b]8;id=");
-		expect(raw).toContain(videoUri);
-	});
-
-	it("wraps draft editor image references in file hyperlinks when a blob path is available", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.imageReferenceHyperlink = imageReferenceHyperlink;
-		const imagePath = path.resolve("/tmp/omp-image.png");
-		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
-		editor.imageLinks = [imagePath];
-		editor.setText("please inspect [Image #1]");
-		const raw = editor.render(80).join("\n");
-		expect(Bun.stripANSI(raw)).toContain("[Image #1]");
-		expect(raw).toContain("\x1b]8;id=");
-		expect(raw).toContain(imageUri);
-	});
-
-	it("rebuilds user messages with image hyperlinks when image links are not precomputed", () => {
+describe("image links on transcript rebuild", () => {
+	it("materializes inline image data to a blob path when links are not precomputed", () => {
 		const displayPath = path.resolve("/tmp/abc123.png");
-		const displayUri = url.pathToFileURL(path.resolve(displayPath)).href;
-		const chatContainer = new Container();
-		const sessionManagerMock = {
+		const sessionManager = {
 			putBlobSync: () => ({
 				hash: "abc123",
 				path: path.resolve("/tmp/abc123"),
 				displayPath,
-				get ref() {
-					return "blob:sha256:abc123";
-				},
+				ref: "blob:sha256:abc123",
 			}),
 		};
-		const helpers = new UiHelpers({
-			chatContainer,
-			sessionManager: sessionManagerMock,
-			viewSession: { sessionManager: sessionManagerMock },
-			transcriptMessageComponents: new WeakMap(),
-		} as unknown as InteractiveModeContext);
-		const message: AgentMessage = {
-			role: "user",
-			content: [
-				{ type: "text", text: "please inspect [Image #1]" },
-				{ type: "image", data: Buffer.from("image-bytes").toString("base64"), mimeType: "image/png" },
-			],
-			attribution: "user",
-			timestamp: Date.now(),
-		};
-
-		helpers.addMessageToChat(message);
-		const component = chatContainer.children.at(-1);
-		if (!component) throw new Error("Expected user message component to be appended");
-		const raw = component.render(80).join("\n");
-		expect(Bun.stripANSI(raw)).toContain(chipLabel("image", 1));
-		expect(raw).toContain("\x1b]8;id=");
-		expect(raw).toContain(displayUri);
-	});
-
-	it("highlights paste markers in the draft editor without a hyperlink", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.setText("see [Paste #1, +30 lines] now");
-		const raw = editor.render(80).join("\n");
-		expect(Bun.stripANSI(raw)).toContain("[Paste #1, +30 lines]");
-		// The marker label is bold-wrapped (highlighted), unlike surrounding plain text.
-		expect(raw).toContain("\x1b[1m[Paste #1, +30 lines]");
-		// Paste markers are not clickable, so no OSC-8 hyperlink is emitted (contrast with images).
-		expect(raw).not.toContain("\x1b]8;id=");
-	});
-
-	it("hyperlinks the metadata-bearing image marker format", () => {
-		const editor = new CustomEditor(getEditorTheme());
-		editor.imageReferenceHyperlink = imageReferenceHyperlink;
-		const imagePath = path.resolve("/tmp/omp-image.png");
-		const imageUri = url.pathToFileURL(path.resolve(imagePath)).href;
-		editor.imageLinks = [imagePath];
-		editor.setText("see [Image #1, 800x600] now");
-		const raw = editor.render(80).join("\n");
-		expect(Bun.stripANSI(raw)).toContain("[Image #1, 800x600]");
-		expect(raw).toContain("\x1b]8;id=");
-		expect(raw).toContain(imageUri);
+		const links = imageLinksForMessage(
+			[{ type: "image", data: Buffer.from("image-bytes").toString("base64"), mimeType: "image/png" }],
+			sessionManager as unknown as Parameters<typeof imageLinksForMessage>[1],
+		);
+		expect(links).toEqual([displayPath]);
 	});
 });

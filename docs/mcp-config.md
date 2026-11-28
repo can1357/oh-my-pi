@@ -14,7 +14,7 @@ Source of truth in code:
 
 ## Preferred config locations
 
-OMP can discover MCP servers from multiple tools (`.claude/`, `.cursor/`, `.vscode/`, `opencode.json`, and more), but for OMP-native configuration you should usually use one of these primary files:
+OMP can discover MCP servers from other tools' project config (`.claude/`, `.codex/`, `opencode.json`), but for OMP-native configuration you should usually use one of these primary files:
 
 - Project: `.omp/mcp.json`
 - User: `~/.omp/agent/mcp.json` (or `~/.omp/profiles/<name>/agent/mcp.json` when a named profile is active — see [Profiles](#profiles))
@@ -32,18 +32,14 @@ Use `.omp/mcp.json` or `~/.omp/agent/mcp.json` when you want OMP to own the conf
 
 ### Imported tool configs
 
-OMP also translates these current tool-native sources:
+OMP also translates these project-level tool-native sources (other tools' home-directory configs are never read):
 
-- Claude Code: `~/.claude.json`, `~/.claude/mcp.json`, and project `.claude/.mcp.json` / `.claude/mcp.json`
-- Codex: `~/.codex/config.toml` and `.codex/config.toml` (`[mcp_servers.*]`)
-- Gemini CLI: `~/.gemini/settings.json` and `.gemini/settings.json`
-- OpenCode: `opencode.json` / `opencode.jsonc` in `~/.config/opencode/`, the project root, and project `.opencode/` (the `mcp` map)
-- Cursor: `~/.cursor/mcp.json` and `.cursor/mcp.json`
-- Windsurf: `~/.codeium/windsurf/mcp_config.json` and `.windsurf/mcp_config.json`
-- VS Code: project-only `.vscode/mcp.json` using `mcp.servers`
-- installed Claude marketplace plugins, OMP extension packages, and portable Agent Plugins (`plugin.json` plus root `mcp.json`) that declare MCP servers
+- Claude Code: `<cwd>/.claude/.mcp.json` / `<cwd>/.claude/mcp.json`
+- Codex: `<cwd>/.codex/config.toml` (`[mcp_servers.*]`)
+- OpenCode: `opencode.json` / `opencode.jsonc` in the project root and project `.opencode/` (the `mcp` map; `{env:}` / `{file:}` substitution supported)
+- installed marketplace plugins, OMP extension packages, and portable Agent Plugins (`plugin.json` plus root `mcp.json`) that declare MCP servers
 
-For Claude Code, Codex, Gemini CLI, Cursor, and Windsurf, the project entry is encountered before its same-named user entry — matching OMP-native config, whose project entry precedes its active-profile user entry — so a project `enabled: false` suppresses a same-named user server. OpenCode deep-merges each server across layers: project overrides user, `.opencode/` overrides the project root, and `.jsonc` overrides `.json` within a directory. Partial overrides inherit fields from lower layers. Cross-provider priority is listed in [Discovery and precedence](#discovery-and-precedence).
+OpenCode deep-merges each server across layers: `.opencode/` overrides the project root, and `.jsonc` overrides `.json` within a directory. Partial overrides inherit fields from lower layers. Cross-provider priority is listed in [Discovery and precedence](#discovery-and-precedence).
 
 ### Profiles
 
@@ -54,7 +50,7 @@ Named profiles (`omp --profile <name>` or `OMP_PROFILE`/`PI_PROFILE`) isolate us
 
 Discovery, the `/mcp` commands, and the config writer all follow the active profile, so a profile sees **only** its own user-level servers — never the default profile's `~/.omp/agent/mcp.json`. Add a server to a profile by launching under it (`omp --profile <name>`) and running `/mcp add` → User level, or by editing `~/.omp/profiles/<name>/agent/mcp.json` directly.
 
-Project-scoped MCP config (`.omp/mcp.json`) is keyed to the working directory, not the profile, so it applies under every profile. External-tool configs (`.claude/`, `.cursor/`, etc.) are also profile-independent because they belong to those tools rather than to an OMP profile.
+Project-scoped MCP config (`.omp/mcp.json`) is keyed to the working directory, not the profile, so it applies under every profile. External-tool project configs (`.claude/`, `.codex/`, etc.) are also profile-independent because they belong to those tools rather than to an OMP profile.
 
 MCP follows the same profile rules as the rest of OMP-native config; see [Configuration Discovery → Profiles](./config-usage.md#profiles).
 
@@ -293,7 +289,7 @@ profile for untrusted checkouts.
 
 Use `oauth` when the MCP server requires explicit OAuth client, scope, or callback settings. The callback listener defaults to port `3000` and path `/callback`; an HTTP loopback `redirectUri` supplies its own port/path unless explicitly overridden. An HTTPS loopback redirect requires a distinct `callbackPort` for the local HTTP listener behind your TLS terminator.
 
-During `/mcp reauth`, scopes advertised by the protected resource or its authentication challenge take precedence; `oauth.scope` supplies the fallback. Authorization-server `scopes_supported` is a catalogue of available scopes, not a request to grant all of them. OMP does not copy that catalogue into the login request. If the resource advertises no scopes, set `oauth.scope` to the scopes allowed for your registered client (for example, `"openid"` for an OpenID Connect login), or leave it unset to use the authorization server's defaults.
+A configured `oauth.scope` is the exact scope set OMP requests on the initial authorization and on `/mcp reauth`; it takes precedence over scopes advertised by the protected resource or its authentication challenge. Without it, OMP requests the advertised scopes. An `insufficient_scope` step-up challenge still adds the scopes it names to the ones already granted. Authorization-server `scopes_supported` is a catalogue of available scopes, not a request to grant all of them. OMP does not copy that catalogue into the login request. If the resource advertises no scopes, set `oauth.scope` to the scopes allowed for your registered client (for example, `"openid"` for an OpenID Connect login), or leave it unset to use the authorization server's defaults.
 
 Scopes from resource-server-hosted `/oauth/metadata` and `/.mcp/auth` documents are also preserved, including nested `oauth`, `authorization`, and `auth` blocks. Their `scopes_supported` arrays are not treated as resource requirements when those paths are probed on an explicitly identified authorization server.
 
@@ -531,12 +527,9 @@ OMP loads providers in descending priority. The MCP-capable order is:
 2. OMP extension packages
 3. Claude Code
 4. Agent Plugins
-5. Claude marketplace plugins and Codex
-6. Gemini CLI
-7. OpenCode
-8. Cursor and Windsurf
-9. VS Code
-10.   root `mcp.json` / `.mcp.json` fallback files
+5. marketplace plugins and Codex
+6. OpenCode
+7. root `mcp.json` / `.mcp.json` fallback files
 
 Across providers, the first definition wins. Duplicate names are not merged; OpenCode's internal config layers are the exception described above. A differently named definition is also shadowed when its transport, endpoint/command inputs, auth, and request-id mode are equivalent to a higher-priority definition.
 

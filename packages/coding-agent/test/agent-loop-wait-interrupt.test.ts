@@ -15,7 +15,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/irc-types";
 
 const sources = ["background", "peer", "parent"] as const;
 type Source = (typeof sources)[number];
@@ -200,26 +200,29 @@ describe("agent-loop wait wake delivery", () => {
 		};
 		if (needsCoordinator) {
 			const claim = SpeculativeOperationCoordinator.prototype.claim;
-			vi.spyOn(SpeculativeOperationCoordinator.prototype, "claim").mockImplementation(
-				async function (this: SpeculativeOperationCoordinator, tool, toolCall, args) {
-					const outcome = await claim.call(this, tool, toolCall, args);
-					if (tool !== wait) return outcome;
-					if (options.cancel === "claim") {
-						cancelBeforeExecute();
-					} else {
-						this.registerStreamSession(toolCall.id, {
-							update() {},
-							finalize() {},
-							commit() {},
-							async discard() {
-								await Promise.resolve();
-								cancelBeforeExecute();
-							},
-						});
-					}
-					return outcome;
-				},
-			);
+			vi.spyOn(SpeculativeOperationCoordinator.prototype, "claim").mockImplementation(async function (
+				this: SpeculativeOperationCoordinator,
+				tool,
+				toolCall,
+				args,
+			) {
+				const outcome = await claim.call(this, tool, toolCall, args);
+				if (tool !== wait) return outcome;
+				if (options.cancel === "claim") {
+					cancelBeforeExecute();
+				} else {
+					this.registerStreamSession(toolCall.id, {
+						update() {},
+						finalize() {},
+						commit() {},
+						async discard() {
+							await Promise.resolve();
+							cancelBeforeExecute();
+						},
+					});
+				}
+				return outcome;
+			});
 		}
 		let pausedBeforeExecute = false;
 		const mock = createMockModel({

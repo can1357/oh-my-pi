@@ -1828,6 +1828,69 @@ describe("anthropic stream envelope handling", () => {
 		expect(AIError.retriable(AIError.classifyMessage(result))).toBe(false);
 	});
 
+	it("gives an in-band rate limit or overload the HTTP status of the same refusal", async () => {
+		// The API reports a rate limit or an overload either as an HTTP 429/529 or as
+		// an `error` frame inside a 200 stream. Without the status, the streamed one
+		// reaches the caller as an unclassified stream error, so anything that reads
+		// `errorStatus` (rate-limit waits, slow mode) misses it.
+		for (const [type, message, status] of [
+			["rate_limit_error", "Number of request tokens has exceeded your per-minute rate limit", 429],
+			["overloaded_error", "Overloaded", 529],
+		] as const) {
+			vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(
+				() => createRawSseRequest([sseFrame("error", { type: "error", error: { type, message } })]) as never,
+			);
+
+			const stream = streamAnthropic(model, context, {
+				apiKey: "sk-ant-test",
+				providerRetryWait: async () => {},
+			});
+			const events: AssistantMessageEvent[] = [];
+			for await (const event of stream) {
+				events.push(event);
+			}
+			const result = await stream.result();
+
+			expect(countEvents(events, "error")).toBe(1);
+			expect(result.stopReason).toBe("error");
+			expect(result.errorStatus).toBe(status);
+			expect(result.errorMessage).toBe(`Anthropic stream error (${type}): ${message}`);
+			expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+			vi.restoreAllMocks();
+		}
+	});
+
+	it("keeps an in-band rate limit inside an open message a 429 instead of a cut stream", async () => {
+		// Turn recovery continues a stream truncation after visible text as if the
+		// wire had dropped. A rate limit is the provider refusing the request, not a
+		// dropped wire, so the caller must see the 429 rather than a truncation.
+		const message = "Number of request tokens has exceeded your per-minute rate limit";
+		const frames = createOpenMessageSseFrames("Here is the first half");
+		frames.push(sseFrame("error", { type: "error", error: { type: "rate_limit_error", message } }));
+		let created = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation(() => {
+			created += 1;
+			return createRawSseRequest(frames) as never;
+		});
+
+		const stream = streamAnthropic(model, context, { apiKey: "sk-ant-test" });
+		const events: AssistantMessageEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const result = await stream.result();
+
+		expect(created).toBe(1);
+		expect(countEvents(events, "done")).toBe(0);
+		expect(countEvents(events, "error")).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(429);
+		expect(result.errorMessage).toBe(`Anthropic stream error (rate_limit_error): ${message}`);
+		expect(AIError.isStreamEnvelopeTruncationText(result.errorMessage ?? "")).toBe(false);
+		expect(AIError.retriable(AIError.classifyMessage(result))).toBe(true);
+		expect(JSON.parse(JSON.stringify(result.content))).toEqual([{ type: "text", text: "Here is the first half" }]);
+	});
+
 	it("retries a stream cut before any stop_reason when no content streamed", async () => {
 		const successEvents = createTextSuccessEvents("recovered");
 		let attempt = 0;

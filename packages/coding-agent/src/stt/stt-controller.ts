@@ -1,8 +1,8 @@
 import type { ApiKeyResolver } from "@oh-my-pi/pi-ai";
-import { transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
+import { isTranscriptionApi, transcribeAudio } from "@oh-my-pi/pi-ai/transcription";
 import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
-import type { ModelBrowserRegistry } from "@oh-my-pi/pi-tui/overlays/model-browser";
+import type { ModelBrowserRegistry } from "../modes/view-model/overlays/model-browser";
 import { logger } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { type RoleChainCandidate, resolveConfiguredModelPatterns, resolveRoleChain } from "../config/model-resolver";
@@ -12,7 +12,7 @@ import { type SttStreamHandle, sttClient } from "./asr-client";
 import { downloadSttModel, isSttModelCached } from "./downloader";
 import { resolveSttModelSpec, type SttModelKey } from "./models";
 import { evaluateSubmitTrigger } from "./submit-trigger";
-import { encodePcm16Wav, floatToPcm16 } from "./wav";
+import { encodePcm16Wav, floatToPcm16, rmsLevel } from "./wav";
 
 import { cfgSttLanguage, cfgSttSubmitTrigger } from "./settings";
 
@@ -22,7 +22,11 @@ export type SttState = "idle" | "recording" | "transcribing";
 export interface SttCallbacks {
 	showWarning(msg: string): void;
 	showStatus(msg: string): void;
+	/** Withdraw the progress status this capture showed ("Transcribing..."): its text landed. */
+	clearStatus(): void;
 	onStateChange(state: SttState): void;
+	/** The microphone's loudness (RMS, 0–1) for each captured chunk while recording. */
+	onLevel?(level: number): void;
 	/** Keep this capture as a draft, without interpreting submit commands. */
 	manualSubmit?: boolean;
 }
@@ -62,6 +66,8 @@ export class STTController {
 	/** Cancels the start in flight: its model preflight wait and whatever start step follows it. */
 	#startAbort: AbortController | null = null;
 	#disposed = false;
+	/** The accelerated-device fallback warning is shown once per controller. */
+	#deviceFallbackWarned = false;
 	readonly #createCapture: CaptureFactory;
 	readonly #settings: Settings;
 	readonly #registry: SttRegistry | undefined;
@@ -243,7 +249,7 @@ export class STTController {
 			if (qualified) options.showWarning(`Dictation model ${qualified} not found; using the built-in local model`);
 		}
 		let model = first?.model;
-		if (model?.api === "openai-transcriptions") {
+		if (model && isTranscriptionApi(model.api)) {
 			this.#startBuffered(editor, options, model);
 			return;
 		}
@@ -259,7 +265,7 @@ export class STTController {
 			options.showWarning("No dictation model matches the active session provider in offline mode.");
 			return;
 		}
-		if (model?.api === "openai-transcriptions") {
+		if (model && isTranscriptionApi(model.api)) {
 			this.#startBuffered(editor, options, model);
 			return;
 		}
@@ -316,6 +322,7 @@ export class STTController {
 					options.showWarning(error.message);
 					return;
 				}
+				options.onLevel?.(rmsLevel(samples));
 				if (samples.length > 0) this.#cloudAudio.push(floatToPcm16(samples));
 			});
 		} catch (err) {
@@ -427,6 +434,13 @@ export class STTController {
 				if (this.#disposed || this.#state !== "recording") return;
 				this.#streamEditor?.setVolatileText(this.#prefixed(text));
 			},
+			onDeviceFallback: ({ device, fallbackDevice, error }) => {
+				if (this.#disposed || this.#deviceFallbackWarned) return;
+				this.#deviceFallbackWarned = true;
+				options.showWarning(
+					`Dictation model could not load on ${device} (${error.split("\n")[0]}); running on ${fallbackDevice} instead, which may be slower.`,
+				);
+			},
 			onSegment: text => {
 				if (this.#disposed) return;
 				const prefixed = this.#prefixed(text);
@@ -463,6 +477,7 @@ export class STTController {
 					options.showWarning(error.message);
 					return;
 				}
+				options.onLevel?.(rmsLevel(samples));
 				stream.pushAudio(samples);
 			});
 		} catch (err) {
@@ -536,7 +551,10 @@ export class STTController {
 		} else {
 			this.#streamEditor?.clearVolatileText();
 		}
-		if (!failed) options.showStatus(this.#streamCommitted ? "" : "No speech detected.");
+		if (!failed) {
+			if (this.#streamCommitted) options.clearStatus();
+			else options.showStatus("No speech detected.");
+		}
 
 		if (!options.manualSubmit && this.#streamCommitted && !failed && this.#streamEditor) {
 			const trigger = cfgSttSubmitTrigger.get(this.#settings);

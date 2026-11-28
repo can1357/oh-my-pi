@@ -1,8 +1,9 @@
 import { Args, type CommandMetadata, Flags } from "@oh-my-pi/pi-utils/cli";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
-import { formatKeyHint } from "@oh-my-pi/pi-tui/key-hint-format";
-import { CLI_THINKING_LEVELS } from "@oh-my-pi/pi-tui/thinking";
+import { formatKey, keyHintPlatform } from "../ui/keys/format";
+import { CLI_THINKING_LEVELS } from "../thinking/levels";
 import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
+import { PREPAINT_MODES } from "../cli/prepaint";
 
 export const launchHelp = {
 	description: "AI coding assistant",
@@ -21,6 +22,9 @@ export const launchHelp = {
 		smol: Flags.string({ description: "Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)" }),
 		slow: Flags.string({ description: "Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)" }),
 		plan: Flags.string({ description: "Plan model for architectural planning (or PI_PLAN_MODEL env)" }),
+		preset: Flags.string({
+			description: "Start on a saved model preset (its role models and default thinking level)",
+		}),
 		goal: Flags.string({
 			description:
 				"Start fresh in goal mode (interactive only; bypasses autoResume; no positional prompt, startup plan mode, or explicit resume)",
@@ -72,8 +76,13 @@ export const launchHelp = {
 		"from-codex": Flags.boolean({ description: "Import a Codex session into OMP" }),
 		"session-dir": Flags.string({ description: "Directory for session storage and lookup" }),
 		"no-session": Flags.boolean({ description: "Don't save session (ephemeral)" }),
-		models: Flags.string({ description: `Comma-separated model patterns for ${formatKeyHint("ctrl+p")} cycling` }),
-		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),
+		models: Flags.string({
+			description: `Comma-separated model patterns for ${formatKey("ctrl+p", { preset: "ascii", platform: keyHintPlatform() })} cycling`,
+		}),
+		"no-tools": Flags.boolean({
+			description:
+				"Allow only the built-in tools named in --tools; load no MCP, LSP, extensions, custom tools or memory",
+		}),
 		"no-judge": Flags.boolean({ description: "Restrict judge calls to the active model's provider" }),
 		"no-spotlight": Flags.boolean({ description: "Restrict Spotlight calls to the active model's provider" }),
 		offline: Flags.boolean({
@@ -124,7 +133,7 @@ export const launchHelp = {
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
 		"spinner-interval": Flags.string({
 			description:
-				"Milliseconds between spinner frames (default 80; 0 = static). Overrides tui.spinnerInterval and PI_SPINNER_INTERVAL for this run",
+				"Milliseconds between spinner frames (default 80, terminal title 250; 0 = static). Overrides tui.spinnerInterval and PI_SPINNER_INTERVAL for this run",
 		}),
 		"max-fps": Flags.string({
 			description:
@@ -133,6 +142,11 @@ export const launchHelp = {
 		motion: Flags.string({
 			description:
 				"Animation preset: full (default), reduced (250 ms spinners, no shimmer or blink), or none (static). Overrides tui.motion and PI_MOTION for this run",
+		}),
+		prepaint: Flags.string({
+			description:
+				"Draw the composer before startup finishes: on (default; skipped when other flags or a --config overlay would change that frame), off, or force",
+			options: [...PREPAINT_MODES],
 		}),
 		"no-ui": Flags.boolean({
 			description: "With --mode rpc or rpc-ui: run extensions headless (rpc-ui tool UI remains enabled)",
@@ -165,6 +179,7 @@ export const launchHelp = {
 		`# Pick a session back up after a crash, subagents included\n  ${APP_NAME} --restore ~/.omp/agent/sessions/--path--/session.jsonl`,
 		`# Create a shell shortcut for a work profile\n  ${APP_NAME} --profile work --alias omp-work`,
 		`# Use different model (fuzzy matching)\n  ${APP_NAME} --model opus "Help me refactor this code"`,
+		`# Start on a saved model preset\n  ${APP_NAME} --preset deep "Help me refactor this code"`,
 		`# Limit model cycling to specific models\n  ${APP_NAME} --models claude-sonnet,claude-haiku,gpt-4o`,
 		`# Export a session file to HTML\n  ${APP_NAME} --export ~/.omp/agent/sessions/--path--/session.jsonl`,
 	],

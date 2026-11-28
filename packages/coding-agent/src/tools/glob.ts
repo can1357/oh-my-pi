@@ -1,21 +1,21 @@
-import type { GlobToolDetails } from "@oh-my-pi/pi-tui/tools/glob";
+import { type GlobToolDetails, globSearchPath } from "./details/glob";
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import * as natives from "@oh-my-pi/pi-natives";
-import { formatGroupedPaths, hasFsCode, isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { formatGroupedPaths, hasFsCode, isEnoent, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { InternalUrlRouter, sessionResolveContext } from "../internal-urls";
 import { InternalUrlFilesystem, type UrlFileStat } from "../internal-urls/url-filesystem";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
-import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { truncateHead } from "./streaming-output";
 import { sessionDelegationBias } from "../task/prompt-policy";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
-import { isFindEnabled } from "./jfind";
-import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
+import { findHintVisible } from "./jfind";
+import { applyListLimit } from "./list-limit";
 import {
+	assertNotFilesystemRoot,
 	expandDelimitedPathEntries,
 	formatPathRelativeToCwd,
 	normalizePathLikeInput,
@@ -27,9 +27,9 @@ import {
 	searchPathTier,
 } from "./path-utils";
 import { searchApprovalCacheTargets } from "./search-approval-targets";
-import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
+import { toPathList } from "../utils/render-utils";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 import { cfgTaskDisabledAgents } from "../task/settings";
@@ -38,7 +38,7 @@ const findSchema = type({
 	"path?": "string",
 	"hidden?": "boolean",
 	"gitignore?": "boolean",
-	"limit?": "1 <= number.integer <= 200",
+	"limit?": "number.integer >= 1",
 });
 
 export type GlobToolInput = typeof findSchema.infer;
@@ -46,40 +46,8 @@ export type GlobToolInput = typeof findSchema.infer;
 /** Every `glob` argument, plus the `pattern` models pass for the glob itself; any other key is refused, not dropped unread. */
 const GLOB_ARGUMENTS: ReadonlySet<string> = new Set(["path", "hidden", "gitignore", "limit", "pattern"]);
 
-/**
- * The `path` a call searches. Models often pass the glob as `pattern` beside a
- * directory `path` (`{path: "src", pattern: "**\/*.ts"}`) or instead of it; each
- * `;` entry of `pattern` is scoped under each `path` entry unless it is absolute
- * or a URL. Approval and execution both read this, so a `pattern` reaching
- * outside `path` is approved for where it actually searches.
- */
-function globSearchPath(args: unknown): string | undefined {
-	if (!isRecord(args)) return undefined;
-	const base = typeof args.path === "string" ? args.path : undefined;
-	if (typeof args.pattern !== "string") return base;
-	const patterns = args.pattern
-		.split(";")
-		.map(entry => entry.trim())
-		.filter(entry => entry.length > 0);
-	const bases =
-		base
-			?.split(";")
-			.map(entry => entry.trim())
-			.filter(entry => entry.length > 0) ?? [];
-	if (bases.length === 0) return patterns.join(";");
-	const scoped = new Set<string>();
-	for (const dir of bases) {
-		for (const pattern of patterns) {
-			const standalone =
-				path.isAbsolute(pattern) || pattern.startsWith("~") || /^[a-z][a-z0-9+.-]*:\/\//i.test(pattern);
-			scoped.add(standalone ? pattern : `${dir.replace(/[\\/]+$/, "")}/${pattern}`);
-		}
-	}
-	return [...scoped].join(";");
-}
-
 const DEFAULT_LIMIT = 200;
-/** The schema's `limit` bound. */
+/** Most paths one call returns; a larger `limit` is clamped to it. */
 const MAX_LIMIT = 200;
 const DEFAULT_GLOB_TIMEOUT_MS = 5000;
 
@@ -182,7 +150,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly loadMode = "essential";
 	readonly label = "Glob";
 	get description(): string {
-		const hasFind = this.session.isToolActive?.("find") ?? isFindEnabled(this.session);
+		const hasFind = findHintVisible(this.session);
 		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
 		const scoutAvailable = isScoutSpawnable(
 			cfgTaskDisabledAgents.get(this.session.settings),
@@ -279,9 +247,9 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const aliasResolvedPatterns = this.#rootPathAlias
 				? rawPatterns.map(pattern => (/^\/+$/.test(pattern) ? "." : pattern))
 				: rawPatterns;
-			if (aliasResolvedPatterns.some(pattern => /^\/+$/.test(pattern))) {
-				throw new ToolError("Searching from root directory '/' is not allowed");
-			}
+			// Without the alias a slash-only pattern is the root, refused before
+			// resolveSearchBase would collapse it to the workspace.
+			assertNotFilesystemRoot(aliasResolvedPatterns.filter(pattern => /^\/+$/.test(pattern)));
 			const normalizedPatterns = aliasResolvedPatterns.map(pattern => internalRouter.normalize(pattern));
 			if (normalizedPatterns.some(pattern => pattern.length === 0)) {
 				throw new ToolError("`path` must contain non-empty globs or paths");
@@ -331,13 +299,11 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					];
 			const scopePath = multiPattern?.scopePath ?? formatScopePath(targets[0].searchPath);
 
-			for (const target of targets) {
-				if (target.searchPath === "/") {
-					throw new ToolError("Searching from root directory '/' is not allowed");
-				}
-			}
+			assertNotFilesystemRoot(targets.map(target => target.searchPath));
 
-			const effectiveLimit = limit ?? DEFAULT_LIMIT;
+			const effectiveLimit = Math.min(limit ?? DEFAULT_LIMIT, MAX_LIMIT);
+			// Reported with the reached-limit notice so a caller that asked for more learns why a larger limit cannot help (#13263).
+			const clampedFrom = limit !== undefined && limit > MAX_LIMIT ? limit : undefined;
 			const includeHidden = hidden ?? true;
 			const useGitignore = gitignore ?? true;
 			const timeoutMs = this.#timeoutMs;
@@ -404,7 +370,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 
 				// Cap the doubled suggestion at MAX_LIMIT; once the reached count
 				// is already the cap there is no larger usable limit, so suppress
-				// the advice rather than recommend a value the schema rejects (#13263).
+				// the advice rather than recommend a value that clamps back (#13263).
 				const reachedLimit = limitMeta.resultLimit;
 				const cappedSuggestion =
 					reachedLimit === undefined ? undefined : Math.min(reachedLimit.reached * 2, MAX_LIMIT);
@@ -413,7 +379,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						? undefined
 						: cappedSuggestion !== undefined && cappedSuggestion > reachedLimit.reached
 							? { reached: reachedLimit.reached, suggestion: cappedSuggestion }
-							: { reached: reachedLimit.reached, suggestion: null };
+							: { reached: reachedLimit.reached, suggestion: null, requested: clampedFrom };
 				const resultBuilder = toolResult(details)
 					.text(truncation.content)
 					.limits({ resultLimit: resultLimitInput });

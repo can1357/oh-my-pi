@@ -1,6 +1,6 @@
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tools/tool-errors";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { JsRuntime, type RuntimeCallIdentity, type RuntimeHooks, shadowSnapshotDigest } from "./shared/runtime";
+import { JsRuntime, type RuntimeHooks } from "./shared/runtime";
 import type {
 	RunErrorPayload,
 	SessionSnapshot,
@@ -211,7 +211,7 @@ export class WorkerCore {
 				const payload = errorPayload(reason);
 				if (this.#lateRejections.length < LATE_REJECTION_NOTICES_MAX) {
 					this.#lateRejections.push(
-						`Unhandled rejection from finished eval cell ${recent} (missing await?): ${payload.stack ?? `${payload.name ?? "Error"}: ${payload.message}`}\n`,
+						`[unhandled rejection from finished cell ${recent}; missing await?] ${payload.stack ?? `${payload.name ?? "Error"}: ${payload.message}`}\n`,
 					);
 				} else {
 					this.#omittedLateRejections++;
@@ -264,58 +264,6 @@ export class WorkerCore {
 			case "tool":
 				void this.#invokeTool(msg);
 				return;
-			case "shadow-snapshot": {
-				if (this.#runs.size > 0) {
-					this.#transport.send({
-						type: "shadow-snapshot",
-						id: msg.id,
-						eligible: false,
-						reason: "runtime is busy",
-					});
-					return;
-				}
-				try {
-					const runtime = this.#ensureRuntime(msg.snapshot);
-					this.#transport.send({
-						type: "shadow-snapshot",
-						id: msg.id,
-						eligible: true,
-						snapshot: runtime.snapshotUserGlobals(),
-					});
-				} catch (error) {
-					this.#transport.send({
-						type: "shadow-snapshot",
-						id: msg.id,
-						eligible: false,
-						reason: error instanceof Error ? error.message : String(error),
-					});
-				}
-				return;
-			}
-			case "run-if-snapshot-matches": {
-				if (this.#runs.size > 0) {
-					this.#transport.send({ type: "shadow-run", id: msg.id, eligible: false, reason: "runtime is busy" });
-					return;
-				}
-				try {
-					const runtime = this.#ensureRuntime(msg.snapshot);
-					const current = runtime.snapshotUserGlobals();
-					if (current.revision !== msg.expectedRevision || shadowSnapshotDigest(current) !== msg.expectedDigest) {
-						this.#transport.send({ type: "shadow-run", id: msg.id, eligible: false, reason: "snapshot changed" });
-						return;
-					}
-					this.#transport.send({ type: "shadow-run", id: msg.id, eligible: true });
-					void this.#runOne(msg.runId, msg.code, msg.filename, msg.snapshot);
-				} catch (error) {
-					this.#transport.send({
-						type: "shadow-run",
-						id: msg.id,
-						eligible: false,
-						reason: error instanceof Error ? error.message : String(error),
-					});
-				}
-				return;
-			}
 			case "tool-reply":
 				this.#deliverToolReply(msg.id, msg.reply);
 				return;
@@ -383,11 +331,11 @@ export class WorkerCore {
 		const hooks: RuntimeHooks = {
 			onText: chunk => this.#transport.send({ type: "text", runId, chunk }),
 			onDisplay: output => this.#transport.send({ type: "display", runId, output }),
-			callTool: (name, args, identity) => this.#callTool(active, name, args, identity),
+			callTool: (name, args) => this.#callTool(active, name, args),
 		};
 		for (const notice of this.#lateRejections.splice(0)) hooks.onText(notice);
 		if (this.#omittedLateRejections > 0) {
-			hooks.onText(`… and ${this.#omittedLateRejections} more late rejections from finished eval cells.\n`);
+			hooks.onText(`[+${this.#omittedLateRejections} more late rejections]\n`);
 			this.#omittedLateRejections = 0;
 		}
 		let result: RunResult;
@@ -483,12 +431,12 @@ export class WorkerCore {
 		}
 	}
 
-	async #callTool(active: ActiveRun, name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown> {
+	async #callTool(active: ActiveRun, name: string, args: unknown): Promise<unknown> {
 		const id = `tc-${active.runId}-${crypto.randomUUID()}`;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 		this.#pendingTools.set(id, { resolve, reject });
 		try {
-			this.#transport.send({ type: "tool-call", id, runId: active.runId, name, args, identity });
+			this.#transport.send({ type: "tool-call", id, runId: active.runId, name, args });
 		} catch (error) {
 			// Non-serializable args (DataCloneError from postMessage / IPC send).
 			// No reply will ever arrive; fail this call instead of stranding a

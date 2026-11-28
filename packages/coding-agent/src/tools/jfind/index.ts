@@ -7,8 +7,8 @@
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { FindToolDetails } from "@oh-my-pi/pi-tui/tools/find";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import type { FindToolDetails } from "../details/find";
+import { ToolError } from "../tool-errors";
 import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import { sessionResolveContext } from "../../internal-urls/context";
 import { InternalUrlFilesystem } from "../../internal-urls/url-filesystem";
@@ -37,7 +37,7 @@ import { type CascadeResult, runCascade } from "./cascade";
 import { rankedHeat } from "./passages";
 import { resolveSearchRoot } from "./tree";
 
-import { cfgFindEnabled, cfgFindHitThreshold } from "../settings";
+import { cfgFindEnabled, cfgFindHitThreshold, cfgFindTimeoutMs } from "../settings";
 
 const findSchema = type({
 	query: "string",
@@ -49,9 +49,6 @@ export type FindToolInput = typeof findSchema.infer;
 
 /** Line ranges shown per hit in the model-facing text, strongest first. */
 const RANGES_SHOWN = 3;
-
-/** Wall-clock budget for one `find` call; a stalled judge ends it with the hits verified so far instead of blocking the turn. */
-export const FIND_TIMEOUT_MS = 20_000;
 
 /**
  * Resolve `find.enabled` for a session: `auto` enables `find` only when the
@@ -66,6 +63,15 @@ export function isFindEnabled(session: ToolSession): boolean {
 		session.modelRegistry !== undefined &&
 		hasNativeJudge(session.settings, session.modelRegistry, session.getActiveModel?.())
 	);
+}
+
+/**
+ * Whether sibling tool descriptions (`grep`, `glob`, `bash`) point at `find`:
+ * the prompt-frozen {@link ToolSession.findHintVisible} in a managed session,
+ * else the live roster, else the setting.
+ */
+export function findHintVisible(session: ToolSession): boolean {
+	return session.findHintVisible ?? session.isToolActive?.("find") ?? isFindEnabled(session);
 }
 
 /** Semantic search tool: describe a behavior, get files and line ranges that implement it. */
@@ -128,7 +134,8 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		const verifyJudge = verifyModel ? resolveJudge({ ...judgeDeps, leadModel: verifyModel }) : undefined;
 		const experiment = this.session.spotlight;
 		const started = performance.now();
-		const deadline = AbortSignal.timeout(FIND_TIMEOUT_MS);
+		const timeoutMs = cfgFindTimeoutMs.get(this.session.settings);
+		const deadline = AbortSignal.timeout(timeoutMs);
 		// The phase the deadline interrupts, named when nothing was verified before it.
 		let phase = "lexical scan";
 		let result: CascadeResult | undefined;
@@ -156,7 +163,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		}
 		if (!result) {
 			throw new ToolError(
-				`find timed out after ${formatDuration(FIND_TIMEOUT_MS)} at "${phase}", before any file was judged. Narrow \`path\` to a smaller tree, or use grep.`,
+				`find timed out after ${formatDuration(timeoutMs)} at "${phase}", before any file was judged. Narrow \`path\` to a smaller tree, or use grep.`,
 			);
 		}
 		const elapsedMs = performance.now() - started;
@@ -214,7 +221,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			);
 		} else if (timeout?.passages === 0) {
 			out.push(
-				`find timed out after ${formatDuration(FIND_TIMEOUT_MS)} at "${phase}", before any passage was verified. This is not evidence of absence; narrow \`path\`, or use grep.`,
+				`find timed out after ${formatDuration(timeoutMs)} at "${phase}", before any passage was verified. This is not evidence of absence; narrow \`path\`, or use grep.`,
 			);
 		} else if (stats.listed === 0) {
 			out.push(
@@ -222,12 +229,17 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			);
 		} else if (hits.length === 0) {
 			out.push(`no hits for "${query}"${where} (τ ${threshold.toFixed(2)})`);
+			if (stats.filesVerified < stats.listed) {
+				out.push(
+					`not exhaustive: passages were verified in ${stats.filesVerified} of ${stats.listed} eligible files; the others may still match. Narrow \`path\` or use grep.`,
+				);
+			}
 		} else {
 			out.push(`${hits.length} hit(s) for "${query}"${where} (τ ${threshold.toFixed(2)}), strongest first`);
 		}
 		if (timeout && timeout.passages > 0) {
 			out.push(
-				`partial: timed out after ${formatDuration(FIND_TIMEOUT_MS)} with ${timeout.verified} of ${timeout.passages} passages verified; unverified files may still match. Narrow \`path\` for a complete search.`,
+				`partial: timed out after ${formatDuration(timeoutMs)} with ${timeout.verified} of ${timeout.passages} passages verified; unverified files may still match. Narrow \`path\` for a complete search.`,
 			);
 		}
 		if (coverage === "partial" && stats.failed > 0) {
@@ -251,7 +263,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		const unanswered = stats.unanswered > 0 ? ` · ${stats.unanswered} unanswered` : "";
 		out.push(
 			"",
-			`listed ${stats.listed} · judged ${stats.judged} · read ${stats.filesRead} files (${formatBytes(stats.fileBytes)}) · ${stats.requests} requests${unanswered} · ${formatNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${formatDuration(elapsedMs)} wall / ${formatDuration(stats.apiMs)} api`,
+			`listed ${stats.listed} · scored ${stats.judged} filenames · read ${stats.filesRead} files (${formatBytes(stats.fileBytes)}) · verified ${stats.windowsJudged} passages · ${stats.requests} requests${unanswered} · ${formatNumber(stats.inputTokens)} tokens · $${stats.cost.toFixed(4)} · ${formatDuration(elapsedMs)} wall / ${formatDuration(stats.apiMs)} api`,
 		);
 		if (stats.failures.length > 0) out.push("failures:", ...stats.failures.map(failure => `  ${failure}`));
 		const builder = toolResult(details).text(out.join("\n"));

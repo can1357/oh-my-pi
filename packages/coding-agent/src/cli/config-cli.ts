@@ -10,8 +10,8 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { orderedSettings } from "../config/all-settings";
 import { type AnySetting, lookup } from "../config/registry";
 import { Settings, settings } from "../config/settings";
-import { theme } from "@oh-my-pi/pi-tui/theme";
 import { initXdg } from "./commands/init-xdg";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 // =============================================================================
 // Types
@@ -30,6 +30,8 @@ export interface ConfigCommandArgs {
 		json?: boolean;
 		/** `list` shows only the keys this layer sets, with the values as written. */
 		scope?: ConfigScope;
+		/** Extra `config.yml` overlays layered for `get`/`list`; `set`/`reset` always write global config. */
+		config?: string[];
 	};
 }
 // =============================================================================
@@ -62,57 +64,6 @@ function toSettingDef(setting: AnySetting): CliSettingDef {
 function findSettingDef(path: string): CliSettingDef | undefined {
 	const setting = lookup(path);
 	return setting ? toSettingDef(setting) : undefined;
-}
-
-// =============================================================================
-// Argument Parser
-// =============================================================================
-
-const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg"];
-
-/**
- * Parse config subcommand arguments.
- * Returns undefined if not a config command.
- */
-export function parseConfigArgs(args: string[]): ConfigCommandArgs | undefined {
-	if (args.length === 0 || args[0] !== "config") {
-		return undefined;
-	}
-
-	if (args.length < 2 || args[1] === "--help" || args[1] === "-h") {
-		return { action: "list", flags: {} };
-	}
-
-	const action = args[1];
-	if (!VALID_ACTIONS.includes(action as ConfigAction)) {
-		console.error(chalk.red(`Unknown config command: ${action}`));
-		console.error(`Valid commands: ${VALID_ACTIONS.join(", ")}`);
-		process.exit(1);
-	}
-
-	const result: ConfigCommandArgs = {
-		action: action as ConfigAction,
-		flags: {},
-	};
-
-	const positionalArgs: string[] = [];
-	for (let i = 2; i < args.length; i++) {
-		const arg = args[i];
-		if (arg === "--json") {
-			result.flags.json = true;
-		} else if (!arg.startsWith("-")) {
-			positionalArgs.push(arg);
-		}
-	}
-
-	if (positionalArgs.length > 0) {
-		result.key = positionalArgs[0];
-	}
-	if (positionalArgs.length > 1) {
-		result.value = positionalArgs.slice(1).join(" ");
-	}
-
-	return result;
 }
 
 // =============================================================================
@@ -170,7 +121,8 @@ export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
 		console.error(chalk.red("--scope applies to `config list` only"));
 		process.exit(1);
 	}
-	await Settings.init();
+	const readsEffective = cmd.action === "get" || cmd.action === "list";
+	await Settings.init(readsEffective ? { configFiles: cmd.flags.config } : undefined);
 
 	switch (cmd.action) {
 		case "list":
@@ -267,7 +219,7 @@ async function handleList(flags: { json?: boolean }): Promise<void> {
 
 /**
  * The keys the `scope` layer sets, with the values as written: path-scoped arrays
- * (`enabledModels`, `enabledProviders`, `disabledProviders`) keep their `{ path, … }` entries
+ * (`enabledModels`, `disabledProviders`) keep their `{ path, … }` entries
  * unresolved, so a host can edit the layer's own value without dropping them. Defaults, other
  * layers and the environment are not consulted. Credentials are redacted as in `list`.
  */
@@ -354,8 +306,10 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 		console.log(JSON.stringify({ key: def.path, value: saved, ...shadow?.json }));
 		return;
 	}
-	console.log(chalk.green(`${theme.status.success} Set ${def.path} = ${formatValue(saved)}`));
-	if (shadow) console.log(chalk.yellow(`${theme.status.warning} ${shadow.message}`));
+	console.log(
+		chalk.green(`${currentTheme().symbols.symbol("status.success")} Set ${def.path} = ${formatValue(saved)}`),
+	);
+	if (shadow) console.log(chalk.yellow(`${currentTheme().symbols.symbol("status.warning")} ${shadow.message}`));
 }
 
 /** Value `setting` holds in the global config layer — what `config set` wrote. */
@@ -433,46 +387,13 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 		console.log(JSON.stringify(redacted ? { key: def.path, redacted: true } : { key: def.path, value }));
 	} else {
 		console.log(
-			chalk.green(`${theme.status.success} Reset ${def.path} to ${redacted ? REDACTED : formatValue(value)}`),
+			chalk.green(
+				`${currentTheme().symbols.symbol("status.success")} Reset ${def.path} to ${redacted ? REDACTED : formatValue(value)}`,
+			),
 		);
 	}
 }
 
 function handlePath(): void {
 	console.log(getAgentDir());
-}
-
-// =============================================================================
-// Help
-// =============================================================================
-
-export function printConfigHelp(): void {
-	console.log(`${chalk.bold(`${APP_NAME} config`)} - Manage settings
-
-${chalk.bold("Commands:")}
-  list               List all settings with current values
-  get <key>          Get a specific setting value
-  set <key> <value>  Set a setting value
-  reset <key>        Remove a setting from config.yml so its default applies
-  path               Print the config directory path
-  init-xdg           Initialize XDG Base Directory structure
-
-${chalk.bold("Options:")}
-  --json             Output as JSON
-  --scope <scope>    With list: only the keys the global or project layer sets, as written
-
-${chalk.bold("Examples:")}
-  ${APP_NAME} config list
-  ${APP_NAME} config get theme
-  ${APP_NAME} config set theme catppuccin-mocha
-  ${APP_NAME} config set compaction.enabled false
-  ${APP_NAME} config set defaultThinkingLevel medium
-  ${APP_NAME} config reset steeringMode
-  ${APP_NAME} config list --json
-  ${APP_NAME} config list --scope global --json
-  ${APP_NAME} config init-xdg
-
-${chalk.bold("Boolean Values:")}
-  true, false, yes, no, on, off, 1, 0
-`);
 }

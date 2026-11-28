@@ -21,10 +21,10 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import { parseCodeStatus } from "@oh-my-pi/pi-natives";
-import { concreteThinkingLevel, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
-import type { EditToolDetails, EditToolPerFileResult } from "@oh-my-pi/pi-tui/tools/edit";
-import { splitMagicSections } from "@oh-my-pi/pi-tui/tools/magic-sections";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { concreteThinkingLevel, toReasoningEffort } from "../thinking/levels";
+import type { EditToolDetails, EditToolPerFileResult } from "../tools/details/edit";
+import { splitMagicSections } from "./magic-sections";
+import { ToolError } from "../tools/tool-errors";
 import { isEnoent, prompt, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import { getModelMatchPreferences, resolveModelRoleValue, resolveRoleSelection } from "../config/model-resolver";
@@ -501,6 +501,7 @@ export async function runMagicEdit(options: {
 			const details = result.details;
 			perFileResults.push({
 				path: details?.path ?? section.path,
+				checkoutNotice: details?.checkoutNotice,
 				diff: details?.diff ?? "",
 				firstChangedLine: details?.firstChangedLine,
 				diagnostics: details?.diagnostics,

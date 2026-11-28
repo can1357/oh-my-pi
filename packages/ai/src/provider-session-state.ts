@@ -32,8 +32,6 @@
  *   bearer (`getCodexWebSocketSessionKey`), so a switch naturally lands on a
  *   fresh transport session while the old one stays reachable for teardown.
  *   Resetting from the outside would close a socket a retry may still be on.
- * - **Antigravity** — `lastGoodEndpoint` is endpoint-scoped; the agent /
- *   conversation ids are conversation-scoped. Neither depends on the account.
  * - **GitLab Duo** — the active workflow is account-bound, but it is a live
  *   server-side workflow plus socket, and the switch happens *inside* the
  *   request that may still be resuming it. Tearing it down here would abort the
@@ -52,7 +50,7 @@ import type { ProviderSessionState } from "./types";
 export function resetAccountScopedProviderSessionState(states: Map<string, ProviderSessionState>): void {
 	if (states.size === 0) return;
 	// Fast mode is the account-scoped half of the Anthropic record; the helper
-	// the `/fast on` re-arm path already uses clears exactly that flag.
+	// the fast-mode re-arm path already uses clears exactly that flag.
 	clearAnthropicFastModeFallback(states);
 	resetAnthropicThreads(states);
 	resetOpenAIResponsesAccountScopedState(states);

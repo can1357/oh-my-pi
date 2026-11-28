@@ -59,6 +59,7 @@ import type {
 /** Real OAuth credential (broker-side) — refresh token is the actual upstream value. */
 export const oauthCredentialSchema: FluentType<OAuthCredential> = type({
 	"apiEndpoint?": "string",
+	"tokenBasedBilling?": "boolean",
 	type: "'oauth'",
 	refresh: type("string").narrow(
 		(value, ctx) =>
@@ -77,15 +78,20 @@ export const oauthCredentialSchema: FluentType<OAuthCredential> = type({
 	"inferenceRegion?": "'global' | 'eu' | 'us'",
 	"activeOrganizationId?": "string",
 	"authorizedAt?": "number",
+	"refreshExpires?": "number",
+	"scope?": "string",
 	"kiroClientId?": "string",
 	"kiroClientSecret?": "string",
 	"kiroOidcRegion?": "string",
 	"kiroProfileArn?": "string",
+	"dpopKey?": { kty: "'EC'", crv: "'P-256'", x: "string", y: "string", d: "string" },
+	"dpopNonce?": "string",
 });
 
 /** OAuth credential as it appears in broker snapshots — refresh replaced with sentinel. */
 export const remoteOauthCredentialSchema: FluentType<RemoteOAuthCredential> = type({
 	"apiEndpoint?": "string",
+	"tokenBasedBilling?": "boolean",
 	type: "'oauth'",
 	refresh: type.enumerated(REMOTE_REFRESH_SENTINEL),
 	access: type("string").atLeastLength(1),
@@ -100,11 +106,16 @@ export const remoteOauthCredentialSchema: FluentType<RemoteOAuthCredential> = ty
 	"inferenceRegion?": "'global' | 'eu' | 'us'",
 	"activeOrganizationId?": "string",
 	"authorizedAt?": "number",
+	"refreshExpires?": "number",
+	"scope?": "string",
 	"kiroClientId?": "string",
 	// Redacted by `redactCredentialForWire`; a snapshot carrying it is rejected.
 	"kiroClientSecret?": "undefined",
 	"kiroOidcRegion?": "string",
 	"kiroProfileArn?": "string",
+	// Redacted like the Kiro secret: the DPoP key can mint refreshes.
+	"dpopKey?": "undefined",
+	"dpopNonce?": "string",
 });
 
 export const apiKeyCredentialSchema: FluentType<ApiKeyCredential> = type({

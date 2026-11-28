@@ -119,6 +119,12 @@ export function resolveImageMaxEdge(target: ImageTokenizationTarget): number | u
 	return typeof edge === "number" && edge > 0 ? edge : undefined;
 }
 
+/** Benchmarked Snapcompact grid for the reader, if the catalog pins one. */
+export function resolveSnapcompactVariant(target: ImageTokenizationTarget): string | undefined {
+	const variant = resolveImageAxes(target).snapcompactVariant;
+	return typeof variant === "string" ? variant : undefined;
+}
+
 /**
  * Scale `size` down (never up) so its longest side is at most `maxEdge`: what a host's `image-max-edge` does to
  * an image, and how a caller sizes one to pass such a host untouched.

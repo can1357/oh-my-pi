@@ -47,13 +47,13 @@ import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redire
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
 	AUTO_THINKING,
-	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
 	concreteThinkingLevel,
 	modelSupportsEffortCeiling,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
-} from "@oh-my-pi/pi-tui/thinking";
+} from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ResetRecoveryResult } from "./codex-auto-reset";
@@ -87,7 +87,12 @@ import {
 	type ServingModel,
 	validateRetryFallbackChains,
 } from "./retry-fallback-chains";
-import { describeUsageFallback } from "./retry-fallback-reason";
+import {
+	describeFallbackCause,
+	describeUsageFallback,
+	failedTurnFallbackCause,
+	type RetryFallbackCause,
+} from "./retry-fallback-reason";
 import { getLatestCompactionEntry } from "./session-context";
 import { type CustomMessageEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
@@ -179,6 +184,24 @@ function syntheticToolResultTailStart(messages: readonly AgentMessage[]): number
 	return index;
 }
 
+/**
+ * Index of the assistant turn ending at `tail` (a context index), looking back
+ * over the synthetic results the loop paired with its unrun tool calls. A real
+ * result means a call ran, so a mixed tail never resolves to the turn.
+ */
+function failedTurnStart(messages: readonly AgentMessage[], tail: number): number {
+	let index = tail;
+	while (index > 0 && isSyntheticToolResultMessage(messages[index])) index--;
+	const assistant = messages[index];
+	if (index === tail || assistant?.role !== "assistant") return index;
+	const callIds = new Set(assistant.content.flatMap(block => (block.type === "toolCall" ? [block.id] : [])));
+	for (let i = index + 1; i <= tail; i++) {
+		const result = messages[i];
+		if (result.role !== "toolResult" || !callIds.has(result.toolCallId)) return tail;
+	}
+	return index;
+}
+
 function retryableAssistantTurnEnd(messages: readonly AgentMessage[]): number | undefined {
 	const turnEnd = syntheticToolResultTailStart(messages);
 	const message = messages[turnEnd - 1];
@@ -207,6 +230,11 @@ function unansweredPrompt(messages: readonly AgentMessage[], end: number): Agent
 	return undefined;
 }
 
+/** A result the loop wrote for a call it skipped rather than ran: a pending soft tool requirement refused it, so nothing failed. */
+function isSkippedToolResult(message: AgentMessage): boolean {
+	return isSyntheticToolResultMessage(message) && message.details?.source === "assistant_stop_skipped";
+}
+
 /** Whether `messages` ends in a failed/aborted turn whose most recent activity was a tool call. */
 function abortedToolCallTail(messages: readonly AgentMessage[]): boolean {
 	const turnEnd = retryableAssistantTurnEnd(messages);
@@ -214,7 +242,7 @@ function abortedToolCallTail(messages: readonly AgentMessage[]): boolean {
 	// Synthetic tool results only ever trail a turn that emitted tool calls.
 	if (isSyntheticToolResultMessage(messages[turnEnd])) return true;
 	const beforeTurn = messages[turnEnd - 2];
-	return beforeTurn?.role === "toolResult" && beforeTurn.isError === true;
+	return beforeTurn?.role === "toolResult" && beforeTurn.isError === true && !isSkippedToolResult(beforeTurn);
 }
 /**
  * Index of the first trailing failed tool result to strip for a tool replay,
@@ -230,6 +258,8 @@ function abortedToolCallTail(messages: readonly AgentMessage[]): boolean {
  * would repeat its side effects. Synthetic placeholder tails never qualify
  * either — their anchor is the aborted turn itself and its arguments may be
  * truncated, so those are re-generated via a fresh model call instead. Nor
+ * does a batch the loop skipped rather than ran (a pending soft tool
+ * requirement refused it): replaying it would run what the loop refused. Nor
  * does a tail carrying a delivery other than an eval snapshot: the strip
  * would erase it from history, while a fresh model call keeps it in context.
  */
@@ -260,6 +290,7 @@ function toolReplayStart(messages: readonly AgentMessage[]): number | undefined 
 		if (result.role !== "toolResult" || result.isError !== true || !callIds.has(result.toolCallId)) {
 			return undefined;
 		}
+		if (isSkippedToolResult(result)) return undefined;
 	}
 	return start;
 }
@@ -970,7 +1001,7 @@ export class TurnRecovery {
 			this.#host.sessionManager.appendModelChange(
 				formatModelStringWithRouting(model),
 				EPHEMERAL_MODEL_CHANGE_ROLE,
-				true,
+				{ resolvedModelIsFallback: true },
 			);
 		}
 	}
@@ -1554,9 +1585,12 @@ export class TurnRecovery {
 		// Rows kept out of context may trail the failed turn; they stay, the turn goes.
 		const index = lastContextIndex(messages);
 		const lastMessage = messages[index];
-		const lastAssistant: AssistantMessage | undefined = lastMessage?.role === "assistant" ? lastMessage : undefined;
+		// Synthetic results for its unrun tool calls trail the turn; drop them with it.
+		const start = failedTurnStart(messages, index);
+		const candidate = messages[start];
+		const lastAssistant: AssistantMessage | undefined = candidate?.role === "assistant" ? candidate : undefined;
 		if (lastAssistant !== undefined && this.#isSameAssistantMessage(lastAssistant, assistantMessage)) {
-			this.#host.agent.replaceMessages(messages.toSpliced(index, 1));
+			this.#host.agent.replaceMessages(messages.toSpliced(start, index - start + 1));
 			return;
 		}
 		// A miss means the failed turn is still in active context (or was never
@@ -1889,6 +1923,9 @@ export class TurnRecovery {
 			this.#unexecutedToolCallsReplaySafe(message);
 		if (this.#hasReplayUnsafeOutput(message) && !replaySafeUnexecutedTools) return false;
 		if (AIError.is(id, AIError.Flag.AccountPolicy) || this.isClassifierRefusal(message)) return true;
+		// Admitted only so the retry handler can walk the fallback chain; it treats the
+		// flag as this model's spent budget and never replays the same model.
+		if (AIError.is(id, AIError.Flag.RetriesExhausted)) return true;
 		return AIError.retriable(id);
 	}
 
@@ -2239,7 +2276,9 @@ export class TurnRecovery {
 		currentModel: Model | null | undefined = this.#host.model(),
 		options?: { pinnedRole?: string; roleHint?: string },
 	): string[] {
-		const pinned = options?.pinnedRole ?? this.#activeRetryFallback?.role;
+		// An explicitly supplied pin (even undefined) belongs to a separate owner, e.g. an advisor;
+		// never inherit the main session's active fallback role for it.
+		const pinned = options && "pinnedRole" in options ? options.pinnedRole : this.#activeRetryFallback?.role;
 		const current = this.resolveRetryFallbackRole(currentSelector, currentModel, options?.roleHint);
 		if (!pinned) return current ? [current] : [];
 		return current && current !== pinned ? [pinned, current] : [pinned];
@@ -2374,7 +2413,10 @@ export class TurnRecovery {
 			pinFallback: true,
 			apiKey: fallback.apiKey,
 			signal,
-			reason: describeUsageFallback(health, cfgRetryUsageReservePct.get(this.#host.settings)),
+			cause: {
+				trigger: "usage-preflight",
+				reason: describeUsageFallback(health, cfgRetryUsageReservePct.get(this.#host.settings)),
+			},
 		});
 	}
 
@@ -2393,7 +2435,7 @@ export class TurnRecovery {
 		return this.applyRetryFallbackCandidate(fallback.role, fallback.selector, currentSelector, {
 			apiKey: fallback.apiKey,
 			signal,
-			reason: `no credential for ${currentModel.provider}`,
+			cause: { trigger: "missing-credential", reason: `no credential for ${currentModel.provider}` },
 		});
 	}
 
@@ -2504,12 +2546,12 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: {
+		options: {
 			pinFallback?: boolean;
 			restoreAfterSuccess?: boolean;
 			apiKey?: string;
 			signal?: AbortSignal;
-			reason?: string;
+			cause: RetryFallbackCause;
 		},
 	): Promise<boolean> {
 		const fallbackGeneration = this.#retryFallbackGeneration;
@@ -2523,10 +2565,10 @@ export class TurnRecovery {
 		}
 		if (cfgOffline.get(this.#host.settings) && candidate.provider !== this.#host.model()?.provider) return false;
 		const apiKey =
-			options?.apiKey ??
-			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options?.signal }));
+			options.apiKey ??
+			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options.signal }));
 		if (
-			options?.signal?.aborted ||
+			options.signal?.aborted ||
 			this.#retryFallbackGeneration !== fallbackGeneration ||
 			this.#activeRetryFallback !== previousFallback ||
 			this.#host.model() !== previousModel ||
@@ -2567,8 +2609,7 @@ export class TurnRecovery {
 		// names the last model that served, which this swap has not changed.
 		const routedBeforeSwap = this.#fallbackRoutedFor;
 		const sessionIdBeforeSwap = this.#host.sessionManager.getSessionId();
-		const startRequestScopedFallback =
-			options?.restoreAfterSuccess === true && !previousFallback?.restoreAfterSuccess;
+		const startRequestScopedFallback = options.restoreAfterSuccess === true && !previousFallback?.restoreAfterSuccess;
 		const servedBeforeSwap = this.#activeRetryFallback?.served;
 		this.#markFallbackRouted();
 		if (this.#activeRetryFallback && !startRequestScopedFallback) this.#activeRetryFallback.served = false;
@@ -2585,7 +2626,7 @@ export class TurnRecovery {
 			return false;
 		}
 		if (
-			options?.signal?.aborted ||
+			options.signal?.aborted ||
 			this.#host.promptGeneration() !== generation ||
 			this.#host.isDisposed() ||
 			this.#host.abortInProgress()
@@ -2600,7 +2641,9 @@ export class TurnRecovery {
 			}
 			return false;
 		}
-		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, {
+			fallback: { from: currentSelector, ...options.cause },
+		});
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
 		this.#host.setThinkingLevel(nextThinkingLevel);
 		if (!this.#activeRetryFallback || startRequestScopedFallback) {
@@ -2609,15 +2652,15 @@ export class TurnRecovery {
 				originalSelector: currentSelector,
 				originalThinkingLevel: currentThinkingLevel,
 				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
-				pinned: options?.pinFallback === true,
-				restoreAfterSuccess: options?.restoreAfterSuccess,
+				pinned: options.pinFallback === true,
+				restoreAfterSuccess: options.restoreAfterSuccess,
 				previousFallback: startRequestScopedFallback ? previousFallback : undefined,
 				originalWasFallback:
 					startRequestScopedFallback && routedBeforeSwap === this.#host.sessionManager.getSessionId(),
 			};
 		} else {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
-			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
+			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options.pinFallback === true;
 		}
 		await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
 		await this.#host.emitSessionEvent({
@@ -2625,7 +2668,7 @@ export class TurnRecovery {
 			from: currentSelector,
 			to: selector.raw,
 			role,
-			reason: options?.reason,
+			reason: describeFallbackCause(options.cause),
 		});
 		return true;
 	}
@@ -2779,7 +2822,7 @@ export class TurnRecovery {
 				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
 					apiKey,
-					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
+					cause: failedTurnFallbackCause(failedMessage),
 				});
 				// Redemption replays the refused request's frozen `system` and `tools`. If the
 				// swap rebuilt either, the fallback model would be prompted with, and call tools
@@ -2911,7 +2954,7 @@ export class TurnRecovery {
 	 * fallback that makes Fast a safe default. Returns false when the current
 	 * model is not a fast variant, the base id is missing, or it has no key.
 	 */
-	async #tryFireworksFastFallback(currentSelector: string): Promise<boolean> {
+	async #tryFireworksFastFallback(currentSelector: string, failedMessage: AssistantMessage): Promise<boolean> {
 		const model = this.#activeFireworksFastModel();
 		if (!model) return false;
 		const baseModel = this.#host.modelRegistry.find("fireworks", toFireworksBaseModelId(model.id));
@@ -2924,7 +2967,10 @@ export class TurnRecovery {
 		// chain: the base model must not be reported as the configured primary.
 		this.#markFallbackRouted();
 		await this.#host.setModelWithProviderSessionReset(baseModel);
-		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
+		const cause = failedTurnFallbackCause(failedMessage);
+		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, {
+			fallback: { from: currentSelector, ...cause },
+		});
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
 		await this.#host.syncAfterModelChange(previousEditMode, { retryFallback: true });
 		await this.#host.emitSessionEvent({
@@ -2932,7 +2978,11 @@ export class TurnRecovery {
 			from: currentSelector,
 			to: baseSelector,
 			role: "fireworks-fast",
-			reason: "Request rejected by the Fast tier. Retrying on the Standard tier.",
+			// The loop, not the Fast tier, ended the turn: say why, and that the tier still changes.
+			reason:
+				cause.trigger === "agent-loop"
+					? `${describeFallbackCause(cause)?.replace(/\.?$/, ".")} Retrying on the Standard tier.`
+					: "Request rejected by the Fast tier. Retrying on the Standard tier.",
 		});
 		return true;
 	}
@@ -3124,11 +3174,15 @@ export class TurnRecovery {
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
 			? Math.min(retrySettings.maxRetries, 1)
 			: retrySettings.maxRetries;
-		const retryBudgetExhausted =
-			this.#retryAttempt > maxRetries || this.#genericAbortStreak > GENERIC_ABORT_MAX_RETRIES;
-
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
+		// The transport already spent this model's retry budget on the status:
+		// no same-model replay, but the fallback chain still gets its turn.
+		const transportRetriesExhausted = AIError.is(id, AIError.Flag.RetriesExhausted);
+		const retryBudgetExhausted =
+			transportRetriesExhausted ||
+			this.#retryAttempt > maxRetries ||
+			this.#genericAbortStreak > GENERIC_ABORT_MAX_RETRIES;
 		const requestProvider = (message as IssuedProviderAssistantMessage)[kUsageLimitRequestProvider];
 		const oldProviderLimitFor = (model: Model | undefined): boolean =>
 			requestProvider !== undefined &&
@@ -3179,6 +3233,7 @@ export class TurnRecovery {
 			if (reasonBackoffMs > delayMs) delayMs = reasonBackoffMs;
 		}
 		let switchedCredential = false;
+		let poolUnavailableReason: string | undefined;
 		let switchedModel = false;
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
@@ -3328,15 +3383,19 @@ export class TurnRecovery {
 			this.#retryAbortController?.abort();
 			this.#retryAbortController = rotateAbortController;
 			try {
-				switchedCredential = (
-					await this.#host.modelRegistry.authStorage.limits.rotate(currentModel.provider, this.#host.sessionId(), {
-						error: errorMessage,
+				const rotation = await this.#host.modelRegistry.authStorage.limits.rotate(
+					currentModel.provider,
+					this.#host.sessionId(),
+					{
+						error: message.errorClassificationMessage ?? errorMessage,
 						modelId: currentModel.id,
 						baseUrl: currentModel.baseUrl,
 						signal: rotateAbortController.signal,
 						waitForSibling: rotationsRemaining > 0,
-					})
-				).switched;
+					},
+				);
+				switchedCredential = rotation.switched;
+				poolUnavailableReason = rotation.poolUnavailableReason;
 				// Rotation is advisory: expired blocks or a repeatedly offered sibling
 				// must not retry beyond one pool traversal in this saga.
 				switchedCredential &&= rotationsRemaining > 0;
@@ -3553,7 +3612,7 @@ export class TurnRecovery {
 			// best-effort, degrade to Standard on failure) and triggers on hard router
 			// errors the generic retry classifier would otherwise reject.
 			if (!switchedModel && allowModelFallback && options?.fireworksFastFallback) {
-				switchedModel = await this.#tryFireworksFastFallback(currentSelector);
+				switchedModel = await this.#tryFireworksFastFallback(currentSelector, message);
 			}
 			if (switchedModel) {
 				delayMs = 0;
@@ -3561,6 +3620,8 @@ export class TurnRecovery {
 				delayMs = parsedRetryAfterMs;
 			}
 		}
+
+		const terminalError = poolUnavailableReason ? `${errorMessage}\n\n${poolUnavailableReason}` : errorMessage;
 
 		if (retryBudgetExhausted && staleUsageLimit) {
 			// The spent attempts and their backoff belong to the replaced provider.
@@ -3571,9 +3632,13 @@ export class TurnRecovery {
 		} else if (retryBudgetExhausted) {
 			if (!switchedModel && !switchedCredential) {
 				const attempt = this.#retryAttempt - 1;
-				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
+				// A transport-exhausted failure was never retried here; its own message already says what happened.
+				message.errorMessage =
+					transportRetriesExhausted && attempt === 0
+						? terminalError
+						: `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${terminalError}`;
 				await this.#closeRetrySaga(
-					{ success: false, attempt, finalError: errorMessage },
+					{ success: false, attempt, finalError: terminalError },
 					{ terminalTurn: message, retryErrors: { status: "superseded" } },
 				);
 				return false;
@@ -3593,6 +3658,7 @@ export class TurnRecovery {
 			!stripDemotedReasoning &&
 			!resampleMidStreamRefusal
 		) {
+			if (poolUnavailableReason) message.errorMessage = terminalError;
 			// A prior attempt in this saga already announced `auto_retry_start`
 			// (retryAttempt was incremented for each call to this method, so > 1
 			// means at least one earlier attempt started the loop) but this
@@ -3602,7 +3668,7 @@ export class TurnRecovery {
 			// an announcement that never resolves.
 			if (this.#retryAttempt > 1) {
 				await this.#closeRetrySaga(
-					{ success: false, attempt: this.#retryAttempt - 1, finalError: errorMessage },
+					{ success: false, attempt: this.#retryAttempt - 1, finalError: terminalError },
 					{ terminalTurn: message },
 				);
 			}
@@ -3753,7 +3819,8 @@ export class TurnRecovery {
 	/**
 	 * Positional backstop for {@link removeAssistantMessageFromActiveContext}:
 	 * when the identity check missed, the failed assistant turn is still the
-	 * active tail and the scheduled continue() would reject it. An
+	 * active tail (ahead of any synthetic results for its unrun tool calls) and
+	 * the scheduled continue() would reject or replay it. An
 	 * error/aborted-stopped assistant tail is never legal continuation input
 	 * and no recovery path wants it replayed on the wire, so drop it by
 	 * position; any healthy tail is left untouched.
@@ -3761,14 +3828,15 @@ export class TurnRecovery {
 	#stripFailedAssistantTail(): void {
 		const messages = this.#host.agent.state.messages;
 		const index = lastContextIndex(messages);
-		const tail = messages[index];
+		const start = failedTurnStart(messages, index);
+		const tail = messages[start];
 		if (tail?.role !== "assistant") return;
 		if (tail.stopReason !== "error" && tail.stopReason !== "aborted") return;
 		logger.debug("agent active context failed assistant tail stripped positionally", {
 			stopReason: tail.stopReason,
 			timestamp: tail.timestamp,
 		});
-		this.#host.agent.replaceMessages(messages.toSpliced(index, 1));
+		this.#host.agent.replaceMessages(messages.toSpliced(start, index - start + 1));
 	}
 
 	/**
@@ -3919,8 +3987,15 @@ export class TurnRecovery {
 	 * tool execution). Drives the TUI's idle "F5 to Retry" status row;
 	 * {@link retry} is the matching action.
 	 */
-	get hasAbortedToolCallTail(): boolean {
+	hasAbortedToolCallTail(prunedTerminalFailure?: AssistantMessage): boolean {
 		const active = this.#host.agent.state.messages;
+		if (prunedTerminalFailure) {
+			if (prunedTerminalFailure.stopReason !== "error" && prunedTerminalFailure.stopReason !== "aborted")
+				return false;
+			if (prunedTerminalFailure.content.some(block => block.type === "toolCall")) return true;
+			const tail = active[conversationEnd(active) - 1];
+			return tail?.role === "toolResult" && tail.isError && !isSkippedToolResult(tail);
+		}
 		if (abortedToolCallTail(active)) return true;
 		// A trailing assistant message is authoritative for a live session: a
 		// settled successful turn leaves nothing to retry.

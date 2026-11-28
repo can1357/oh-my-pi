@@ -9,14 +9,12 @@ This document describes how slash commands are discovered, deduplicated, surface
 - [`src/discovery/builtin.ts`](../packages/coding-agent/src/discovery/builtin.ts)
 - [`src/discovery/omp-plugins.ts`](../packages/coding-agent/src/discovery/omp-plugins.ts)
 - [`src/discovery/claude.ts`](../packages/coding-agent/src/discovery/claude.ts)
-- [`src/discovery/codex.ts`](../packages/coding-agent/src/discovery/codex.ts)
 - [`src/discovery/claude-plugins.ts`](../packages/coding-agent/src/discovery/claude-plugins.ts)
 - [`src/discovery/agents.ts`](../packages/coding-agent/src/discovery/agents.ts)
 - [`src/discovery/opencode.ts`](../packages/coding-agent/src/discovery/opencode.ts)
 - [`src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
 - [`src/discovery/helpers.ts`](../packages/coding-agent/src/discovery/helpers.ts)
 - [`src/discovery/omp-extension-roots.ts`](../packages/coding-agent/src/discovery/omp-extension-roots.ts)
-- [`src/config/claude-paths.ts`](../packages/coding-agent/src/config/claude-paths.ts)
 - [`src/utils/command-args.ts`](../packages/coding-agent/src/utils/command-args.ts)
 - [`src/slash-commands/builtin-registry.ts`](../packages/coding-agent/src/slash-commands/builtin-registry.ts)
 - [`src/slash-commands/acp-builtins.ts`](../packages/coding-agent/src/slash-commands/acp-builtins.ts)
@@ -41,12 +39,11 @@ Current slash-command providers and priorities:
 3. `claude` — priority `80`
 4. `claude-plugins` — priority `70`
 5. `agents` (`.agent`/`.agents` standard dirs) — priority `70`
-6. `codex` — priority `70`
-7. `opencode` — priority `55`
+6. `opencode` — priority `55`
 
-Tie behavior: equal-priority providers keep registration order. Current import order registers `claude-plugins` before `agents` before `codex`, so plugin commands win over both on name collisions.
+Tie behavior: equal-priority providers keep registration order. Current import order registers `claude-plugins` before `agents`, so plugin commands win on name collisions.
 
-Foreign user-level sources are opt-in through `enabledProviders` (`claude`, `codex`, `opencode`, or `claude-plugins`; `*`/`all` enables all). Project sources are unaffected by this user opt-in. Claude/OpenCode also retain commands-only user toggles, described below. Setting `CLAUDE_CONFIG_DIR` opts in and relocates Claude's user source.
+Claude and OpenCode commands load only from the project; their home-directory commands are never read.
 
 ### Name-collision behavior
 
@@ -89,42 +86,21 @@ Scans `commands/*.md` in explicit extension-package directories, the effective `
 
 ## `claude` provider (`claude.ts`)
 
-The project side is controlled by `commands.enableClaudeProject` (default `true`). The user side loads when Claude is opted in, `CLAUDE_CONFIG_DIR` is set, or `commands.enableClaudeUser` is `true` (default `false`):
-
-- user: `<Claude config dir>/commands/**/*.md` (recursive; defaults to `~/.claude`)
-- project: `<cwd>/.claude/commands/**/*.md` (recursive)
+Controlled by `commands.enableClaudeProject` (default `true`). Loads `<cwd>/.claude/commands/**/*.md` (recursive).
 
 Commands in subdirectories additionally get a namespaced alias: `foo/bar.md` is registered under both `bar` and `foo:bar` (`addClaudeCommandNamespaceAliases`).
 
-The provider pushes user items before project items, so **user Claude commands beat project Claude commands** on same-name collisions inside this provider.
-
-## `codex` provider (`codex.ts`)
-
-Loads:
-
-- user: `~/.codex/commands/*.md` (only when `codex` user discovery is opted in)
-- project: `<cwd>/.codex/commands/*.md`
-
-Both sides are loaded then flattened in user-first order, so **user Codex commands beat project Codex commands** on collisions.
-
-Codex command content is parsed with frontmatter stripping (`parseFrontmatter`), and command name can be overridden by frontmatter `name`; otherwise filename is used.
-
 ## `opencode` provider (`opencode.ts`)
 
-The project side is controlled by `commands.enableOpencodeProject` (default `true`). The user side loads when OpenCode is opted in or `commands.enableOpencodeUser` is `true` (default `false`):
-
-- user: `~/.config/opencode/commands/*.md`
-- project: `<cwd>/.opencode/commands/*.md`
-
-Both sides are loaded then flattened in user-first order, so **user OpenCode commands beat project OpenCode commands** on collisions. OpenCode command content is parsed with frontmatter stripping, and command name can be overridden by frontmatter `name`; otherwise filename is used.
+Controlled by `commands.enableOpencodeProject` (default `true`). Loads `<cwd>/.opencode/commands/*.md`. OpenCode command content is parsed with frontmatter stripping, and command name can be overridden by frontmatter `name`; otherwise filename is used.
 
 ## `claude-plugins` provider (`claude-plugins.ts`)
 
-Loads roots via `listClaudePluginRoots(...)`, which reads the active Claude config directory's `plugins/installed_plugins.json`, the active OMP plugins directory's `installed_plugins.json` (profile/XDG-aware), and the nearest project `.omp/plugins/installed_plugins.json`. Claude-origin user roots require `claude` or `claude-plugins` user opt-in; OMP and explicit local roots do not. Disabled registry entries and Claude `enabledPlugins: false` entries are excluded.
+Loads roots via `listClaudePluginRoots(...)`, which reads the active OMP plugins directory's `installed_plugins.json` (profile/XDG-aware), and the nearest project `.omp/plugins/installed_plugins.json`. Disabled registry entries are excluded.
 
 For each root it normally scans `<pluginRoot>/commands/*.md`. Manifest `commands`/`slash-commands` entries can instead select directories or individual Markdown files; the first populated key wins. Command names are prefixed with the plugin name when one is present: `<plugin>:<command>`.
 
-Across the three registries, roots are merged by precedence rather than sorted: `--plugin-dir` injected roots come first, then project-scoped entries (which shadow user entries for the same plugin id), then user entries, with the OMP registry authoritative over Claude's for the same plugin id. Within each registry, per-plugin entry order from the JSON data is preserved; there is no additional sort step.
+Across these sources, roots are merged by precedence rather than sorted: `--plugin-dir` injected roots come first, then project-scoped entries (which shadow user entries for the same plugin id), then user entries. Within each registry, per-plugin entry order from the JSON data is preserved; there is no additional sort step.
 
 ## `agents` provider (`agents.ts`)
 
@@ -145,7 +121,7 @@ For each command:
 5. preserve `argumentHint` from discovery, or parse `argumentHint`/`argument-hint` frontmatter for autocomplete ghost text and ACP input hints
 6. set `side` when the frontmatter has the boolean `side: true` (a quoted `"true"` does not count)
 
-Codex/OpenCode providers strip frontmatter before this stage. Their discovered argument hints and `side` flags survive, but the runtime description currently falls back to the body rather than using the separately discovered description.
+The OpenCode provider strips frontmatter before this stage. Its discovered argument hints and `side` flags survive, but the runtime description currently falls back to the body rather than using the separately discovered description.
 
 Frontmatter parse severity is level-dependent:
 
@@ -321,6 +297,11 @@ viewed: the focused subagent's session when one is focused, otherwise the main
 session. It uses that session's active model and context, including partial
 streaming assistant text. Bare `/btw` opens that view's history, with the newest
 question selected.
+
+In the interactive composer, one leading `?` followed by question text is a
+shortcut for `/btw <question>`. A bare `?` or a draft starting with consecutive
+question marks (`??`) submits as a normal prompt.
+
 Saved side questions are not appended to the main transcript or sent as history
 to unrelated turns. Each new `/btw <question>` remains independent; explicit
 follow-ups include only the selected side conversation alongside the current
@@ -491,6 +472,8 @@ answers or relax these branch guards.
 | `/annotate path/to/file`        | Text read from a file                                                        |
 | `/annotate "text"`              | Literal text                                                                 |
 
+`/copy` and `/annotate session` use the same picker. Highlight a message and choose **Blocks** in Tern (or press Right) to browse its blocks. Choose **Copy** or **Select** (or press Enter) to accept the highlighted message or block. When Tern has room for a side preview, you can also click a preview section to accept its full text and close the picker.
+
 The whole remainder after `/annotate` is one source specification (`CustomCommand.execute` receives it verbatim as `rawArgs`):
 
 - A remainder wrapped in matching `"` or `'` is literal text; only the outer pair is stripped and the interior is kept byte-for-byte.
@@ -498,6 +481,8 @@ The whole remainder after `/annotate` is one source specification (`CustomComman
 - Anything else is one file path, spaces included, resolved with `resolveReadPath` against the live session cwd. Missing or non-regular paths notify and never fall back to literal text.
 
 Argument completion offers the modes, a `./` file-path starter, and a quote starter. `CustomCommand.getArgumentCompletions(prefix, cwd)` receives the live session cwd, so file suggestions follow `/move` and `/wt`.
+
+The annotation pane syntax-highlights supported file types, selected code blocks with a known language, and diff contents in ANSI terminals and Tern. In ANSI, added and removed code keeps a distinct background tint even when syntax colors are active. Line notes still refer to the original source line or old/new diff line, including when the display wraps.
 
 **Code review.** The menu lists up to three GitHub PRs or GitLab MRs referenced in the conversation, then the local diff kinds. `/annotate code-review` takes the same arguments as `/review`; a ref or `#N`/`!N` skips the menu. The diff is resolved once in the review checkout and frozen (`ResolvedReviewTarget`); the overlay and the reviewer prompt read the same snapshot, filtered by the same exclusion rules as `/review` (`src/extensibility/custom-commands/bundled/review/diff.ts`). The overlay offers **Continue with LLM review** (submits the `/review` prompt with the notes as operator focus) and **Paste annotations into prompt**. Both include the optional `[focus]` text. Nothing is posted to GitHub or GitLab.
 
@@ -515,7 +500,7 @@ Without an interactive UI, `code-review` delegates to `/review` instead of openi
 
 `/plan-review` reopens the Plan Review overlay for the latest plan (plan mode only). In the Contents sidebar `a` annotates the selected section; in the plan body `a` annotates the top visible line. `e` edits the annotation(s) at that section or line (with a chooser when several apply) and `u` undoes the latest section deletion or annotation change. The note editor behaves like `/annotate`'s: Enter saves, Shift+Enter inserts a newline, Escape discards the draft, the external-editor key replaces the draft without saving, and saving an empty edit deletes the annotation.
 
-The decision options are the approval choices and **Save**, which writes the plan to a chosen path and leaves the review open (plan mode and the session stay as they are). **Refine plan** appears only while the plan has feedback (annotations or deleted sections); it is then the first, preselected option and re-prompts the model with that feedback.
+The decision options are the approval choices and **Save**, which writes the plan to a chosen path, reports the destination, and leaves the review open (plan mode and the session stay as they are). **Refine plan** appears only while the plan has feedback (annotations or deleted sections); it is then the first, preselected option and re-prompts the model with that feedback.
 
 Under Tern the plan is one editable document: double-click edits it in place (edits are mirrored to the plan file and annotations follow their text), and selecting text offers a Comment bubble whose comments become Refine feedback (`> "quote"` then the note, under the section heading). Below it a dock holds the Approve split button (Refine while the plan has comments; its menu lists every approval choice), the execution model chip, Save and Cancel; Enter runs the main button, ←/→ change the model, ↑/↓ walk the Contents (hidden while the plan has comments). Older Tern builds keep one Markdown block per section and the option bar.
 
@@ -523,7 +508,7 @@ Under Tern the plan is one editable document: double-click edits it in place (ed
 
 `/context` opens a read-only Context Viewer over a snapshot of the active system prompt, loaded instruction files and skill listings, tool definitions, and messages, with estimated tokens per entry and per category. The snapshot is taken on open and does not refresh; close and reopen to update. It does not run extension hooks (`context`, `before_provider_request`), so inspecting context cannot trigger their side effects. Messages go through the same per-message conversion as `convertToLlm`, with steering wrapped by `wrapSteeringForModel` and provider refusals dropped as live replay drops them, but not image blocking, obfuscation, request normalization, provider encoding, or provider transforms, so content and token counts can differ from the provider request.
 
-Instruction files and skill listings stay in the provider-facing system prompt but are shown in their own categories, also under a literal custom prompt or a custom template. `buildSystemPrompt` renders its blocks with `prompt.renderTracked`, passing the context file and skill objects as tracked items: the template engine records the output range of every `{{#each}}` iteration over one of them, and each iteration that covers whole lines is formatted on its own and joined into the formatted template as one block, so its block index and range are known by construction. The session commits these sources together with the base prompt (rebuilds, prepared commits, and session-switch rollback). When the viewer opens, it attributes the sources of every block that is unchanged at the same index in the effective prompt. System Prompt entries show an attributed source as a `[Shown in <category>: <source>]` marker at its original position, colored with that category's theme color; markers carry no tokens. Sources in a block that changed or moved after the build stay in System Prompt, and the Overview says how many instruction files and skills stayed there because the prompt changed after it was built; an extension `before_agent_start` hook or SDK `systemPrompt` callback that appends to block 0 leaves every skill there. An iteration inside a helper block such as `{{#list}}`, sharing a line with other text, or inside a code fence the template opened is formatted in place and not attributed, so that source stays in System Prompt without a note. The status line's context breakdown counts Instruction files and Skills through the same attribution (`claimPromptSources` in `pi-tui`), so its figures match `/context`. A file that leaves a code fence open has it closed at its end, so the rest of the prompt is formatted as usual.
+Instruction files and skill listings stay in the provider-facing system prompt but are shown in their own categories, also under a literal custom prompt or a custom template. `buildSystemPrompt` renders its blocks with `prompt.renderTracked`, passing the context file and skill objects as tracked items: the template engine records the output range of every `{{#each}}` iteration over one of them, and each iteration that covers whole lines is formatted on its own and joined into the formatted template as one block, so its block index and range are known by construction. The session commits these sources together with the base prompt (rebuilds, prepared commits, and session-switch rollback). When the viewer opens, it attributes the sources of every block that is unchanged at the same index in the effective prompt. System Prompt entries show an attributed source as a `[Shown in <category>: <source>]` marker at its original position, colored with that category's theme color; markers carry no tokens. Sources in a block that changed or moved after the build stay in System Prompt, and the Overview says how many instruction files and skills stayed there because the prompt changed after it was built; an extension `before_agent_start` hook or SDK `systemPrompt` callback that appends to block 0 leaves every skill there. An iteration inside a helper block such as `{{#list}}`, sharing a line with other text, or inside a code fence the template opened is formatted in place and not attributed, so that source stays in System Prompt without a note. The status line's context breakdown counts Instruction files and Skills through the same attribution (`claimPromptSources` in `packages/coding-agent/src/session/context-usage.ts`), so its figures match `/context`. A file that leaves a code fence open has it closed at its end, so the rest of the prompt is formatted as usual.
 
 Estimate rules: Overview category and per-tool rows split the reported Used total by each row's estimated share, while entry headers show their own unscaled estimates, so the entries in a category need not add up to its Overview row; the Overview notes this under its legend. Multiple thinking blocks in one message share a total shown on a group heading, and grouped entries show `—`; empty interrupted thinking without usage shows `N/A · Interrupted`, not zero. Retained Anthropic web-search and tool-search calls and results appear in Tool Calls and Tool Output as JSON; opaque provider data (thinking signatures, `encrypted_content`, `encrypted_index`) is shown only as its size, such as `signature · 1,024 chars`, while still counted.
 
@@ -558,7 +543,7 @@ The schema applies only to structured runs: `task.structured` on, or `structured
 4. Claude marketplace plugin agents
 5. the bundled `reviewer`
 
-Item 4 applies only with the `claude-plugins` provider enabled. User-scope roots from the foreign `~/.claude/plugins` tree also need the `claude` or `claude-plugins` user source. Claude-dialect plugin agents (foreign Claude roots and packages whose manifest declares the Claude format) drop their frontmatter `model`. OMP-native and Agent-Plugins-standard packages keep it. For a Claude-dialect `reviewer`, set `task.agentModelOverrides.reviewer` instead.
+Item 4 applies only with the `claude-plugins` provider enabled. Claude-dialect plugin agents (packages whose manifest declares the Claude format) drop their frontmatter `model`. OMP-native and Agent-Plugins-standard packages keep it. For a Claude-dialect `reviewer`, set `task.agentModelOverrides.reviewer` instead.
 
 The name comes from the frontmatter, not the file name. The replacement is the whole definition. Nothing merges with the bundled file, so restate `tools`, `spawns`, `model`, and `output` if the replacement needs them. To change only the model, set `task.agentModelOverrides.reviewer` instead. See [filesystem and plugin discovery](./task-agent-discovery.md#filesystem-and-plugin-discovery) and [merge and collision rules](./task-agent-discovery.md#merge-and-collision-rules).
 

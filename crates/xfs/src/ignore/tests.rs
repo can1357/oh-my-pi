@@ -72,14 +72,18 @@ const RULE_CASES: &[(&str, &str, bool, Match)] = &[
 	("foo?", "foo12", false, Match::None),
 	("[a-c]*", "b-file", false, Match::Ignore),
 	("[a-c]*", "d-file", false, Match::None),
-	("a[/]b", "a/b", false, Match::Ignore),
+	("a[/]b", "a/b", false, Match::None),
 	("{x,}y", "xy", false, Match::Ignore),
 	("{x,}y", "y", false, Match::None),
 	("\\", "x", false, Match::None),
 	("**/a/**/*.rs", "a/x.rs", false, Match::Ignore),
 	("**/a/**/*.rs", "q/a/b/c.rs", false, Match::Ignore),
 	("**/a/**/*.rs", "a.rs", false, Match::None),
-	("!", "anything", false, Match::Whitelist),
+	("!", "anything", false, Match::None),
+	("*.tmp\n!", "a/x.tmp", false, Match::Ignore),
+	("foo\\   ", "foo ", false, Match::Ignore),
+	("foo\\   ", "foo  ", false, Match::None),
+	("foo  ", "foo", false, Match::Ignore),
 	("/*.txt", "a.txt", false, Match::Ignore),
 	("/*.txt", "d/a.txt", false, Match::None),
 	("é*", "éa", false, Match::Ignore),
@@ -152,12 +156,12 @@ fn rules_match_ignore_crate() {
 
 #[test]
 fn parse_framing() {
-	// BOM stripped from the first line, CRLF endings, and parsing stops at
-	// the first line that is not UTF-8.
+	// BOM stripped from the first line, CRLF endings, and a line that is not
+	// UTF-8 skipped without dropping the lines after it.
 	let rules = Rules::parse(b"\xEF\xBB\xBF*.log\r\n!keep.log\r\n\xff\n*.txt\n");
 	assert_eq!(rules.matched(b"x.log", false), Match::Ignore);
 	assert_eq!(rules.matched(b"keep.log", false), Match::Whitelist);
-	assert_eq!(rules.matched(b"x.txt", false), Match::None);
+	assert_eq!(rules.matched(b"x.txt", false), Match::Ignore);
 	assert!(Rules::parse(b"# only a comment\n\n   \n").is_empty());
 }
 
@@ -191,6 +195,8 @@ fn parse_excludes_file_matches_ignore_crate_regex() {
 		("  ExcludesFile=\"/x/y\"  \n", Some("/x/y")),
 		("excludesfile\n= spaced\n", Some("spaced")),
 		("excludesfile = first\nexcludesfile = second\n", Some("first")),
+		("excludesfile = C:/PROGRA~1/ignore\n", Some("C:/PROGRA~1/ignore")),
+		("excludesfile = ~user/x\n", Some("~user/x")),
 		("excludesfile = \"a b\"\n", None),
 		("excludesfiles = x\n", None),
 		("[core]\n\teditor = vim\n", None),
@@ -217,6 +223,7 @@ async fn walk_with(fs: &Fs, root: &str, sources: Sources) -> Vec<String> {
 		s: &'a mut Session,
 		ig: &'a Ignorer,
 		dir: &'a Dir,
+		abs: &'a Path,
 		rel: &'a [u8],
 		parent: Option<&'a Arc<Frame>>,
 		out: &'a mut Vec<String>,
@@ -228,7 +235,7 @@ async fn walk_with(fs: &Fs, root: &str, sources: Sources) -> Vec<String> {
 			for r in listing.records() {
 				names.record(listing.name(r), r.file_type, sources.custom);
 			}
-			let frame = DirIgnores::load(s, dir, names, sources, false)
+			let frame = DirIgnores::load(s, dir, abs, names, sources, false)
 				.await
 				.frame(parent, names, rel);
 			let mut scratch = Vec::new();
@@ -248,7 +255,8 @@ async fn walk_with(fs: &Fs, root: &str, sources: Sources) -> Vec<String> {
 				}
 				if is_dir {
 					let sub = s.open_child(dir, name).await.unwrap();
-					visit(s, ig, &sub, &child, frame.as_ref(), out).await;
+					let sub_abs = omp_vfs::child_path(abs, OsStr::new(str::from_utf8(name).unwrap()));
+					visit(s, ig, &sub, &sub_abs, &child, frame.as_ref(), out).await;
 				} else {
 					out.push(String::from_utf8(child).unwrap());
 				}
@@ -259,7 +267,7 @@ async fn walk_with(fs: &Fs, root: &str, sources: Sources) -> Vec<String> {
 	let (ig, frame) = Ignorer::new(&mut s, fs, Path::new(root), sources).await;
 	let dir = s.open_dir(Path::new(root)).await.unwrap();
 	let mut out = Vec::new();
-	visit(&mut s, &ig, &dir, b"", frame.as_ref(), &mut out).await;
+	visit(&mut s, &ig, &dir, Path::new(root), b"", frame.as_ref(), &mut out).await;
 	out.sort();
 	out
 }

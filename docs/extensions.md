@@ -35,10 +35,10 @@ Extensions can combine all of the following in one module:
 - custom message rendering
 - session/message injection APIs (`sendMessage`, `sendUserMessage`, `appendEntry`)
 
-Import host values from the package root, `@oh-my-pi/pi-coding-agent`. Deeper paths such as `@oh-my-pi/pi-tui/native/spans` also resolve inside the omp binary, but they name internal files: when a file moves, a static import of it stops the whole extension from loading. Besides the extension types and the theme (`theme`, `getSettingsListTheme`), the root exports these helpers:
+Import host values from the package root, `@oh-my-pi/pi-coding-agent`, and UI from `@oh-my-pi/pi-tui` (nodes, JSX, signals). Both resolve to the host's own copy inside the omp binary. Deeper coding-agent paths also resolve, but they name internal files: when a file moves, a static import of it stops the whole extension from loading. `@oh-my-pi/pi-tui` is gone; an extension importing it does not load (see [Migrating from pi-tui](#migrating-from-pi-tui)). Besides the extension types and the theme service (`getThemeByName`, `onThemeChange`, …), the root exports these helpers:
 
-- `formTheme`, `editorKey`, `editorKeys` and `formatKeyHint` for settings dialogs and key hints
-- `styledSpans` and `compactText` to turn ANSI-styled text into `TspText`, such as a transcript presenter's `{ compact: { label, rows } }`, and `rowsText` to wrap pre-rendered rows in one native text node; `styleSpans`, `plainText`, `plainLine`, `spansLine` and `styledBackground` cover the other conversions between ANSI text and spans
+- `formatKeyHint` and `formatKeyHints` for key hints
+- `ansiSpans` to turn ANSI-styled text into `TspText` spans, such as a transcript presenter's `{ compact: { label, rows } }`
 - `toolCommandCallName` to read the command word a `bash` call invokes, and `toolCommandDispatches` for the dispatch records on a bash result
 - `unwrapHashlineHeaderPath` to turn a `[path#TAG]` write/edit target into its plain path
 - `cfgExtensionTranscriptPresenters`, the handle of the `extensionRenderers.transcriptPresenters` setting
@@ -132,7 +132,7 @@ Core methods:
 - `getActiveTools`, `getAllTools`, `setActiveTools`
 - `getCommands`
 - `getSessionName`, `setSessionName`
-- `setModel`, `getThinkingLevel`, `setThinkingLevel`
+- `setModel`, `getThinkingLevel`, `setThinkingLevel` (`getThinkingLevel()` returns `undefined` when no concrete effort applies, e.g. a model limited to off/auto with `auto` selected — not only before the session is initialized)
 - `getServiceTiers`, `setServiceTier`
 - `registerProvider`, `unregisterProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
@@ -240,17 +240,17 @@ distinct from the built-in one so processes without the extension (older session
 
 Four fields let an extension replace parts of an existing provider without redefining its models. The models keep their `api`, so option mapping, credentials, and catalog policy behave as before:
 
-- `stream(model, context, options)`: handles every request to the provider's models instead of the built-in adapter for their api. `options` are already mapped for that api (for example `GoogleGeminiCliOptions`) and carry the provider's key.
+- `stream(model, context, options)`: handles every request to the provider's models instead of the built-in adapter for their api. `options` are already mapped for that api (for example `GoogleOptions`) and carry the provider's key.
 - `generateImage(model, request, options)`: handles image generation for the provider's image models.
 - `webSearch(params)`: runs the grounded search request for the provider's models. Availability checks and labels still come from the model's grounding backend.
 - `discoverModels({ accounts, baseUrl, fetch })`: fetches the provider's model list in place of its built-in discovery request. It runs once with all signed-in accounts (a configured key counts as one account). Return `null` to keep the cached catalog. The built-in discovery still caches the rows, merges them, and applies policy.
-- `rules`: KDL rule directives for every model of the provider, keyed by directive name, as a `provider "<id>" { … }` block would set them (`{ "prompt-perturbation": true }`). Unknown directives and invalid values fail `registerProvider`. A runtime rule wins ties with a bundled rule but still loses to a more specific one, such as a model-scoped rule.
+- `rules`: KDL rule directives for every model of the provider, keyed by directive name, as a `provider "<id>" { … }` block would set them (`{ "requires-native-tools": true }`). Unknown directives and invalid values fail `registerProvider`. A runtime rule wins ties with a bundled rule but still loses to a more specific one, such as a model-scoped rule.
 
 ```ts
 pi.registerProvider("google-generative-ai", {
 	stream: myGeminiStream,
 	generateImage: myImageGenerator,
-	rules: { "prompt-perturbation": true },
+	rules: { "requires-native-tools": true },
 });
 ```
 
@@ -354,8 +354,9 @@ export default function (pi: ExtensionAPI) {
 
 - **What.** The whole list after every committed change to the main session's list, never an operation; tasks carry `content` and `status` only. While a call runs, later lists collapse into the newest. Two calls are skipped: an unchanged list for the backend that just took it, and an empty list while omp has not called a backend yet (`/new` does not start that over).
 - **Sessions.** Key your store by `ctx.sessionManager.getSessionId()`, read before the first `await`. After `/new` the id is new and the empty list follows under it. Calls are not ordered against `session_*` events, and there is no per-session instance: release state on `session_shutdown`.
-- **Failure.** A backend cannot refuse a change and gets no abort signal. A throw, or no answer within the extension handler timeout, is reported as an extension error; omp's list stays as committed and the next change sends the whole list again. After a timeout that next call can start while the old one still runs: a late write must not overwrite a newer list. On exit omp waits for a call still running for as long as a `session_shutdown` handler may take.
-- **Selection.** `todo.backend` holds a registered `id` (letters, digits, `.`, `_`, `-`; `native` is reserved). When several extensions register the selected id, the first one loaded keeps it and the others are reported as extension errors. A selected id no enabled extension registers is reported once as an extension error (again if it is selected again after another id), and todos work as with `native`. A backend selected mid-session gets the list with the next change, or at once when picked in `/settings`.
+- **Failure.** `replace` cannot refuse a change and gets no abort signal. A throw, or no answer within the extension handler timeout, is reported as an extension error; omp's list stays as committed and the next change sends the whole list again. After a timeout that next call can start while the old one still runs: a late write must not overwrite a newer list. On exit omp waits for a call still running for as long as a `session_shutdown` handler may take.
+- **Refusing a `todo` call (`apply`).** The main session's `todo` calls are asked before they commit, eval cells included; `/todo`, RPC, Cursor's built-in todo sync and subagents are not. Return `{ block: true, reason }` to refuse: the call fails as `Todo backend "<id>" did not accept this change: <reason>`, list unchanged; the reason is shown on one line (newlines become spaces, control sequences are removed). A throw is an extension error, like a timeout, and fails the call without refusing it. Writes in `apply` are tolerated; once `apply` settles (on exit at the latest), omp resyncs through `replace`, unchanged list or not. omp commits only on an in-time accept (about 10 s) of an unchanged list in the same session; any other outcome (refusal, throw, timeout, late answer, list, session or backend changed, abort) leaves the list unchanged. A call made or still deciding once the session is closing fails.
+- **Selection.** `todo.backend` holds a registered `id` (letters, digits, `.`, `_`, `-`; `native` is reserved). A missing `replace` or an `apply` that is not a function throws at registration. When several extensions register the selected id, the first one loaded keeps it and the others are reported as extension errors. A selected id no enabled extension registers is reported once as an extension error (again if it is selected again after another id), and todos work as with `native`. A backend selected mid-session gets the list with the next change, or at once when picked in `/settings`.
 - **Scope.** Main session only: subagents and `/tan` clones are not mirrored.
 - **Settings.** `/settings` → Tools → Todos → "Todo Backend" lists `Native` and every backend an enabled extension registers, with its `label` (the `id` when omitted) and `description`. Both are optional; a blank one throws at registration.
 
@@ -399,14 +400,16 @@ start one are retained as hidden next-turn messages.
 `pi.sendUserMessage(content, { deliverAs })` submits text/images without slash-command
 or prompt-template expansion. Omit `deliverAs` to start a prompt when idle;
 while streaming, omission queues a steer. Explicit `"steer"` or `"followUp"`
-queues the prompt even when idle instead of starting a turn directly. `"aside"`
-injects at the next step boundary while a run is live and starts a turn when
-idle. The message is recorded with `attribution: "user"` unless you pass
+queues the prompt. When idle, the queue drain can start a turn with that input,
+even after an extension message or a compaction summary. A deliberate user
+interrupt still holds already-queued follow-ups until explicit input resumes
+the session. `"aside"` injects at the next step boundary while a run is live
+and starts a turn when idle. The message is recorded with `attribution: "user"` unless you pass
 `attribution: "agent"`; use `"agent"` for text the extension generated or relayed
 from another agent.
 
 Payloads passed to `pi.sendMessage` are normalized before delivery
-(`normalizeCustomMessagePayload` in `packages/tui/src/chat/messages.ts`,
+(`normalizeCustomMessagePayload` in `packages/coding-agent/src/session/transcript/messages.ts`,
 re-exported by `session/messages.ts`): non-object payloads are coerced to string
 content under the default custom type, missing `customType`/`attribution` fields
 are defaulted, and invalid content collapses to an empty string.
@@ -436,6 +439,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
 - `getContextUsage()`
 - `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
+- `cancelAsyncJob(id)` cancels a running async job (e.g. a background `task` worker) this session owns, like `/jobs kill <id>`; returns `false` when the session owns no running job by that id. To stop them all, loop over `getAsyncJobSnapshot()?.running`
 - `compact(instructionsOrOptions?)`: accepts summary focus text or `CompactOptions`, including one-off `mode: "soft" | "remote" | "snapcompact"`, `onComplete`, `onError`, and `suppressContinuation`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
@@ -484,7 +488,7 @@ const { replyText } = await ctx.runEphemeralTurn({
 });
 ```
 
-For example, a Synadia/NATS bridge can answer another agent's question from the local context and stream the response back without injecting a live user message. **A side turn sends the current conversation snapshot to the configured model provider and returns its answer to the calling extension.** Bridge extensions must obtain user consent where appropriate, authenticate and authorize callers, and audit every remote request before using this API. Agent-to-agent consultation extensions can set `maxTokens` and a serialized, post-transform `maxContextBytes` cap (measured after secret obfuscation) before inference. Transports that omit or overwrite caller output-token limits, including Codex Responses, Cursor, GitLab Duo Workflow, Ollama Cloud discovery models, and Antigravity, reject `maxTokens` before inference instead of silently starting an uncapped request. Antigravity rejects requested caps conservatively across its transport because effort routing can select wire profiles with fixed output limits. A requested cap disables optional budget thinking, since those transports may otherwise raise the wire limit to fit a thinking budget; models that require budget thinking reject the cap. `tools: false` also rejects before inference on Cursor, whose transport exposes native tools independently of the supplied tool catalog. Both caps must be positive safe integers. Omit `maxTokens` only when an uncapped turn is acceptable, or choose an API that supports output limits. The extension owns transport, access controls, request limits, and cancellation (including shutdown); this API adds no network dependency. `onTextDelta` may return a promise: delivery is awaited in order, including the final flush, and a delivery error rejects the side turn and aborts the provider request instead of leaving it streaming.
+For example, a Synadia/NATS bridge can answer another agent's question from the local context and stream the response back without injecting a live user message. **A side turn sends the current conversation snapshot to the configured model provider and returns its answer to the calling extension.** Bridge extensions must obtain user consent where appropriate, authenticate and authorize callers, and audit every remote request before using this API. Agent-to-agent consultation extensions can set `maxTokens` and a serialized, post-transform `maxContextBytes` cap (measured after secret obfuscation) before inference. Transports that omit or overwrite caller output-token limits, including Codex Responses, Cursor, GitLab Duo Workflow, and Ollama Cloud discovery models, reject `maxTokens` before inference instead of silently starting an uncapped request. A requested cap disables optional budget thinking, since those transports may otherwise raise the wire limit to fit a thinking budget; models that require budget thinking reject the cap. `tools: false` also rejects before inference on Cursor, whose transport exposes native tools independently of the supplied tool catalog. Both caps must be positive safe integers. Omit `maxTokens` only when an uncapped turn is acceptable, or choose an API that supports output limits. The extension owns transport, access controls, request limits, and cancellation (including shutdown); this API adds no network dependency. `onTextDelta` may return a promise: delivery is awaited in order, including the final flush, and a delivery error rejects the side turn and aborts the provider request instead of leaving it streaming.
 
 Hooks may start a side turn, including from delayed callbacks. Only `context`, `before_provider_request`, and `after_provider_response` hooks reached _within_ a running side turn reject a nested `runEphemeralTurn` call, which bounds recursion; the caller's `onTextDelta` runs outside that guard. Side turns inherit the active event-handler signal (only while that handler is still running) and, for registered tools, the tool invocation’s abort signal. An explicit `options.signal` is combined with those signals; it does not replace them. `maxContextBytes` is checked before `before_provider_request` hooks run; a hook that replaces the payload is not re-measured.
 
@@ -728,9 +732,13 @@ and `/new`. Commands retain their explicit prefill and session-transition action
 
 - `mode_changed` reports `{ previous, state }` (the `ctx.sessionModes.getState()` shape) after a built-in mode change commits, whatever caused it: `ctx.sessionModes.set()`, a slash command, the goal tool, automatic goal completion, or session restore. A session switch reports once, after it settles, with the destination's restored modes. Goal token/time accounting is not part of the state, so it never fires the event. A handler may call `ctx.sessionModes.set()`; a call made while another transition is still running returns `busy` instead of waiting.
 
+### Agent view lifecycle
+
+- `agent_view_changed` reports `{ agentId, previousAgentId, sessionId }` when the interactive TUI switches the session it shows: focusing a subagent, hopping to another one (including its parent), or returning to the main session (explicitly, or because the focused agent was parked, aborted, or removed). `agentId`/`previousAgentId` are `undefined` for the main session, and `sessionId` is the id of the session now shown. It fires on the main session's extensions once the new view is attached, never for a focus request that is superseded or fails, and only in the interactive TUI. Use it to re-scope `ctx.ui.setStatus` content to the agent on screen.
+
 ### Subagent lifecycle
 
-- `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
+- `before_subagent_spawn` → `{ model?: string | string[]; block?: boolean; reason?: string; note?: string }`. Fires in the parent session exactly once per spawned child (`task`, eval `agent()`, workpool workers), at dispatch before the child resolves its model — never during a frontend's validation preflight, so stateful routers (round-robin, quota) advance once per child. The event carries `agent`, `invocationKind`, `modelRole` (the pre-expansion role alias, when any), the expanded `patterns` core would use, and an optional stable `spawnKey`; children dispatched by the `task` tool also carry `parentToolCallId` (that `task` call's id) and `itemIndex` (the item's position in `tasks[]`, 0 for the flat shape), so a decision made in `tool_call` can be matched to exactly its spawn. A returned `model` replaces the spawn's attempt-ordered patterns while keeping the role identity, so the remaining entries become the child's retry fallback chain; handlers run in extension order and the last returned `model` wins, along with its `note`, which the task UI shows as the spawn's routing reason on live, async, and settled rows. `block: true` refuses the spawn with `reason`. Cancelling the spawn releases an awaiting handler (its result is discarded and pending `ctx.ui` dialogs close) instead of holding the spawn until the handler timeout.
 
 ### Reliability/runtime signals
 
@@ -877,10 +885,10 @@ pi.registerTool({
 		// reason: start|switch|branch|tree|shutdown
 	},
 	renderCall(args, options, theme) {
-		// optional TUI render
+		// optional: pi-tui nodes, a { render(width) } rows object, or undefined
 	},
 	renderResult(result, options, theme, args) {
-		// optional TUI render
+		// optional: same contract as renderCall
 	},
 });
 ```
@@ -899,8 +907,7 @@ Additional `ToolDefinition` fields include:
 - `approval`: defaults to `"exec"`; accepts a tier, a decision object, or a function of the arguments.
 - `mcpServerName`, `mcpToolName`, `legacyName`, `sourcePath`: discovery, approval, and provenance metadata.
 - `shellEnv`: environment values for the interactive user-shell surface.
-- `renderCall`, `renderResult`: TUI components.
-- `describeCall`, `describeResult`: semantic tool views for TSP terminals.
+- `renderCall`, `renderResult`: pi-tui nodes or rows (see [Tool call/result renderer](#tool-callresult-renderer)).
 
 ### File write fallback (`registerFileWriteFallback`)
 
@@ -1060,17 +1067,21 @@ Current no-op methods in this controller:
 - `setFooter`
 - `setHeader`
 
-`ctx.ui.setEditorComponent(factory)` is wired to the live editor; the factory
-must return a `CustomEditor` subclass, not a plain `Editor`/`EditorComponent`.
-`ctx.ui.getEditorComponent()` returns the factory currently installed (or
-`undefined` for the built-in editor), so an extension can wrap another
-extension's editor instead of replacing it; inside a factory it still returns
-the previous one.
-`setWidget` renders widget components above or below the editor via
-`setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string arrays show
-up to 10 content lines plus a truncation notice). Pass `undefined` to remove a
-widget. `setEditorText` and `pasteToEditor` request a repaint after mutating the
-editor.
+`ctx.ui.composer` holds the [composer hooks](#composer-hooks): key handlers,
+decorations, a submit transform and the shape. They replace the removed
+`setEditorComponent`/`getEditorComponent`.
+`setWidget` shows a widget above or below the editor (`placement: "aboveEditor" |
+"belowEditor"`): string arrays show up to 10 content lines plus a truncation notice;
+a factory `(ui, theme) => …` returns pi-tui nodes or a rows object. Pass `undefined`
+to remove a widget; setting a key again replaces it in place.
+`custom(factory, options)` shows the factory's view with keyboard focus until it
+calls `done`: one root node (it takes focus, so handle keys with its `onKey`) or a
+rows object (keys and pastes arrive at its `handleInput` as raw input).
+`{ overlay: true }` draws it over the transcript, `fullscreen: true` on the
+alternate screen; `onHandle` receives `{ closed, close(), isFocused() }`
+(`isFocused()` is true while keyboard focus is on the overlay or a node inside it). The factory's `ui`
+argument offers `requestRender()` (repaint rows objects), `size()` and
+`suspend(run)` (hand the terminal to an external editor while `run` settles).
 
 #### Launching terminal commands
 
@@ -1083,20 +1094,21 @@ supported provider set derive from canonical launch capabilities: tmux, Zellij,
 Herdr, CMUX, and Orca are supported; screen and wmux remain recognized by the
 multiplexer taxonomy but are currently unsupported.
 
-Provider-specific session detection is centralized in
-`@oh-my-pi/pi-tui/terminal-multiplexer`, which registers one module per multiplexer.
-`hasTerminalMultiplexerSession(provider, env)` checks explicit session markers, while
-`classifyTerminalMultiplexer(env)` names the multiplexer hosting the process: session
+Provider-specific session detection is centralized in the pi-tui terminal driver,
+`@oh-my-pi/pi-tui/driver/mux/detect` (`MultiplexerId` names every recognized
+multiplexer). `hasMultiplexerSession(provider, env)` checks explicit session markers,
+while `classifyMultiplexer(env)` names the multiplexer hosting the process: session
 markers first, then a `tmux`/`screen` `TERM` fallback, then outer applications such as
-Orca, so a multiplexer running inside Orca wins. `isInsideTerminalMultiplexer(env)` is
-true only when the classified multiplexer owns the screen grid; Orca keeps the
-direct-terminal render path. A classified multiplexer does not prove that a nested
-provider session or a native pane ID exists.
+Orca, so a multiplexer running inside Orca wins. `insideMultiplexer(env)` is true only
+when the classified multiplexer owns the screen grid; Orca keeps the direct-terminal
+render path. A classified multiplexer does not prove that a nested provider session or
+a native pane ID exists. Every function takes the environment explicitly (pass
+`Bun.env` for the current process).
 
 The TUI host injects this capability; extensions do not need to import dispatcher
 code to use it.
 
-Built-in OMP callers can pass `classifyTerminalMultiplexer(env)` to
+Built-in OMP callers can pass `classifyMultiplexer(env)` to
 `getTerminalLaunchPlacement(...)` for support and presentation metadata or as the
 first argument to `createDefaultTerminalLaunchRequest(...)` for a validated
 provider-default request. The factory also takes a placement, command argv, cwd, and
@@ -1231,8 +1243,8 @@ Unsupported/no-op in RPC implementation:
 
 - `onTerminalInput`
 - `custom`; optional `askDialog` is absent
-- `getEditorText` returns `""`; `getEditorComponent` returns `undefined`
-- `setFooter`, `setHeader`, `setEditorComponent`, `addAutocompleteProvider`
+- `getEditorText` returns `""`; `composer` is absent
+- `setFooter`, `setHeader`, `addAutocompleteProvider`
 - `setWorkingMessage`
 - theme switching/loading (`setTheme` returns failure)
 - tool expansion controls are inert
@@ -1336,126 +1348,117 @@ for (const entry of ctx.sessionManager.getBranch()) {
 
 ## Rendering extension points
 
+Extensions draw with `@oh-my-pi/pi-tui`, the same UI library omp's own screens use. Every renderer and custom view returns an **extension render**:
+
+- **pi-tui nodes**: JSX (a `.tsx` file starting with `/** @jsxImportSource @oh-my-pi/pi-tui */`), node objects, strings, arrays or accessors. Lowercase tags are TSP node kinds (`col`, `row`, `text`, `md`, `code`, `card`, `spinner`, …); a Tern terminal draws them natively and the terminal paints them. Signals (`signal`, `computed`) make them live: a node repaints when a signal it read changes.
+- **a rows object** `{ render(width): string[] }`, the escape hatch for row renderers: drawn as a `canvas` node (a `rows` node in Tern). Rows wider than `width` are cut. It repaints when its host redraws it (`ui.requestRender()` in factories that receive a `ui`, after each input it handles in `ctx.ui.custom`). Optional `isTranscriptBlockCompact()`, `handleInput(data)` and `dispose()` keep their pi-tui meaning.
+- **`undefined`** draws nothing (or the host's default, where one exists).
+
+A renderer that throws, or returns anything else, is reported and draws nothing; rows that throw while painting draw one error row.
+
+Renderers receive the extension theme: pi-tui's `Theme` (`fg`, `bg`, `style(tokens, text)`, `symbols`, …) plus `bold`, `italic`, `underline`, `strikethrough` and `inverse`.
+
 ## Composer shape renderer
 
-`registerComposerShape` adds an extension-owned input-editor layout to **Appearance → Composer Shape**. Register it from the extension factory; the renderer is used by the live editor and its settings preview.
+`registerComposerShape` adds an extension-owned composer shape to **Appearance → Composer Shape**: the chrome drawn around the composer's text rows. Register it from the extension factory.
 
 ```ts
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import type { ComposerStyle } from "@oh-my-pi/pi-tui";
+import type { ComposerShape, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 
-const dockStyle: ComposerStyle = {
+const dock: ComposerShape & { label: string } = {
 	id: "acme-dock",
-	sideBorders: false,
-	verticalChrome: 1,
-	statusAttachment: "none",
+	label: "Acme Dock",
+	description: "Prompt below a single rule",
 	bottomBar: "full",
 	bottomBarGap: true,
-	defaultPromptGutter: "❯ ",
-
-	defaultPaddingX: () => 0,
-	sideChromeWidth: () => 0,
-	renderTop: ({ box, width, borderColor }) => borderColor(box.horizontal.repeat(width)),
-	renderRow: ({ gutter, text, pad }) => [gutter + text + pad],
-	renderBottom: () => undefined,
+	sideBorders: false,
+	gutter: "❯ ",
+	paddingX: 0,
+	sideWidth: () => 0,
+	top: cx => cx.border(cx.box.horizontal.repeat(cx.width)),
+	row: cx => [cx.gutter + cx.text + cx.pad],
 };
 
 export default function (pi: ExtensionAPI) {
-	pi.registerComposerShape({
-		label: "Acme Dock",
-		description: "Prompt below a single rule",
-		style: dockStyle,
-	});
+	pi.registerComposerShape(dock);
 }
 ```
 
-`ComposerShapeDefinition` contains:
+A `ComposerShape` contains:
 
-- `label`: required selector label.
-- `description`: optional selector detail.
-- `style`: the complete `ComposerStyle` rendering contract. `style.id` is also the persisted `composer.shape` value.
+- `id`: the persisted `composer.shape` value. Use a package-qualified, non-empty, trimmed id. Built-in ids (`box`, `band`, `claude`, `pi`, `borderless`, `rule`, `field`, and `rail`) cannot be replaced. For collisions between extensions, the later registration wins. If the extension is unavailable while its id remains configured, the composer draws as `box`.
+- `label` (required here) and `description`: the shape picker's copy.
+- `statusAttachment`: where the top chrome carries the status line: `"top-border"`, `"top-band"` (a band row above the prompt) or `"top-rule-chip"` (a chip docked on the top rule); absent, none.
+- `bottomBar`: the status bar under the composer: `"full"`, `"left"` or `"none"` (default); `bottomBarGap`: a blank row before it.
+- `filled`: rows are filled with the composer surface.
+- `sideBorders`: content rows carry side chrome with padding, so an end-of-row caret may take a padding cell.
+- `gutter`: the prompt gutter before the first row (blanks before the others).
+- `paddingX`: default padding inside the side chrome; `sideWidth(paddingX)`: cells the chrome takes on each side of a content row.
+- `top(cx)` and `bottom(cx)`: one chrome row or `undefined`; `row(cx)`: return an array when its first row holds the text, or `{ rows, textRow }` to identify the text row by its zero-based index when adding chrome above it. For example, return `{ rows: [blankRow, inputRow], textRow: 1 }` to put a blank row above the input without moving the caret off the text.
 
-Use a package-qualified, non-empty, trimmed `style.id`. Built-in ids (`box`, `band`, `claude`, `pi`, `borderless`, `rule`, `field`, and `rail`) cannot be replaced. For collisions between extensions, the later registration wins. If the extension is unavailable while its id remains configured, the editor falls back to `box`.
+Every chrome context has `width`, `paddingX`, `theme`, the rounded `box` glyphs, `border(text)` (the state-colored border), `accent(text)`, `surface(text)` (the composer surface, kept across the row's own resets) and, when the composer shows one, the pre-styled `status` content with its `width`. A row context adds the styled `text` (caret included), the `pad` blanks filling it to the content width, this row's `gutter`, `first`, `last` and `overflow` (cells an end-of-row caret took from the right chrome). Every row must occupy exactly `width` visible cells.
 
-### `ComposerStyle` layout metadata
+The built-in shapes in `packages/coding-agent/src/ui/styles/composer/shapes.ts` are the reference.
 
-- `filledSurface`: whether the style paints its own row foreground through `surfaceColor`. Omitted values retain filled behavior for extension-owned ids; set `false` to receive the host's themed text color.
-- `sideBorders`: whether content rows own side chrome. This controls cursor reserve, IME layout, and scrollbar behavior; it is not merely descriptive.
-- `verticalChrome`: exact number of fixed top/bottom chrome rows (`0`, `1`, or `2`) used for editor height budgeting.
-- `statusAttachment`: `"top-border"` receives the embedded status gauge, `"top-band"` uses the flush soft-capped status band above the input, `"top-rule-chip"` receives the right status group for docking on a rule, and `"none"` detaches status from the editor chrome.
-- `bottomBar`: standalone status content below the editor: `"none"`, `"left"`, or `"full"`.
-- `bottomBarGap`: whether a blank row separates the editor from a standalone bottom status bar.
-- `defaultPromptGutter`: prompt text used when the host supplies no override.
-- `defaultPaddingX(themePaddingX)`: horizontal padding selected for this style.
-- `sideChromeWidth(paddingX)`: visible cells consumed on **each** side of a content row, including padding and border/rail glyphs.
+## Composer hooks
 
-`renderTop` and `renderBottom` return one styled terminal row or `undefined`. `renderRow` returns one or more styled rows. Every normal rendered row must occupy exactly `ctx.width` visible cells; ANSI escape sequences have zero width. Preserve the supplied `gutter`, `text`, and `pad` instead of reflowing or truncating them.
+`ctx.ui.composer` (absent outside the interactive UI) hooks into the built-in composer:
 
-### Renderer context
+```ts
+pi.on("session_start", (_event, ctx) => {
+	const composer = ctx.ui.composer;
+	if (!composer) return;
+	// Keys reach handlers before the composer's own bindings; true takes the key.
+	composer.addKeyHandler(key => {
+		if (key.id !== "ctrl+u") return false;
+		ctx.ui.setEditorText("");
+		return true;
+	});
+	// Style ranges of the draft (span style tokens), re-run on every edit.
+	composer.addDecorator(text =>
+		[...text.matchAll(/#\w+/g)].map(match => ({ from: match.index, to: match.index + match[0].length, s: "accent" })),
+	);
+	// Rewrite what is sent; undefined cancels the submission and keeps the draft.
+	composer.setSubmitTransform(text => text.trim() || undefined);
+	// Draw with a registered shape; undefined restores the user's choice.
+	composer.setShape("acme-dock");
+});
+```
 
-All render methods receive `width`, `paddingX`, the theme's `box` glyphs, and three styling functions:
-
-- `borderColor(text)`: ordinary frame/rule color.
-- `accentColor(text)`: stable accent for shape-defining rails or caps.
-- `surfaceColor(text)`: composer background fill that survives nested SGR resets in decorated input.
-
-`topBorder`, when present, is already-styled status content with its visible `width`. A top renderer owns its placement and must leave the final line at `ctx.width`.
-
-`renderRow` additionally receives:
-
-- `gutter`, `text`, and `pad`: pre-rendered content pieces.
-- `isLastRow`: last visible input row.
-- `cursorOverflow`: cells consumed from the right chrome by an end-of-line cursor.
-- `imeSafeCursorTail`: omit right-side cells after the cursor so terminal-local IME preedit cannot shift the chrome.
-- `scrollbarThumb`: this row intersects the editor scrollbar thumb.
-
-The built-in implementations in `packages/tui/src/components/composer/` are the reference for framed, rule, filled-surface, and IME-safe layouts.
+`addKeyHandler` and `addDecorator` return their removal. There is one submit transform: setting it replaces the previous one, `undefined` removes it.
 
 ## Custom message renderer
 
-```ts
-pi.registerMessageRenderer("my-type", (message, { expanded }, theme) => {
-	// return pi-tui Component
-});
+```tsx
+pi.registerMessageRenderer("my-type", (message, { expanded }, theme) => (
+	<md text={expanded ? String(message.content) : "Collapsed note"} />
+));
 ```
 
-Used by interactive rendering when custom messages are displayed.
+Used by interactive rendering when custom messages are displayed. The renderer is asked again whenever the message's expansion changes; `undefined` or a throw keeps the default card.
 
 ### Compact rows
 
-A renderer's component may implement `isTranscriptBlockCompact(): boolean` (the `CompactTranscriptBlock` interface in `@oh-my-pi/pi-tui/chrome/transcript-container`). While it returns `true`, the message packs against neighboring compact blocks. The terminal draws no blank row between them, and Tern shows the run as one block without gaps. Empty or hidden blocks between two compact ones keep the run going.
+A rows object may implement `isTranscriptBlockCompact(): boolean`. While it returns `true`, the message packs against neighboring compact blocks. The terminal draws no blank row between them, and Tern shows the run as one block without gaps. Empty or hidden blocks between two compact ones keep the run going.
 
 ```ts
-import { type Component, truncateToWidth } from "@oh-my-pi/pi-tui";
-
-class StatusRow implements Component {
-	constructor(readonly label: string) {}
-	render(width: number) {
-		return [truncateToWidth(this.label, width)];
-	}
-	isTranscriptBlockCompact() {
-		return true;
-	}
-}
-
-pi.registerMessageRenderer("status", message => new StatusRow(String(message.content)));
+pi.registerMessageRenderer("status", message => ({
+	render: width => [String(message.content).slice(0, width)],
+	isTranscriptBlockCompact: () => true,
+}));
 ```
 
-The transcript asks again on every frame, so the answer can follow state such as expansion. In a plain terminal, rows in scrollback never change. If a compact message has already scrolled out and the block after it stops being compact, the blank row appears above that block in the live area. A blank row already in scrollback stays, even if the blocks around it pack later.
+The transcript reads the answer when it draws the block, again on each redraw (an expansion change, a rerender). In a plain terminal, rows in scrollback never change. If a compact message has already scrolled out and the block after it stops being compact, the blank row appears above that block in the live area. A blank row already in scrollback stays, even if the blocks around it pack later.
 
 ## Assistant thinking renderer
 
-```ts
-import { Container, Text } from "@oh-my-pi/pi-tui";
-
-pi.registerAssistantThinkingRenderer((context, theme) => {
-	const container = new Container();
-	container.addChild(new Text(theme.fg("dim", `thinking chars: ${context.text.length}`), 1, 0));
-	return container;
-});
+```tsx
+pi.registerAssistantThinkingRenderer(context => (
+	<text spans={[{ t: `thinking chars: ${context.text.length}`, s: "dim" }]} />
+));
 ```
 
-Used by interactive rendering to add display-only supplemental UI below each visible assistant thinking block. The renderer receives the already-visible thinking text, content/thinking indexes, theme, and a `requestRender()` callback for async renderers. All registered renderers that return a component are appended in registration order. Renderers must not mutate messages; the original thinking block remains the provider/session source of truth.
+Used by interactive rendering to add display-only supplemental UI below each visible assistant thinking block. The renderer receives the already-visible thinking text, content/thinking indexes, theme, and a `requestRender()` callback for async renderers. All registered renderers that return something are appended in registration order. Renderers must not mutate messages; the original thinking block remains the provider/session source of truth.
 
 ## Assistant text renderer
 
@@ -1507,7 +1510,7 @@ Chooses how each block of the main session's transcript is drawn, in the plain t
   - `{ type: "event", id, event }` for a TTSR rule hit (`ttsr_triggered`) or an incomplete-todo reminder (`todo_reminder`), shaped like the extension event of the same type. These exist only in the session that raised them; `id` is unique within the process.
 
   `args`, `result`, `message` and `event` are not copies: they are the live objects omp draws the block from, often the session's own message data, so never mutate them.
-- **Answers.** `undefined` defers to the next presenter. `"full"` is omp's own drawing. `"hidden"` draws nothing, as `display.hideToolActivity` does. `"compact"` is one row of omp's own summary. `{ compact: { label, rows } }` replaces that row's text with `label` and adds one row per entry of `rows` below it; both take `TspText` (a string or theme-token spans). Presenters answer synchronously and run while the transcript draws, so keep them cheap: any other value (a misspelt mode, the Promise of an `async` presenter) draws the block in full and is reported like a throw.
+- **Answers.** `undefined` defers to the next presenter. `"full"` is omp's own drawing. `"hidden"` draws nothing, as `display.toolActivity: hidden` does. `"compact"` is one row of omp's own summary. A tool call no presenter answers for draws as `display.toolActivity` says: under `concise`, one activity row (time, status, tool, intent). `{ compact: { label, rows } }` replaces that row's text with `label` and adds one row per entry of `rows` below it; both take `TspText` (a string or theme-token spans). Presenters answer synchronously and run while the transcript draws, so keep them cheap: any other value (a misspelt mode, the Promise of an `async` presenter) draws the block in full and is reported like a throw.
 - **Precedence.** Presenters are asked in extension load order and the first answer that is not `undefined` wins. A suspended extension's presenter is skipped. A presenter that throws answers `"full"` for that block: the block is drawn in full and later presenters are not asked for it. Its first failure (a throw or an unknown answer) is reported once through the extension error channel (event `transcript_presenter`). A block the user expanded, with `Ctrl+O` or its own toggle in Tern, is always drawn in full, and `display.hideToolActivity` still hides tool activity.
 - **Tern.** A compact tool call keeps its `tool` node as one inline, collapsed row; with `rows`, its body is one text node of those rows, all shown. Other blocks become an inline row with their full drawing folded below it. The row's toggle opens the full block.
 - **Spacing.** Consecutive compact blocks draw as tight rows, with no blank row between them in the terminal and no gap in Tern; blocks that draw nothing between them (hidden ones, a reply holding only tool calls) don't break the run. A block drawn in full keeps its blank row or gap on both sides. Extension message renderers can join a run too (see [Compact rows](#compact-rows)).
@@ -1552,7 +1555,40 @@ The link browser replays the viewed transcript (a focused subagent's too) fullsc
 
 ## Tool call/result renderer
 
-Provide `renderCall` / `renderResult` on `registerTool` definitions for custom tool visualization in TUI.
+Provide `renderCall` / `renderResult` on `registerTool` definitions to draw a tool's call and result. Both return an extension render, drawn inside the custom-tool box (call first, then result):
+
+```tsx
+pi.registerTool({
+	// …
+	renderCall: (args, options, theme) => <text spans={[{ t: "search ", s: "toolTitle strong" }, { t: args.query }]} />,
+	renderResult: (result, { expanded }) => ({
+		render: width => (expanded ? result.content.map(part => ("text" in part ? part.text : "")) : ["done"]),
+	}),
+});
+```
+
+Nodes are drawn by the terminal and by Tern. Rows objects are drawn by the terminal only; Tern keeps the generic tool card for them. A hook returning `undefined` draws nothing for its phase; a hook that throws is reported, and when nothing else drew, the generic card shows. With `mergeCallAndResult`, only the result hook draws once a result exists.
+
+## Migrating from pi-tui
+
+`@oh-my-pi/pi-tui` was replaced by `@oh-my-pi/pi-tui`. This is a breaking change: an extension, hook or custom tool that imports `@oh-my-pi/pi-tui` (or the upstream `@mariozechner/pi-tui` / `@earendil-works/pi-tui`) fails to load with an error naming the import and this section. To port it:
+
+| pi-tui | now |
+| --- | --- |
+| `Text`, `Container`, `Box`, `Spacer`, `Markdown` components | JSX nodes: `<text spans={…} />`, `<col>`, `<row>`, `<md text={…} />`, or a `{ render(width) }` rows object |
+| a `Component` class (`render(width)`, `handleInput(data)`, `invalidate()`) | keep it as a rows object: drop the `implements Component` and the import |
+| `tui.requestRender()` | `ui.requestRender()` for rows objects; nodes repaint from signals |
+| `tui.terminal.columns` / `rows` | `ui.size()` |
+| `tui.stop()` … `tui.start()` around an external program | `await ui.suspend(() => run())` |
+| `ctx.ui.custom(…, { overlayOptions })` | `{ overlay: true, fullscreen? }`; positioning options are gone |
+| `OverlayHandle` (`hide`, `setHidden`) | `{ closed, close() }` |
+| `ctx.ui.setEditorComponent(factory)` / `CustomEditor` subclasses | `ctx.ui.composer` hooks: `addKeyHandler`, `addDecorator`, `setSubmitTransform`, `setShape` |
+| `registerComposerShape({ label, style: ComposerStyle })` | `registerComposerShape(shape: ComposerShape)` |
+| `describeCall` / `describeResult` (`NativeToolView`) | return nodes from `renderCall` / `renderResult` |
+| `matchesKey(data, "ctrl+c")`, `Key.shift("p")` | key ids: `key.id === "ctrl+c"` in `onKey`, `"shift+p"` for shortcuts |
+| `truncateToWidth`, `visibleWidth`, `wrapTextWithAnsi` | `truncate`, `visibleWidth`, `wrap` from `@oh-my-pi/pi-tui/text/width` |
+| `theme` from `@oh-my-pi/pi-tui/theme` | the `theme` argument, `ctx.ui.theme`, or `currentTheme()` from `@oh-my-pi/pi-tui/theme/runtime` |
+| `styledSpans`, `compactText`, `rowsText`, `formTheme`, `getSettingsListTheme` and the pi-tui component re-exports of the package root | `ansiSpans` for spans; draw the rest with nodes |
 
 ## Constraints and pitfalls
 

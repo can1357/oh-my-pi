@@ -4,13 +4,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import {
 	computeDefaultSessionDir,
+	computeDefaultSessionDirAsync,
 	hasPositiveMovedProjectEvidence,
 	readCwdIdentity,
 	writeTerminalBreadcrumb,
 } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
-import { getTerminalId } from "@oh-my-pi/pi-tui";
+import { getTerminalId } from "@oh-my-pi/pi-coding-agent/utils/ttyid";
 import {
 	getAgentDir,
 	getCustomSessionFilesDir,
@@ -42,9 +43,53 @@ afterEach(() => {
 });
 
 describe("legacy session directory migration", () => {
+	test("concurrent startup lookups await one home sweep, including merges in other buckets", async () => {
+		const sessionsRoot = makeTempDir("omp-session-root-");
+		const cwd = makeTempDir("omp-session-cwd-");
+		const oldDir = legacySessionDir(sessionsRoot, path.join(os.homedir(), "other-project"));
+		const newDir = path.join(sessionsRoot, "-other-project");
+		fs.mkdirSync(oldDir);
+		fs.mkdirSync(newDir);
+		fs.writeFileSync(path.join(oldDir, "saved.jsonl"), "saved\n");
+		fs.writeFileSync(path.join(newDir, "active.jsonl"), "active\n");
+		const storage = new FileSessionStorage();
+		const read = vi.spyOn(fs.promises, "readdir");
+		const syncRead = vi.spyOn(fs, "readdirSync");
+		try {
+			const lookups = [cwd, path.join(cwd, "nested")].map(async project => {
+				const dir = await computeDefaultSessionDirAsync(project, storage, sessionsRoot);
+				expect(fs.statSync(dir).isDirectory()).toBe(true);
+				expect(fs.readFileSync(path.join(newDir, "saved.jsonl"), "utf8")).toBe("saved\n");
+			});
+			await Promise.all(lookups);
+			expect(read.mock.calls.filter(([dir]) => dir === sessionsRoot)).toHaveLength(1);
+			expect(read.mock.calls.some(([dir]) => dir === oldDir)).toBe(true);
+			expect(syncRead).not.toHaveBeenCalled();
+			expect(fs.existsSync(oldDir)).toBe(false);
+			expect(fs.readFileSync(path.join(newDir, "active.jsonl"), "utf8")).toBe("active\n");
+		} finally {
+			syncRead.mockRestore();
+			read.mockRestore();
+		}
+	});
+
+	test("a synchronous factory can complete an in-flight startup migration", async () => {
+		const root = makeTempDir("omp-session-root-");
+		const cwd = path.join(os.homedir(), "legacy-project");
+		const legacy = legacySessionDir(root, cwd);
+		fs.mkdirSync(legacy);
+		fs.writeFileSync(path.join(legacy, "saved.jsonl"), "saved\n");
+		const storage = new FileSessionStorage();
+		const pending = computeDefaultSessionDirAsync(cwd, storage, root);
+		const dir = computeDefaultSessionDir(cwd, storage, root);
+		expect(fs.readFileSync(path.join(dir, "saved.jsonl"), "utf8")).toBe("saved\n");
+		expect(await pending).toBe(dir);
+		expect(fs.existsSync(legacy)).toBe(false);
+	});
+
 	test.each([false, true])(
 		"recovers hashed home-scoped sessions when the temp root is inside home (collision: %s)",
-		withCollision => {
+		async withCollision => {
 			const root = makeTempDir("omp-shadowed-home-");
 			const home = path.join(root, "home");
 			const tempRoot = path.join(home, "tmp");
@@ -67,7 +112,7 @@ describe("legacy session directory migration", () => {
 			try {
 				const tempMock = vi.spyOn(os, "tmpdir").mockReturnValue(tempRoot);
 				try {
-					const destination = computeDefaultSessionDir(cwd, new FileSessionStorage(), sessionsRoot);
+					const destination = await computeDefaultSessionDirAsync(cwd, new FileSessionStorage(), sessionsRoot);
 					expect(destination).toBe(canonicalDir);
 					expect(fs.readFileSync(path.join(destination, "saved.jsonl"))).toEqual(transcript);
 					if (withCollision) {
@@ -187,6 +232,64 @@ describe("custom session-file registry", () => {
 			writeTerminalBreadcrumb(cwd, managedFile);
 			const managedMarker = path.join(getCustomSessionFilesDir(agentDir), hashPath(managedFile));
 			expect(fs.existsSync(managedMarker)).toBe(false);
+
+			// The root scan skips dot entries, so a transcript under a dot-leading
+			// directory of the sessions root is registered or the collector never sees it.
+			for (const hidden of ["..hidden", ".hidden"]) {
+				const hiddenFile = path.join(getSessionsDir(agentDir), hidden, "chat.jsonl");
+				writeTerminalBreadcrumb(cwd, hiddenFile);
+				const hiddenMarker = path.join(getCustomSessionFilesDir(agentDir), hashPath(hiddenFile));
+				expect(fs.readFileSync(hiddenMarker, "utf8")).toBe(hiddenFile);
+			}
+		} finally {
+			setAgentDir(originalAgentDir);
+		}
+	});
+
+	test.skipIf(process.platform === "win32")("classifies linked and missing transcript paths", () => {
+		const agentDir = fs.realpathSync(makeTempDir("omp-agent-"));
+		const cwd = makeTempDir("omp-cwd-");
+		const originalAgentDir = getAgentDir();
+		setAgentDir(agentDir);
+		try {
+			const root = getSessionsDir();
+			const bucket = path.join(root, "visible");
+			const sibling = `${root}-other`;
+			fs.mkdirSync(bucket, { recursive: true });
+			fs.mkdirSync(sibling);
+			const escape = path.join(root, "escape");
+			const alias = path.join(cwd, "alias");
+			fs.symlinkSync(sibling, escape);
+			fs.symlinkSync(bucket, alias);
+			fs.writeFileSync(path.join(bucket, "existing.jsonl"), "");
+			const dangling = path.join(bucket, "dangling.jsonl");
+			fs.symlinkSync(path.join(cwd, "missing"), dangling);
+			const linkedFile = path.join(bucket, "linked.jsonl");
+			const outsideFile = path.join(sibling, "external.jsonl");
+			fs.writeFileSync(outsideFile, "");
+			fs.symlinkSync(outsideFile, linkedFile);
+			const linkedText = path.join(bucket, "linked-text.jsonl");
+			fs.writeFileSync(path.join(bucket, "work.txt"), "");
+			fs.symlinkSync(path.join(bucket, "work.txt"), linkedText);
+
+			for (const [file, needsMarker] of [
+				[path.join(bucket, "new.jsonl"), false],
+				[path.join(bucket, "missing", "nested", "new.jsonl"), false],
+				[path.join(bucket, ".missing", "new.jsonl"), true],
+				[path.join(sibling, "new.jsonl"), true],
+				[path.join(escape, "new.jsonl"), true],
+				[path.join(escape, "missing", "nested", "new.jsonl"), true],
+				[path.join(alias, "existing.jsonl"), false],
+				[path.join(alias, "missing", "new.jsonl"), true],
+				[path.join(alias, ".missing", "new.jsonl"), true],
+				[dangling, true],
+				[linkedFile, true],
+				[linkedText, true],
+			] as const) {
+				writeTerminalBreadcrumb(cwd, file, true);
+				const marker = path.join(getCustomSessionFilesDir(), hashPath(file));
+				expect(fs.existsSync(marker)).toBe(needsMarker);
+			}
 		} finally {
 			setAgentDir(originalAgentDir);
 		}

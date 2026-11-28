@@ -1,6 +1,6 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { signal } from "@oh-my-pi/pi-tui";
 import {
 	BlockUnitCounter,
 	buildDisplayMessage,
@@ -11,12 +11,7 @@ import {
 	StreamingRevealController,
 	visibleUnits,
 } from "@oh-my-pi/pi-coding-agent/modes/controllers/streaming-reveal";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { getSegmenter } from "@oh-my-pi/pi-tui";
-
-beforeAll(async () => {
-	await initTheme(false);
-});
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 
 function makeUsage(): AssistantMessage["usage"] {
 	return {
@@ -58,20 +53,22 @@ function thinkingAt(message: AssistantMessage, index: number): string {
 	return block.thinking;
 }
 
+/** A reveal target (the streaming reply's signals) recording every frame it is handed. */
 class RecordingComponent {
 	messages: AssistantMessage[] = [];
 	transientFlags: Array<boolean | undefined> = [];
+	readonly transient = signal(false);
+	readonly message = signal<AssistantMessage | undefined>(undefined);
 
-	updateContent(message: AssistantMessage, opts?: { transient?: boolean }): void {
-		this.messages.push(message);
-		this.transientFlags.push(opts?.transient);
-	}
-
-	// Component protocol stub — the reveal controller now hands the component
-	// to `requestComponentRender`, which only exercises identity, so returning
-	// an empty rendered frame is sufficient for these tests.
-	render(): readonly string[] {
-		return [];
+	constructor() {
+		const set = this.message.set;
+		this.message.set = (message: AssistantMessage | undefined) => {
+			if (message) {
+				this.messages.push(message);
+				this.transientFlags.push(this.transient.peek());
+			}
+			set(message);
+		};
 	}
 }
 
@@ -83,15 +80,12 @@ function latestMessage(component: RecordingComponent): AssistantMessage {
 	return message;
 }
 
-function makeController(
-	options: { smooth?: boolean; hideThinking?: boolean; proseOnly?: () => boolean; requestRender?: () => void } = {},
-) {
+function makeController(options: { smooth?: boolean; hideThinking?: boolean; proseOnly?: () => boolean } = {}) {
 	const component = new RecordingComponent();
 	const controller = new StreamingRevealController({
 		getSmoothStreaming: () => options.smooth ?? true,
 		getHideThinkingBlock: () => options.hideThinking ?? false,
 		getProseOnlyThinking: options.proseOnly ?? (() => true),
-		requestRender: options.requestRender ?? (() => {}),
 	});
 	return { component, controller };
 }
@@ -146,9 +140,6 @@ describe("streaming reveal", () => {
 
 		expect(thinkingAt(display, 0)).toBe("...");
 		expect(textAt(display, 1)).toBe("");
-
-		const component = new AssistantMessageComponent(display);
-		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("...");
 	});
 
 	it("refreshes prose-only setting during unsmoothed streaming updates", () => {
@@ -231,8 +222,7 @@ describe("streaming reveal", () => {
 
 	it("renders full targets immediately when smoothing is disabled", () => {
 		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const { component, controller } = makeController({ smooth: false, requestRender });
+		const { component, controller } = makeController({ smooth: false });
 
 		controller.begin(component, makeMessage([{ type: "text", text: "chunk" }]), false);
 		controller.setTarget(makeMessage([{ type: "text", text: "chunky" }]), false);
@@ -241,7 +231,6 @@ describe("streaming reveal", () => {
 
 		expect(textAt(latestMessage(component), 0)).toBe("chunky");
 		expect(component.messages).toHaveLength(updates);
-		expect(requestRender).not.toHaveBeenCalled();
 	});
 
 	it("marks unsmoothed in-flight updates as transient", () => {
@@ -284,8 +273,7 @@ describe("streaming reveal", () => {
 
 	it("snaps to full text when a tool call arrives", () => {
 		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const { component, controller } = makeController({ requestRender });
+		const { component, controller } = makeController();
 
 		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
 		controller.setTarget(makeMessage([{ type: "text", text: "abcdefghi" }]), false);
@@ -301,7 +289,6 @@ describe("streaming reveal", () => {
 
 		expect(textAt(latestMessage(component), 0)).toBe("abcdefghi");
 		expect(component.messages).toHaveLength(updates);
-		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
 	it("snaps to full text when a tool call arrives before the first reveal tick", () => {
@@ -316,30 +303,12 @@ describe("streaming reveal", () => {
 
 		expect(textAt(latestMessage(component), 0)).toBe("Let me wait for that result.");
 	});
-
-	it("passes the bound component to requestRender on each smooth tick", () => {
-		// The controller must hand its component to `requestRender` so the caller
-		// scopes the render to that subtree via `TUI.requestComponentRender`
-		// instead of forcing a full-tree walk at 30fps (issue #4377).
-		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const { component, controller } = makeController({ requestRender });
-
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
-		controller.setTarget(makeMessage([{ type: "text", text: "abcdef" }]), false);
-		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
-
-		expect(requestRender).toHaveBeenCalled();
-		for (const call of requestRender.mock.calls) {
-			expect(call[0]).toBe(component);
-		}
-	});
 });
 
 /** Pure Intl.Segmenter grapheme count, independent of BlockUnitCounter's memoization. */
 function refCount(text: string): number {
 	let n = 0;
-	for (const _segment of getSegmenter().segment(text)) n += 1;
+	for (const _segment of segmentGraphemes(text)) n += 1;
 	return n;
 }
 
@@ -347,7 +316,7 @@ function refCount(text: string): number {
 function refSlice(text: string, units: number): string {
 	if (units <= 0) return "";
 	let n = 0;
-	for (const { index, segment } of getSegmenter().segment(text)) {
+	for (const { index, segment } of segmentGraphemes(text)) {
 		n += 1;
 		if (n >= units) return text.slice(0, index + segment.length);
 	}
@@ -561,7 +530,6 @@ describe("frame-skip coalescing", () => {
 			getSmoothStreaming: () => smooth,
 			getHideThinkingBlock: () => false,
 			getProseOnlyThinking: () => true,
-			requestRender: () => {},
 		});
 
 		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);

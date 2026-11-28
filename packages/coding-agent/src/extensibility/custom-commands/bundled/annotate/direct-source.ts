@@ -1,6 +1,8 @@
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
+import { assistantText } from "../../../../modes/view-model/overlays/copy-targets";
+import type { SessionEntry } from "../../../../session/session-entries";
 import { resolveReadPath } from "../../../../tools/path-utils";
-import type { TextReviewSource } from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import type { TextReviewSource } from "./annotation-types";
 
 /**
  * Read one regular text file without trimming or otherwise rewriting its bytes.
@@ -58,6 +60,34 @@ export async function acquireFileTextReviewSource(
 		ctx.ui.notify(message, inputPath.trim() ? "error" : "warning");
 		return undefined;
 	}
+}
+
+/** Find the latest non-empty assistant message on the active branch. */
+export function latestAssistantEntry(branch: readonly SessionEntry[]): { id: string; text: string } | undefined {
+	for (let index = branch.length - 1; index >= 0; index--) {
+		const entry = branch[index];
+		if (entry?.type !== "message") continue;
+		const text = assistantText(entry.message);
+		if (text) return { id: entry.id, text };
+	}
+	return undefined;
+}
+
+/** The latest non-empty assistant reply on the active branch, or undefined when none exists. */
+export function latestAssistantTextReviewSource(
+	branch: readonly SessionEntry[],
+	sessionId: string,
+): TextReviewSource | undefined {
+	const latest = latestAssistantEntry(branch);
+	if (!latest) return undefined;
+	return {
+		id: `message:${latest.id}`,
+		kind: "message",
+		label: "Latest assistant reply",
+		text: latest.text,
+		provenance: { kind: "latest-assistant", entryId: latest.id },
+		sessionId,
+	};
 }
 
 /** Build a prompt-backed source, preserving the supplied text exactly. */

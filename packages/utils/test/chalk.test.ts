@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { $ } from "bun";
 import { Chalk, detectColorLevel } from "../src/chalk";
 
 const ESC = "\u001B[";
@@ -42,6 +43,25 @@ describe("chalk", () => {
 		expect(red("a", "b", 3)).toBe("a b 3");
 		chalk.level = 3;
 		expect(red("x")).toBe(`${ESC}31mx${ESC}39m`);
+	});
+
+	test("detects stdout at the first styled use, not on import or when printing plain text", async () => {
+		const probe = `
+			import chalk, { Chalk } from "@oh-my-pi/pi-utils/chalk";
+			const red = chalk.red;
+			const plain = chalk("plain");
+			const explicit = new Chalk({ level: 0 }).red("x");
+			process.env.FORCE_COLOR = "3";
+			const first = red("x");
+			process.env.FORCE_COLOR = "0";
+			process.stdout.write(JSON.stringify([plain, explicit, first, new Chalk().red("x")]));
+		`;
+		const output = await $`${process.execPath} -e ${probe}`
+			.cwd(import.meta.dir)
+			.env({ ...process.env, FORCE_COLOR: "0" })
+			.quiet()
+			.json();
+		expect(output).toEqual(["plain", "x", `${ESC}31mx${ESC}39m`, `${ESC}31mx${ESC}39m`]);
 	});
 
 	test("honors FORCE_COLOR, NO_COLOR, TTY, TERM, and CI detection", () => {

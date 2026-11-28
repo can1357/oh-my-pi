@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterAll, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { type AgentMessage, type AgentTelemetryConfig, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
@@ -6,7 +6,10 @@ import {
 	createCompactionSummaryMessage,
 	defaultConvertToLlm,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { AssistantMessage, completeSimple, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type {
 	ResponseFileSearchToolCall,
 	ResponseFunctionWebSearch,
@@ -36,14 +39,18 @@ import {
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
 } from "../../src/advisor";
-import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
-import { setChatTranscriptDisplayPreferences } from "@oh-my-pi/pi-tui/chat/display-preferences";
-import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
+import { Settings } from "../../src/config/settings";
 import { obfuscateMessages } from "../../src/secrets/message-transform";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
 import { getOpenAiRemoteCompactionPayload } from "../../src/session/session-context";
 import { formatSessionHistoryMarkdown } from "../../src/session/session-history-format";
 import { YieldQueue } from "../../src/session/yield-queue";
+import { type ImageDescriptionDeps, ImageDescriptions } from "../../src/utils/image-vision-fallback";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 /** Poll until the drain loop reaches the asserted state — waitForCatchup
  *  releases IMMEDIATELY on advisor failure (the primary must never park on a
@@ -1471,6 +1478,78 @@ describe("advisor", () => {
 			};
 		}
 
+		it("hands an advisor that cannot see images their descriptions instead of `[image]`", async () => {
+			const vision = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const textOnly = { ...vision, input: ["text" as const] };
+			const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "advisor-image-"));
+			const reply = (text: string): AssistantMessage => ({
+				role: "assistant",
+				content: [{ type: "text", text }],
+				api: vision.api,
+				provider: vision.provider,
+				model: vision.id,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			const completeImpl = (async () => reply("a single red pixel")) as unknown as typeof completeSimple;
+			const descriptions = new ImageDescriptions(() => ({
+				modelRegistry: {
+					getAvailable: () => [vision],
+					getAvailableForProviders: () => [vision],
+					getApiKey: async () => "test-key",
+					resolver: () => async () => "test-key",
+				} as unknown as ImageDescriptionDeps["modelRegistry"],
+				settings: Settings.isolated(),
+				localProtocolOptions: { getArtifactsDir: () => artifactsDir, getSessionId: () => "advisor-image" },
+				completeImpl,
+			}));
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent: AdvisorAgent = {
+				prompt: async input => {
+					promptInputs.push(input);
+					agent.state.messages.push(reply("no issues"));
+				},
+				abort: () => {},
+				reset: () => {},
+				state: { messages: [] },
+			};
+			const messages: AgentMessage[] = [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "what is wrong here?" },
+						{ type: "image", mimeType: "image/png", data: "iVBORw0KGgoAAAANSUhEUg==" },
+					],
+					timestamp: 1,
+				},
+			];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				prepareImageDescriptions: (batch, signal) => descriptions.prepare(batch, textOnly, signal),
+				withImageDescriptions: message => descriptions.withDescriptions(message),
+			});
+			try {
+				runtime.onTurnEnd(messages);
+				await runtime.waitForCatchup(2_000, 1);
+
+				const sent = promptInputs.map(promptText).join("\n");
+				expect(sent).toContain("what is wrong here?");
+				expect(sent).toContain("a single red pixel");
+				expect(sent).not.toContain("[image]");
+			} finally {
+				runtime.dispose();
+				await removeWithRetries(artifactsDir);
+			}
+		});
+
 		it("coalesces multiple onTurnEnd calls while a prompt is in-flight", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const { promise: firstPromptPromise, resolve: finishFirstPrompt } = Promise.withResolvers<void>();
@@ -1722,7 +1801,7 @@ describe("advisor", () => {
 			expect(firstReview).not.toContain("_thinking:_");
 
 			// Switch advisor model identity and verify includeReasoning: false stays enforced
-			currentModelIdentity = "google-antigravity/gemini-4-argon";
+			currentModelIdentity = "google/gemini-3-pro";
 			messages.push({
 				role: "assistant",
 				content: [
@@ -6974,95 +7053,6 @@ describe("advisor", () => {
 			expect(runtime.quotaExhausted).toBe(false);
 			expect(quotaNotified).toBe(false);
 			expect(runtime.backlog).toBe(0);
-		});
-	});
-
-	describe("createAdvisorMessageCard", () => {
-		const strip = (lines: readonly string[]): string => lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
-
-		it("renders the advisor header, severity badge, and note text", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const card = createAdvisorMessageCard(
-				{ notes: [{ note: "deleting the wrong file", severity: "blocker" }, { note: "watch the empty case" }] },
-				() => true,
-				uiTheme,
-			);
-			const text = strip(card.render(80));
-			expect(text).toContain("Advisor");
-			expect(text).toContain("2 notes");
-			expect(text).toContain("blocker");
-			expect(text).toContain("deleting the wrong file");
-			expect(text).toContain("watch the empty case");
-		});
-
-		it("prefixes the note with a named-advisor label, but not for the default advisor", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const card = createAdvisorMessageCard(
-				{
-					notes: [
-						{ note: "module boundary leak", severity: "concern", advisor: "Architecture" },
-						{ note: "default-advisor note", advisor: "default" },
-					],
-				},
-				() => true,
-				uiTheme,
-			);
-			const text = strip(card.render(80));
-			expect(text).toContain("[Architecture]");
-			expect(text).toContain("module boundary leak");
-			// The implicit "default" advisor stays unlabeled.
-			expect(text).not.toContain("[default]");
-		});
-
-		it("collapses to the first notes with an overflow hint", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const notes = Array.from({ length: 5 }, (_, i) => ({ note: `note ${i}` }));
-			const card = createAdvisorMessageCard({ notes }, () => false, uiTheme);
-			const text = strip(card.render(80));
-			expect(text).toContain("note 0");
-			expect(text).toContain("+2 more");
-			expect(text).not.toContain("note 4");
-		});
-
-		it("wraps long notes across multiple lines based on render width instead of truncating them", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const note =
-				"This is a very long advisor note that will definitely exceed the restricted width constraint of thirty characters and should therefore wrap across multiple lines rather than getting truncated.";
-			const card = createAdvisorMessageCard({ notes: [{ note, severity: "concern" }] }, () => true, uiTheme);
-			const text = strip(card.render(30));
-			expect(text).toContain("truncated.");
-		});
-
-		it("wraps long notes even when the message card is collapsed", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const note =
-				"This is a very long advisor note that will definitely exceed the restricted width constraint of thirty characters and should therefore wrap across multiple lines rather than getting truncated.";
-			const card = createAdvisorMessageCard({ notes: [{ note, severity: "concern" }] }, () => false, uiTheme);
-			const text = strip(card.render(30));
-			expect(text).toContain("truncated.");
-		});
-
-		it("caps collapsed note rows at advisorCollapsedLines and shows every row when expanded", async () => {
-			const uiTheme = await getThemeByName("dark");
-			if (!uiTheme) throw new Error("theme unavailable");
-			const note =
-				"This is a very long advisor note that will definitely exceed the restricted width constraint of thirty characters and should therefore wrap across multiple lines rather than getting truncated.";
-			const details = { notes: [{ note, severity: "concern" as const }] };
-			try {
-				setChatTranscriptDisplayPreferences({ advisorCollapsedLines: 1 });
-				const rows = createAdvisorMessageCard(details, () => false, uiTheme).render(30);
-				expect(rows.length).toBe(2);
-				expect(strip(rows)).not.toContain("truncated.");
-				const expanded = createAdvisorMessageCard(details, () => true, uiTheme);
-				expect(strip(expanded.render(30))).toContain("truncated.");
-			} finally {
-				setChatTranscriptDisplayPreferences({ advisorCollapsedLines: 0 });
-			}
 		});
 	});
 

@@ -28,10 +28,11 @@ import {
 	toError,
 	withLoopPhase,
 } from "@oh-my-pi/pi-utils";
-import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import { isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import type { SessionTreePosition } from "@oh-my-pi/pi-tui/status-line/host";
+import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "../task/task-details";
+import type { ConfiguredThinkingLevel } from "../utils/render-utils";
+import { isUserRequestEntry } from "./transcript/transcript-entry";
+import { type AiuCall, callAiu } from "./aiu-billing";
+import type { SessionTreePosition } from "../modes/view-model/status-line/host";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { hasAnnotationDraftsSync } from "../extensibility/custom-commands/bundled/annotate/draft-store";
@@ -72,6 +73,7 @@ import {
 	type LabelEntry,
 	type ModeChangeEntry,
 	type ModelChangeEntry,
+	type ModelFallbackCause,
 	type ModelUsageEntry,
 	type ModelUsageRecord,
 	lastSelfSelectedLeafId,
@@ -87,6 +89,7 @@ import {
 	type SessionOrigin,
 	type SessionTitleSource,
 	type SessionTreeNode,
+	TAN_FORK_BOUNDARY_CUSTOM_TYPE,
 	type ThinkingLevelChangeEntry,
 	TITLE_CHANGE_ENTRY_TYPE,
 	type TitleChangeEntry,
@@ -122,6 +125,7 @@ import {
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
+	computeDefaultSessionDirAsync,
 	hasPositiveMovedProjectEvidence,
 	readTerminalBreadcrumbEntry,
 	resolveManagedSessionRoot,
@@ -427,6 +431,8 @@ function emptyUsageStatistics(): UsageStatistics {
 		premiumRequests: 0,
 		cost: 0,
 		subagentCost: 0,
+		aiuNano: 0,
+		aiuUnknownCalls: 0,
 	};
 }
 
@@ -481,6 +487,8 @@ function resetUsageCost(usage: Usage | undefined): void {
 	usage.cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
 	usage.credits = undefined;
 	usage.premiumRequests = undefined;
+	usage.aiu = undefined;
+	usage.aiuMissing = undefined;
 }
 
 /** Clear child billing kept in task results without discarding their token counts. */
@@ -508,6 +516,47 @@ function resetNestedTaskBilling(extractedToolData: Record<string, unknown[]> | u
 	const tasks = extractedToolData?.task;
 	if (!Array.isArray(tasks)) return;
 	for (const task of tasks) resetTaskResultBilling(task);
+}
+
+/**
+ * `SessionHeader.inheritedThroughEntryId` for a session holding only `kept` of `all`: the last kept
+ * entry at or before `marker` in `all`'s file order, so the inherited prefix still ends where it did.
+ */
+function inheritedMarkerWithin(
+	kept: readonly SessionEntry[],
+	all: readonly SessionEntry[],
+	marker: string | undefined,
+): string | undefined {
+	if (marker === undefined) return undefined;
+	const position = new Map(all.map((entry, index) => [entry.id, index]));
+	const markerAt = position.get(marker);
+	if (markerAt === undefined) return undefined;
+	let inherited: string | undefined;
+	for (const entry of kept) {
+		const at = position.get(entry.id);
+		if (at !== undefined && at <= markerAt) inherited = entry.id;
+	}
+	return inherited;
+}
+
+/**
+ * End of `entries`' inherited prefix: the header's `inheritedThroughEntryId`, else, for a `/tan` clone
+ * written before that marker, the entry before its last `tan-fork-boundary` (the boundary follows the
+ * copied entries). Derived sessions carry the result as their header marker, so the prefix survives a
+ * branch that drops the boundary itself.
+ */
+function inheritedPrefixEnd(marker: string | undefined, entries: readonly SessionEntry[]): string | undefined {
+	if (marker !== undefined) return marker;
+	let previous: string | undefined;
+	let end: string | undefined;
+	for (const entry of entries) {
+		if (entry.type === "custom" && entry.customType === TAN_FORK_BOUNDARY_CUSTOM_TYPE) {
+			end = previous;
+			continue;
+		}
+		previous = entry.id;
+	}
+	return end;
 }
 
 function isAssistantEntry(entry: SessionEntry): boolean {
@@ -673,6 +722,16 @@ export class SessionEntryIndex {
 		if (usage && entry.type === "message" && entry.message.role === "toolResult") {
 			this.#usage.subagentCost += usage.cost.total;
 		}
+		// Credits count only where calls are recorded; a reset fork's copies had theirs cleared.
+		const call: AiuCall | undefined =
+			entry.type === "model_usage"
+				? entry
+				: entry.type === "message" && entry.message.role === "assistant"
+					? entry.message
+					: undefined;
+		const aiu = call ? callAiu(call) : undefined;
+		if (aiu === "unknown") this.#usage.aiuUnknownCalls++;
+		else if (aiu !== undefined) this.#usage.aiuNano += aiu;
 	}
 
 	has(id: string): boolean {
@@ -1047,6 +1106,7 @@ export class SessionManager {
 	#sessionName: string | undefined;
 	#titleSource: SessionTitleSource | undefined;
 	#titleRevision = 0;
+	#branchNavigationRevision = 0;
 	/** Bumped by in-place entry updates, which a {@link SessionBodyStamp} cannot otherwise see. */
 	#bodyRevision = 0;
 	#sessionFile: string | undefined;
@@ -2651,6 +2711,7 @@ export class SessionManager {
 			parentSession: parentSessionId,
 			providerPromptCacheKey: SessionManager.getInheritedProviderPromptCacheKey(this.#header),
 			taskPromptCacheKey: this.#header.taskPromptCacheKey,
+			inheritedThroughEntryId: inheritedPrefixEnd(this.#header.inheritedThroughEntryId, this.#entries),
 		};
 		this.#sessionName = this.#header.title;
 		this.#titleSource = this.#header.titleSource;
@@ -2911,6 +2972,7 @@ export class SessionManager {
 		manager.#additionalDirectories = [...this.#additionalDirectories];
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
+		manager.#header.inheritedThroughEntryId = inheritedPrefixEnd(this.#header.inheritedThroughEntryId, this.#entries);
 		manager.#entries = structuredClone(this.#entries);
 		manager.#index.rebuild(manager.#entries);
 		manager.#forceFileCreation = true;
@@ -3773,15 +3835,21 @@ export class SessionManager {
 	 * Append a model change as a child of the current leaf, then advance the leaf.
 	 * @param model Model in "provider/modelId" format
 	 * @param role Optional role (default: "default")
-	 * @param resolvedModelIsFallback Whether this transition selected a retry-fallback model
+	 * @param options.fallback Why a retry fallback selected this model; it marks the entry `resolvedModelIsFallback`
+	 * @param options.resolvedModelIsFallback Carry an existing fallback route without recording a new fallback cause.
 	 */
-	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false): string {
+	appendModelChange(
+		model: string,
+		role?: string,
+		options?: { fallback?: ModelFallbackCause; resolvedModelIsFallback?: boolean },
+	): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			...this.#freshEntryFields(),
 			model,
 			role,
-			resolvedModelIsFallback,
+			resolvedModelIsFallback: options?.fallback !== undefined || options?.resolvedModelIsFallback === true,
+			fallback: options?.fallback,
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -3978,6 +4046,11 @@ export class SessionManager {
 		return pins;
 	}
 
+	/** Explicit branch selections, independent of ordinary journal appends. */
+	get branchNavigationRevision(): number {
+		return this.#branchNavigationRevision;
+	}
+
 	getLeafId(): string | null {
 		return this.#index.leafId();
 	}
@@ -4169,11 +4242,13 @@ export class SessionManager {
 	 */
 	branch(branchFromId: string): void {
 		if (!this.#index.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
+		this.#branchNavigationRevision++;
 		this.#setLeaf(branchFromId);
 	}
 
 	/** Reset the leaf to null so the next append creates a new root entry. */
 	resetLeaf(): void {
+		this.#branchNavigationRevision++;
 		this.#setLeaf(null);
 	}
 
@@ -4234,9 +4309,8 @@ export class SessionManager {
 
 	/** Like branch(), but also records a branch_summary of the abandoned path. */
 	branchWithSummary(branchFromId: string | null, summary: string, details?: unknown, fromExtension?: boolean): string {
-		if (branchFromId !== null && !this.#index.has(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
-
-		this.#setLeaf(branchFromId);
+		if (branchFromId === null) this.resetLeaf();
+		else this.branch(branchFromId);
 		const entry: BranchSummaryEntry = {
 			type: "branch_summary",
 			id: generateId(this.#index),
@@ -4293,6 +4367,11 @@ export class SessionManager {
 			titleSource: this.#titleSource,
 			parentSession: this.#persist ? sourceSessionFile : undefined,
 			additionalDirectories: this.#additionalDirectories.length > 0 ? [...this.#additionalDirectories] : undefined,
+			inheritedThroughEntryId: inheritedMarkerWithin(
+				entriesToKeep,
+				this.#entries,
+				inheritedPrefixEnd(this.#header.inheritedThroughEntryId, this.#entries),
+			),
 		};
 
 		const labels: LabelEntry[] = [];
@@ -4351,6 +4430,15 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 	): string {
 		return computeDefaultSessionDir(cwd, storage, getSessionsDir(agentDir));
+	}
+
+	/** Resolve and migrate the default directory without blocking on directory enumeration. */
+	static getDefaultSessionDirAsync(
+		cwd: string,
+		agentDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+	): Promise<string> {
+		return computeDefaultSessionDirAsync(cwd, storage, getSessionsDir(agentDir));
 	}
 
 	/**
@@ -4439,6 +4527,10 @@ export class SessionManager {
 		);
 		manager.#header.title = sourceHeader?.title;
 		manager.#header.titleSource = sourceHeader?.titleSource;
+		// A reset makes everything copied the parent's; a plain copy keeps the source's own inherited prefix.
+		manager.#header.inheritedThroughEntryId = options?.resetInheritedCost
+			? history.at(-1)?.id
+			: inheritedPrefixEnd(sourceHeader?.inheritedThroughEntryId, history);
 		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
@@ -4545,7 +4637,7 @@ export class SessionManager {
 		const dir =
 			sessionDir ??
 			(recordedCwd && !recordedCwdUsable
-				? SessionManager.getDefaultSessionDir(cwd, undefined, storage)
+				? await SessionManager.getDefaultSessionDirAsync(cwd, undefined, storage)
 				: path.dirname(path.resolve(filePath)));
 		const manager = new SessionManager(cwd, dir, true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
@@ -4652,9 +4744,11 @@ export class SessionManager {
 		};
 	}
 	/**
-	 * Continue the most recent session, or create a new one if none exists or
-	 * another live omp process writes the one picked
-	 * ({@link SessionStorage.isSessionOwnedElsewhere}).
+	 * Continue the most recent session, or create a new one if none exists.
+	 * A session another live omp process writes
+	 * ({@link SessionStorage.isSessionOwnedElsewhere}) is passed over for the
+	 * newest one in the directory nobody else writes; resuming it would
+	 * duplicate the running conversation into a sibling on the first write.
 	 *
 	 * When the chosen session's conversation went on in another file (it moved
 	 * off its file; see `findSessionContinuation`), this opens the copy to
@@ -4672,7 +4766,7 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 		options: { onSessionContinuation?: (continuation: SessionContinuation) => void } = {},
 	): Promise<SessionManager> {
-		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const dir = sessionDir ?? (await SessionManager.getDefaultSessionDirAsync(cwd, undefined, storage));
 		const resolvedCwd = path.resolve(cwd);
 		const breadcrumb = await readTerminalBreadcrumbEntry();
 		let chosenSession: string | null | undefined;
@@ -4778,26 +4872,35 @@ export class SessionManager {
 			}
 		}
 
-		if (chosenSession === undefined) chosenSession = await findMostRecentNonEmptySession(dir, storage);
-		if (chosenSession) {
-			const fromBreadcrumb = !!breadcrumb && path.resolve(chosenSession) === path.resolve(breadcrumb.sessionFile);
+		/** The copy of `picked` to resume, or undefined while another omp process writes it. */
+		const resumableCopy = async (picked: string): Promise<string | undefined> => {
+			const fromBreadcrumb = !!breadcrumb && path.resolve(picked) === path.resolve(breadcrumb.sessionFile);
 			const continuation = fromBreadcrumb
-				? await findSessionContinuation(chosenSession, storage)
-				: await findRecentSessionContinuation(chosenSession, storage);
-			const resumable = continuation?.session.path ?? chosenSession;
+				? await findSessionContinuation(picked, storage)
+				: await findRecentSessionContinuation(picked, storage);
+			const resumable = continuation?.session.path ?? picked;
 			if (storage.isSessionOwnedElsewhere?.(resumable)) {
-				// Its first write would move it to a sibling, duplicating the
-				// conversation the running process keeps writing: start fresh.
 				logger.debug("Not continuing a session another omp process writes", { sessionFile: resumable });
-				chosenSession = null;
-			} else {
-				if (continuation) options.onSessionContinuation?.(continuation);
-				chosenSession = resumable;
+				return undefined;
+			}
+			if (continuation) options.onSessionContinuation?.(continuation);
+			return resumable;
+		};
+
+		let resumed = chosenSession ? await resumableCopy(chosenSession) : undefined;
+		// Nothing picked yet, or another process writes the pick: the newest
+		// session nobody else writes. `null` means the directory holds none.
+		if (resumed === undefined && chosenSession !== null) {
+			const skipped = chosenSession ? path.resolve(chosenSession) : undefined;
+			for (const session of await listSessions(dir, storage)) {
+				if (isEmptySession(session) || path.resolve(session.path) === skipped) continue;
+				resumed = await resumableCopy(session.path);
+				if (resumed !== undefined) break;
 			}
 		}
 
 		const manager = new SessionManager(cwd, dir, true, storage);
-		if (chosenSession) await manager.setSessionFile(chosenSession);
+		if (resumed) await manager.setSessionFile(resumed);
 		else manager.#resetToNewSession();
 		return manager;
 	}
@@ -4821,7 +4924,7 @@ export class SessionManager {
 		sessionDir?: string,
 		storage: SessionStorage = new FileSessionStorage(),
 	): Promise<SessionInfo[]> {
-		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const dir = sessionDir ?? (await SessionManager.getDefaultSessionDirAsync(cwd, undefined, storage));
 		const sessions = await listSessions(dir, storage);
 		return sortPinnedFirst(sessions, await loadPinnedSessionIds());
 	}
@@ -4848,7 +4951,7 @@ export class SessionManager {
 		worktreeScope: "directory" | "repo" = "repo",
 		settings?: Settings,
 	): Promise<PickerListing> {
-		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const dir = sessionDir ?? (await SessionManager.getDefaultSessionDirAsync(cwd, undefined, storage));
 		const [pinned, siblingDirs] = await Promise.all([
 			loadPinnedSessionIds(),
 			worktreeScope === "repo" ? worktreeSessionDirs(cwd, dir, { settings }) : [],

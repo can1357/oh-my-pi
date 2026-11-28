@@ -1,25 +1,45 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
+import { quotaFromReports } from "@oh-my-pi/pi-coding-agent/modes/interactive/status-quota";
 import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
-import { renderSegment } from "@oh-my-pi/pi-tui/status-line/segments";
-import type { SegmentContext } from "@oh-my-pi/pi-tui/status-line/types";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { StatusLineTestComponents } from "./helpers/status-line";
+import type { StatusQuota } from "@oh-my-pi/pi-coding-agent/ui/status/facts";
+import { effectiveStatusSettings, segmentView } from "@oh-my-pi/pi-coding-agent/ui/status/segments";
+import {
+	disposeStatusLines,
+	flushStatus,
+	lineText,
+	segmentText,
+	statusFacts,
+	statusLine,
+	statusSession,
+} from "./helpers/session-status-line";
 
-const statusLines = new StatusLineTestComponents();
 beforeAll(async () => {
 	resetSettingsForTest();
 	await Settings.init({ inMemory: true });
-	await initTheme();
 });
 
 afterAll(() => {
-	statusLines.dispose();
 	resetSettingsForTest();
 });
 
+afterEach(() => {
+	disposeStatusLines();
+	vi.useRealTimers();
+});
+
+/** The `usage` segment for `ctx.usage` (the quota facts): visible and its text. */
+function renderUsage(ctx: { usage: unknown }): {
+	visible: boolean;
+	content: string;
+} {
+	const quota = (ctx.usage ?? undefined) as StatusQuota | undefined;
+	const content = segmentText("usage", statusFacts(quota ? { quota } : {}));
+	return { visible: content !== null, content: content ?? "" };
+}
+
+/** The `usage` segment for the session's reports, scoped to the active provider, model and account. */
 function makeComponent(
 	reports: unknown,
 	options: {
@@ -29,70 +49,48 @@ function makeComponent(
 		/** Durable row id the session router is pinned to (API-key account path). */
 		stickyCredentialId?: number;
 	} = {},
-): StatusLineComponent {
-	const component = statusLines.track(
-		new StatusLineComponent(
-			{
-				state: { messages: [], model: { id: options.modelId, contextWindow: 1000, provider: options.provider } },
-				model: { id: options.modelId, contextWindow: 1000, provider: options.provider },
-				sessionId: "test-session",
-				sessionManager: {
-					getUsageStatistics: () => ({
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						orchestrationInput: 0,
-						orchestrationOutput: 0,
-						orchestrationCacheRead: 0,
-						premiumRequests: 0,
-						cost: 0,
-					}),
-				},
-				fetchUsageReports: async () => reports,
-				modelRegistry: {
-					authStorage: {
-						oauth: {
-							identity: (provider: string) =>
-								provider === options.provider ? options.activeIdentity : undefined,
-						},
-						sessions: {
-							sticky: (provider: string) =>
-								provider === options.provider && options.stickyCredentialId !== undefined
-									? { type: "api_key", index: 0, credentialId: options.stickyCredentialId }
-									: undefined,
-						},
-					},
-				},
-				getAsyncJobSnapshot: () => ({ running: [] }),
-				getContextUsage: () => undefined,
-			} as unknown as ConstructorParameters<typeof StatusLineComponent>[0],
-			statusLineHost,
-		),
-	);
-	component.updateSettings({
-		preset: "custom",
-		leftSegments: [],
-		rightSegments: ["usage"],
-		sessionAccent: false,
-	});
-	return component;
+): {
+	refreshUsageInBackground(): void;
+	getTopBorder(width: number): { content: string };
+} {
+	const identity =
+		options.activeIdentity ??
+		(options.stickyCredentialId !== undefined ? { credentialId: options.stickyCredentialId } : undefined);
+	return {
+		refreshUsageInBackground: () => {},
+		getTopBorder: () => {
+			// Fixtures that omit the provider stand for the active one's reports.
+			const scoped = Array.isArray(reports)
+				? reports.map(report => ({
+						provider: options.provider ?? "test-provider",
+						...report,
+					}))
+				: reports;
+			const quota = quotaFromReports(
+				scoped,
+				{ provider: options.provider, modelId: options.modelId, identity },
+				statusLineHost,
+				Date.now(),
+			);
+			return {
+				content: segmentText("usage", statusFacts(quota ? { quota } : {})) ?? "",
+			};
+		},
+	};
 }
 
 async function flushUsageRefresh(): Promise<void> {
-	const timer = Promise.withResolvers<void>();
-	setTimeout(timer.resolve, 0);
-	await timer.promise;
-	await Promise.resolve();
-	await Promise.resolve();
+	await flushStatus();
 }
 
 describe("usage status-line segment", () => {
 	it("renders untiered five-hour and seven-day limits", () => {
-		const result = renderSegment("usage", {
-			usage: { fiveHour: { percent: 24, resetMinutes: 30 }, sevenDay: { percent: 8, resetHours: 141 } },
-		} as unknown as SegmentContext);
+		const result = renderUsage({
+			usage: {
+				fiveHour: { percent: 24, resetMinutes: 30 },
+				sevenDay: { percent: 8, resetHours: 141 },
+			},
+		});
 		const content = stripVTControlCharacters(result.content);
 
 		expect(result.visible).toBe(true);
@@ -140,18 +138,29 @@ describe("usage status-line segment", () => {
 				provider: "openai-codex",
 				limits: [
 					{
-						scope: { windowId: "5h", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+						scope: {
+							windowId: "5h",
+							tier: "spark",
+							modelId: "GPT-5.3-Codex-Spark",
+						},
 						amount: { usedFraction: 0 },
 					},
 					{ scope: { windowId: "7d" }, amount: { usedFraction: 0.08 } },
 					{
-						scope: { windowId: "7d", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+						scope: {
+							windowId: "7d",
+							tier: "spark",
+							modelId: "GPT-5.3-Codex-Spark",
+						},
 						amount: { usedFraction: 0 },
 					},
 				],
 			},
 		];
-		const component = makeComponent(reports, { provider: "openai-codex", modelId: "gpt-5.6-sol" });
+		const component = makeComponent(reports, {
+			provider: "openai-codex",
+			modelId: "gpt-5.6-sol",
+		});
 
 		component.refreshUsageInBackground();
 		await flushUsageRefresh();
@@ -215,9 +224,15 @@ describe("usage status-line segment", () => {
 		const component = makeComponent([
 			{
 				limits: [
-					{ scope: { windowId: "5h", tier: "stale" }, amount: { usedFraction: 0.5 } },
+					{
+						scope: { windowId: "5h", tier: "stale" },
+						amount: { usedFraction: 0.5 },
+					},
 					{ scope: { windowId: "5h" }, amount: { usedFraction: 0.24 } },
-					{ scope: { windowId: "7d", tier: "prolite" }, amount: { usedFraction: 0.08 } },
+					{
+						scope: { windowId: "7d", tier: "prolite" },
+						amount: { usedFraction: 0.08 },
+					},
 				],
 			},
 		]);
@@ -247,18 +262,32 @@ describe("usage status-line segment", () => {
 				{
 					provider: "openai-codex",
 					metadata: { accountId: "other-account" },
-					limits: [{ scope: { windowId: "5h", tier: "other" }, amount: { usedFraction: 0.66 } }],
+					limits: [
+						{
+							scope: { windowId: "5h", tier: "other" },
+							amount: { usedFraction: 0.66 },
+						},
+					],
 				},
 				{
 					provider: "openai-codex",
 					metadata: { accountId: "active-account" },
 					limits: [
-						{ scope: { windowId: "5h", tier: "prolite" }, amount: { usedFraction: 0.24 } },
-						{ scope: { windowId: "7d", tier: "prolite" }, amount: { usedFraction: 0.08 } },
+						{
+							scope: { windowId: "5h", tier: "prolite" },
+							amount: { usedFraction: 0.24 },
+						},
+						{
+							scope: { windowId: "7d", tier: "prolite" },
+							amount: { usedFraction: 0.08 },
+						},
 					],
 				},
 			],
-			{ provider: "openai-codex", activeIdentity: { accountId: "active-account" } },
+			{
+				provider: "openai-codex",
+				activeIdentity: { accountId: "active-account" },
+			},
 		);
 
 		component.refreshUsageInBackground();
@@ -275,8 +304,14 @@ describe("usage status-line segment", () => {
 	});
 
 	it("invalidates cached usage when the active provider changes", async () => {
+		vi.useFakeTimers();
 		let provider = "openai-codex";
-		const model = { contextWindow: 1000, provider };
+		const model = {
+			id: "model",
+			contextWindow: 1000,
+			provider,
+			input: ["text"],
+		};
 		const reports = [
 			{
 				provider: "anthropic",
@@ -285,64 +320,64 @@ describe("usage status-line segment", () => {
 			{
 				provider: "openai-codex",
 				metadata: { accountId: "active-account" },
-				limits: [{ scope: { windowId: "5h", tier: "prolite" }, amount: { usedFraction: 0.8 } }],
+				limits: [
+					{
+						scope: { windowId: "5h", tier: "prolite" },
+						amount: { usedFraction: 0.8 },
+					},
+				],
 			},
 		];
-		const session = {
-			state: { messages: [], model },
-			model,
-			sessionManager: {
-				getUsageStatistics: () => ({
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 0,
-					orchestrationInput: 0,
-					orchestrationOutput: 0,
-					orchestrationCacheRead: 0,
-					premiumRequests: 0,
-					cost: 0,
-				}),
-			},
-			fetchUsageReports: async () => reports,
-			modelRegistry: {
-				authStorage: {
-					oauth: {
-						identity: (requestedProvider: string) =>
-							requestedProvider === provider && provider === "openai-codex"
-								? { accountId: "active-account" }
-								: undefined,
+		const line = statusLine(
+			statusSession({
+				state: { messages: [], model },
+				model,
+				fetchUsageReports: async () => reports,
+				modelRegistry: {
+					isUsingSubscription: () => false,
+					authStorage: {
+						oauth: {
+							identity: (requestedProvider: string) =>
+								requestedProvider === provider && provider === "openai-codex"
+									? { accountId: "active-account" }
+									: undefined,
+						},
 					},
 				},
+			}),
+			{
+				preset: "custom",
+				leftSegments: [],
+				rightSegments: ["usage"],
+				sessionAccent: false,
 			},
-			getAsyncJobSnapshot: () => ({ running: [] }),
-			getContextUsage: () => undefined,
-		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
-		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
-		component.updateSettings({
-			preset: "custom",
-			leftSegments: [],
-			rightSegments: ["usage"],
-			sessionAccent: false,
-		});
+		);
 
-		component.refreshUsageInBackground();
+		lineText(line);
+		vi.advanceTimersByTime(2_000);
 		await flushUsageRefresh();
-		expect(stripVTControlCharacters(component.getTopBorder(200).content)).toContain("80%");
+		expect(lineText(line)).toContain("80%");
 
 		provider = "anthropic";
 		model.provider = provider;
+		line.refresh();
 
-		const immediate = stripVTControlCharacters(component.getTopBorder(200).content);
-		expect(immediate).not.toContain("80%");
+		lineText(line);
 		await flushUsageRefresh();
-		const refreshed = stripVTControlCharacters(component.getTopBorder(200).content);
-		expect(refreshed).toContain("24%");
+		expect(lineText(line)).not.toContain("80%");
+		vi.advanceTimersByTime(2_000);
+		await flushUsageRefresh();
+		expect(lineText(line)).toContain("24%");
 	});
 
 	it("invalidates cached usage when the active model changes within a provider", async () => {
-		const model = { id: "gpt-5.6-sol", contextWindow: 1000, provider: "openai-codex" };
+		vi.useFakeTimers();
+		const model = {
+			id: "gpt-5.6-sol",
+			contextWindow: 1000,
+			provider: "openai-codex",
+			input: ["text"],
+		};
 		const reports = [
 			{
 				provider: "openai-codex",
@@ -350,65 +385,63 @@ describe("usage status-line segment", () => {
 				limits: [
 					{ scope: { windowId: "7d" }, amount: { usedFraction: 0.08 } },
 					{
-						scope: { windowId: "5h", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+						scope: {
+							windowId: "5h",
+							tier: "spark",
+							modelId: "GPT-5.3-Codex-Spark",
+						},
 						amount: { usedFraction: 0.42 },
 					},
 					{
-						scope: { windowId: "7d", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+						scope: {
+							windowId: "7d",
+							tier: "spark",
+							modelId: "GPT-5.3-Codex-Spark",
+						},
 						amount: { usedFraction: 0.11 },
 					},
 				],
 			},
 		];
-		const session = {
-			state: { messages: [], model },
-			model,
-			sessionManager: {
-				getUsageStatistics: () => ({
-					input: 0,
-					output: 0,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 0,
-					orchestrationInput: 0,
-					orchestrationOutput: 0,
-					orchestrationCacheRead: 0,
-					premiumRequests: 0,
-					cost: 0,
-				}),
-			},
-			fetchUsageReports: async () => reports,
-			modelRegistry: {
-				authStorage: {
-					oauth: {
-						identity: (requestedProvider: string) =>
-							requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+		const line = statusLine(
+			statusSession({
+				state: { messages: [], model },
+				model,
+				fetchUsageReports: async () => reports,
+				modelRegistry: {
+					isUsingSubscription: () => false,
+					authStorage: {
+						oauth: {
+							identity: (requestedProvider: string) =>
+								requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+						},
 					},
 				},
+			}),
+			{
+				preset: "custom",
+				leftSegments: [],
+				rightSegments: ["usage"],
+				sessionAccent: false,
 			},
-			getAsyncJobSnapshot: () => ({ running: [] }),
-			getContextUsage: () => undefined,
-		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
-		const component = statusLines.track(new StatusLineComponent(session, statusLineHost));
-		component.updateSettings({
-			preset: "custom",
-			leftSegments: [],
-			rightSegments: ["usage"],
-			sessionAccent: false,
-		});
+		);
 
-		component.refreshUsageInBackground();
+		lineText(line);
+		vi.advanceTimersByTime(2_000);
 		await flushUsageRefresh();
-		const solContent = stripVTControlCharacters(component.getTopBorder(200).content);
+		const solContent = lineText(line);
 		expect(solContent).not.toContain("spark");
 		expect(solContent).not.toContain("5h");
 		expect(solContent).toContain("8%");
 
 		model.id = "gpt-5.3-codex-spark";
-		const immediate = stripVTControlCharacters(component.getTopBorder(200).content);
-		expect(immediate).not.toContain("8%");
+		line.refresh();
+		lineText(line);
 		await flushUsageRefresh();
-		const sparkContent = stripVTControlCharacters(component.getTopBorder(200).content);
+		expect(lineText(line)).not.toContain("8%");
+		vi.advanceTimersByTime(2_000);
+		await flushUsageRefresh();
+		const sparkContent = lineText(line);
 		expect(sparkContent).toContain("spark");
 		expect(sparkContent).toContain("5h");
 		expect(sparkContent).toContain("42%");
@@ -424,14 +457,20 @@ describe("usage status-line segment", () => {
 				},
 				{
 					provider: "anthropic",
-					metadata: { source: "ratelimit-headers", accountId: "active-account" },
+					metadata: {
+						source: "ratelimit-headers",
+						accountId: "active-account",
+					},
 					limits: [
 						{ scope: { windowId: "5h" }, amount: { usedFraction: 0.24 } },
 						{ scope: { windowId: "7d" }, amount: { usedFraction: 0.08 } },
 					],
 				},
 			],
-			{ provider: "anthropic", activeIdentity: { accountId: "active-account" } },
+			{
+				provider: "anthropic",
+				activeIdentity: { accountId: "active-account" },
+			},
 		);
 
 		component.refreshUsageInBackground();
@@ -446,12 +485,12 @@ describe("usage status-line segment", () => {
 	});
 
 	it("sanitizes tier labels before rendering", () => {
-		const result = renderSegment("usage", {
+		const result = renderUsage({
 			usage: {
 				tier: "\u001b[31mbad\t tier\nvalue\u001b[0m",
 				fiveHour: { percent: 50 },
 			},
-		} as unknown as SegmentContext);
+		});
 		const content = stripVTControlCharacters(result.content);
 
 		expect(result.visible).toBe(true);
@@ -462,21 +501,21 @@ describe("usage status-line segment", () => {
 	});
 
 	it("hides null usage", () => {
-		const result = renderSegment("usage", { usage: null } as unknown as SegmentContext);
+		const result = renderUsage({ usage: null });
 
 		expect(result.visible).toBe(false);
 		expect(result.content).toBe("");
 	});
 
 	it("hides usage without visible windows", () => {
-		const result = renderSegment("usage", { usage: {} } as unknown as SegmentContext);
+		const result = renderUsage({ usage: {} });
 
 		expect(result.visible).toBe(false);
 		expect(result.content).toBe("");
 	});
 
 	it("renders five-hour usage without seven-day usage", () => {
-		const result = renderSegment("usage", { usage: { fiveHour: { percent: 80 } } } as unknown as SegmentContext);
+		const result = renderUsage({ usage: { fiveHour: { percent: 80 } } });
 		const content = stripVTControlCharacters(result.content);
 
 		expect(result.visible).toBe(true);
@@ -486,9 +525,9 @@ describe("usage status-line segment", () => {
 	});
 
 	it("renders monthly Cursor usage when five-hour and seven-day windows are absent", () => {
-		const result = renderSegment("usage", {
+		const result = renderUsage({
 			usage: { monthly: { percent: 1.88, resetHours: 743 } },
-		} as unknown as SegmentContext);
+		});
 		const content = stripVTControlCharacters(result.content);
 
 		expect(result.visible).toBe(true);
@@ -568,13 +607,21 @@ describe("usage status-line segment", () => {
 						{
 							id: "rolling-5h",
 							scope: { windowId: "5h" },
-							window: { id: "5h", durationMs: 5 * 3_600_000, resetsAt: now + 90 * 60_000 },
+							window: {
+								id: "5h",
+								durationMs: 5 * 3_600_000,
+								resetsAt: now + 90 * 60_000,
+							},
 							amount: { used: 12, usedFraction: 0.12, unit: "percent" },
 						},
 						{
 							id: "weekly",
 							scope: { windowId: "7d" },
-							window: { id: "7d", durationMs: 7 * 86_400_000, resetsAt: now + 100 * 3_600_000 },
+							window: {
+								id: "7d",
+								durationMs: 7 * 86_400_000,
+								resetsAt: now + 100 * 3_600_000,
+							},
 							amount: { used: 8, usedFraction: 0.08, unit: "percent" },
 						},
 						{
@@ -610,7 +657,11 @@ describe("usage status-line segment", () => {
 						{
 							id: "credits:monthly",
 							scope: { provider: "alibaba-token-plan", windowId: "monthly" },
-							window: { id: "monthly", label: "Monthly Credits", resetsAt: Date.now() + 335 * 3_600_000 },
+							window: {
+								id: "monthly",
+								label: "Monthly Credits",
+								resetsAt: Date.now() + 335 * 3_600_000,
+							},
 							amount: { used: 1.04, usedFraction: 0.0104, unit: "percent" },
 						},
 					],
@@ -633,7 +684,13 @@ describe("usage status-line segment", () => {
 			[
 				{
 					provider: "github-copilot",
-					limits: [{ id: "copilot:premium", scope: { windowId: "monthly" }, amount: { usedFraction: 0.42 } }],
+					limits: [
+						{
+							id: "copilot:premium",
+							scope: { windowId: "monthly" },
+							amount: { usedFraction: 0.42 },
+						},
+					],
 				},
 			],
 			{ provider: "github-copilot" },
@@ -648,15 +705,16 @@ describe("usage status-line segment", () => {
 	});
 
 	it("uses a distinct error color at the eighty-percent threshold", () => {
-		const high = renderSegment("usage", { usage: { fiveHour: { percent: 80 } } } as unknown as SegmentContext);
-		const low = renderSegment("usage", { usage: { fiveHour: { percent: 24 } } } as unknown as SegmentContext);
-		const highWithoutValue = high.content.replace("80%", "PCT");
-		const lowWithoutValue = low.content.replace("24%", "PCT");
+		const percentToken = (percent: number) =>
+			segmentView(
+				"usage",
+				statusFacts({ quota: { fiveHour: { percent } } }),
+				effectiveStatusSettings({ preset: "custom" }),
+			)?.spans.find(span => span.t === `${percent}%`)?.s;
 
-		expect(high.visible).toBe(true);
-		expect(low.visible).toBe(true);
-		expect(stripVTControlCharacters(highWithoutValue)).toBe(stripVTControlCharacters(lowWithoutValue));
-		expect(highWithoutValue).not.toBe(lowWithoutValue);
+		expect(percentToken(80)).toBe("error");
+		expect(percentToken(24)).not.toBe("error");
+		expect(percentToken(24)).toBeDefined();
 	});
 
 	it("maps non-canonical window ids onto subscription windows by reported span", async () => {
@@ -674,7 +732,10 @@ describe("usage status-line segment", () => {
 					},
 					{
 						scope: { windowId: "weekly" },
-						window: { durationMs: 7 * 86_400_000, resetsAt: now + 141 * 3_600_000 },
+						window: {
+							durationMs: 7 * 86_400_000,
+							resetsAt: now + 141 * 3_600_000,
+						},
 						amount: { usedFraction: 0.08 },
 					},
 				],
@@ -691,141 +752,15 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("8%");
 	});
 
-	it("renders Google Antigravity daily usage", async () => {
-		const now = Date.now();
-		const component = makeComponent(
-			[
-				{
-					provider: "google-antigravity",
-					limits: [
-						{
-							label: "Usage (Google)",
-							scope: { provider: "google-antigravity", windowId: "daily" },
-							window: { id: "daily", label: "Daily", durationMs: 86_400_000, resetsAt: now + 11 * 60_000 },
-							amount: { usedFraction: 0.054 },
-						},
-					],
-				},
-			],
-			{ provider: "google-antigravity" },
-		);
-
-		component.refreshUsageInBackground();
-		await flushUsageRefresh();
-		const content = stripVTControlCharacters(component.getTopBorder(200).content);
-
-		expect(content).toContain("1d");
-		expect(content).toContain("5%");
-		expect(content).toContain("11m");
-	});
-
-	it("scopes Antigravity usage to the active model's backend counter", async () => {
-		const now = Date.now();
-		const reports = [
-			{
-				provider: "google-antigravity",
-				limits: [
-					{
-						id: "google-antigravity:default:default:daily",
-						label: "Usage",
-						scope: { provider: "google-antigravity", windowId: "daily" },
-						window: { id: "daily", label: "Daily", durationMs: 86_400_000, resetsAt: now + 5 * 60_000 },
-						amount: { usedFraction: 0.99 },
-					},
-					{
-						id: "google-antigravity:google:default:daily",
-						label: "Usage (Google)",
-						scope: { provider: "google-antigravity", windowId: "daily" },
-						window: { id: "daily", label: "Daily", durationMs: 86_400_000, resetsAt: now + 11 * 60_000 },
-						amount: { usedFraction: 0.91 },
-					},
-					{
-						id: "google-antigravity:anthropic:default:daily",
-						label: "Usage (Anthropic)",
-						scope: { provider: "google-antigravity", windowId: "daily" },
-						window: { id: "daily", label: "Daily", durationMs: 86_400_000, resetsAt: now + 40 * 60_000 },
-						amount: { usedFraction: 0.24 },
-					},
-					{
-						id: "google-antigravity:openai:default:daily",
-						label: "Usage (OpenAI)",
-						scope: { provider: "google-antigravity", windowId: "daily" },
-						window: { id: "daily", label: "Daily", durationMs: 86_400_000, resetsAt: now + 25 * 60_000 },
-						amount: { usedFraction: 0.63 },
-					},
-				],
-			},
-		];
-
-		const claude = makeComponent(reports, { provider: "google-antigravity", modelId: "claude-opus-4-6" });
-		claude.refreshUsageInBackground();
-		await flushUsageRefresh();
-		const claudeContent = stripVTControlCharacters(claude.getTopBorder(200).content);
-		expect(claudeContent).toContain("1d");
-		expect(claudeContent).toContain("24%");
-		expect(claudeContent).not.toContain("91%");
-		expect(claudeContent).not.toContain("99%");
-
-		const gemini = makeComponent(reports, { provider: "google-antigravity", modelId: "gemini-3-pro" });
-		gemini.refreshUsageInBackground();
-		await flushUsageRefresh();
-		const geminiContent = stripVTControlCharacters(gemini.getTopBorder(200).content);
-		expect(geminiContent).toContain("1d");
-		expect(geminiContent).toContain("91%");
-		expect(geminiContent).not.toContain("24%");
-		expect(geminiContent).not.toContain("99%");
-
-		const gptOss = makeComponent(reports, { provider: "google-antigravity", modelId: "gpt-oss-120b" });
-		gptOss.refreshUsageInBackground();
-		await flushUsageRefresh();
-		const gptOssContent = stripVTControlCharacters(gptOss.getTopBorder(200).content);
-		expect(gptOssContent).toContain("1d");
-		expect(gptOssContent).toContain("63%");
-		expect(gptOssContent).not.toContain("91%");
-		expect(gptOssContent).not.toContain("99%");
-		for (const modelId of ["tab_flash_lite_preview", "tab_jump_flash_lite_preview"]) {
-			const tabModel = makeComponent(reports, { provider: "google-antigravity", modelId });
-			tabModel.refreshUsageInBackground();
-			await flushUsageRefresh();
-			const tabContent = stripVTControlCharacters(tabModel.getTopBorder(200).content);
-			expect(tabContent).toContain("1d");
-			expect(tabContent).toContain("91%");
-			expect(tabContent).not.toContain("24%");
-			expect(tabContent).not.toContain("99%");
-		}
-	});
-
-	it("falls back to legacy default Antigravity usage when the model counter is absent", async () => {
-		const component = makeComponent(
-			[
-				{
-					provider: "google-antigravity",
-					limits: [
-						{
-							id: "google-antigravity:default:default:daily",
-							label: "Usage",
-							scope: { provider: "google-antigravity", windowId: "daily" },
-							window: { id: "daily", label: "Daily", durationMs: 86_400_000 },
-							amount: { usedFraction: 0.42 },
-						},
-					],
-				},
-			],
-			{ provider: "google-antigravity", modelId: "claude-opus-4-6" },
-		);
-
-		component.refreshUsageInBackground();
-		await flushUsageRefresh();
-		const content = stripVTControlCharacters(component.getTopBorder(200).content);
-		expect(content).toContain("1d");
-		expect(content).toContain("42%");
-	});
-
 	it("ignores non-canonical windows without a reported span", async () => {
 		const component = makeComponent([
 			{
 				limits: [
-					{ scope: { windowId: "default" }, window: {}, amount: { usedFraction: 0.24 } },
+					{
+						scope: { windowId: "default" },
+						window: {},
+						amount: { usedFraction: 0.24 },
+					},
 					{
 						scope: { windowId: "monthly" },
 						window: { durationMs: 30 * 86_400_000 },

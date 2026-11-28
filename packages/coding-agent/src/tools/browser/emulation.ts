@@ -1,23 +1,14 @@
 import { type } from "@oh-my-pi/omptype";
 import { untilAborted } from "@oh-my-pi/pi-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import type { Device, Frame, NetworkConditions, Page, Permission } from "puppeteer-core";
 import { pressKey } from "./interactions";
 import { applyViewport } from "./launch";
 
-/** Viewport dimensions accepted by runtime emulation. */
-export interface EmulationViewport {
-	/** Viewport width in CSS pixels. */
-	width: number;
-	/** Viewport height in CSS pixels. */
-	height: number;
-	/** Device scale factor. */
-	scale?: number;
-	/** Mobile metrics (`meta viewport`, overlay scrollbars), as a phone's browser has. */
-	isMobile?: boolean;
-	/** Touch events and `(pointer: coarse)`. */
-	hasTouch?: boolean;
-}
+import { type EmulationViewport, viewportSchema } from "./viewport";
+
+export type { EmulationViewport } from "./viewport";
+export { viewportSchema } from "./viewport";
 
 /** Coordinates accepted by runtime geolocation emulation. */
 export interface EmulationGeolocation {
@@ -90,28 +81,6 @@ export interface ClipboardReadResult extends ClipboardActionResult {
 	/** Clipboard plain text. */
 	text: string;
 }
-
-/** Viewport keys a browser `open` and `tab.emulate()` take; anything else (Puppeteer's names included) is refused. */
-const viewportInputSchema = type({
-	width: "number",
-	height: "number",
-	"scale?": "number",
-	"deviceScaleFactor?": "number",
-	"isMobile?": "boolean",
-	"hasTouch?": "boolean",
-	"+": "reject",
-});
-
-/**
- * The viewport a browser `open` and `tab.emulate()` take: `{width, height, scale?, isMobile?, hasTouch?}`, with
- * Puppeteer's `deviceScaleFactor` read as `scale`. Other keys are refused.
- */
-export const viewportSchema = viewportInputSchema.pipe(({ deviceScaleFactor, scale, ...rest }): EmulationViewport => {
-	const viewport: EmulationViewport = rest;
-	const resolved = scale ?? deviceScaleFactor;
-	if (resolved !== undefined) viewport.scale = resolved;
-	return viewport;
-});
 
 const emulateOptionsSchema = type({
 	"viewport?": viewportSchema,

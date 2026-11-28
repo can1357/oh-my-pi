@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model, Usage } from "@oh-my-pi/pi-ai";
@@ -11,8 +11,12 @@ import type { AgentMetricsSummary, AgentRef } from "@oh-my-pi/pi-coding-agent/re
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import type { AgentCostSnapshot } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
-import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import type { AgentCostSnapshot } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/agent-hub-projection";
+import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/task/session-observer-registry";
+import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+
+const restoreTheme = currentTheme();
+afterAll(() => setCurrentTheme(restoreTheme));
 
 const root = path.resolve("sessions", "root.jsonl");
 const artifacts = path.resolve("sessions", "root");
@@ -114,7 +118,7 @@ describe("sumSubagentTreeCost", () => {
 			rootSessionFile: root,
 			sessionCosts: new WeakMap(),
 		});
-		expect(cost).toBeCloseTo(0.123, 10);
+		expect(cost.cost).toBeCloseTo(0.123, 10);
 	});
 
 	it("prefers live observer progress over persisted history", () => {
@@ -147,7 +151,7 @@ describe("sumSubagentTreeCost", () => {
 			rootSessionFile: root,
 			sessionCosts: new WeakMap(),
 		});
-		expect(cost).toBeCloseTo(0.25);
+		expect(cost.cost).toBeCloseTo(0.25);
 	});
 
 	it("keeps cumulative direct billing across changing tails and compaction without scanning session statistics", async () => {
@@ -177,12 +181,12 @@ describe("sumSubagentTreeCost", () => {
 				rootSessionFile: root,
 				sessionCosts: new WeakMap<object, AgentCostSnapshot>(),
 			};
-			expect(sumSubagentTreeCost(args)).toBeCloseTo(0.8);
+			expect(sumSubagentTreeCost(args).cost).toBeCloseTo(0.8);
 			const tail = assistant(model, 0, 3);
 			parent.agent.appendMessage(tail);
 			for (let i = 0; i < 3; i++) {
 				tail.usage.output++;
-				expect(sumSubagentTreeCost(args)).toBeCloseTo(0.8);
+				expect(sumSubagentTreeCost(args).cost).toBeCloseTo(0.8);
 			}
 			parentManager.appendMessage({
 				...assistant(model, 0, 3),
@@ -201,7 +205,7 @@ describe("sumSubagentTreeCost", () => {
 			const retained = parentManager.appendMessage(assistant(model, 0.4, 5));
 			parentManager.appendCompaction("Earlier work", undefined, retained, 100, { tokensAfter: 15 });
 			parent.agent.replaceMessages(parentManager.buildSessionContext().messages);
-			expect(sumSubagentTreeCost(args)).toBeCloseTo(1.2);
+			expect(sumSubagentTreeCost(args).cost).toBeCloseTo(1.2);
 			parentManager.appendModelUsage(
 				{
 					purpose: "task-completion-probe",
@@ -214,7 +218,7 @@ describe("sumSubagentTreeCost", () => {
 				{ sessionId: parentManager.getSessionId(), parentId: ownerParent },
 			);
 			expect(parentManager.getBranch().some(entry => entry.type === "model_usage")).toBe(false);
-			expect(sumSubagentTreeCost(args)).toBeCloseTo(1.25);
+			expect(sumSubagentTreeCost(args).cost).toBeCloseTo(1.25);
 			for (const reads of statsReads) expect(reads).not.toHaveBeenCalled();
 		} finally {
 			await Promise.all(sessions.map(session => session.dispose()));
@@ -261,20 +265,77 @@ describe("sumSubagentTreeCost", () => {
 				rootSessionFile: root,
 				sessionCosts: new WeakMap<object, AgentCostSnapshot>(),
 			};
-			expect(sumSubagentTreeCost(args)).toBeCloseTo(0.6);
+			expect(sumSubagentTreeCost(args).cost).toBeCloseTo(0.6);
 			manager.appendMessage(assistant(model, 0.4, 2));
 			await lifecycle.park(worker.id);
 			expect(worker.session).toBeNull();
 			expect(worker.history?.metrics).toBeUndefined();
 			expect(worker.history?.directCost).toBe(1);
-			expect(sumSubagentTreeCost(args)).toBeCloseTo(1);
+			expect(sumSubagentTreeCost(args).cost).toBeCloseTo(1);
 
 			await lifecycle.ensureLive(worker.id);
 			expect(worker.status).toBe("idle");
-			expect(sumSubagentTreeCost(args)).toBeCloseTo(1.3);
+			expect(sumSubagentTreeCost(args).cost).toBeCloseTo(1.3);
 		} finally {
 			await lifecycle.dispose();
 			await resumed?.dispose();
+			auth.close();
+		}
+	});
+
+	it("rolls AI credits up from live and parked children, leaving the root out", async () => {
+		const auth = await AuthStorage.create(":memory:");
+		const registry = new AgentRegistry();
+		const lifecycle = new AgentLifecycleManager(registry);
+		try {
+			const models = new ModelRegistry(auth);
+			const model = models
+				.getAll()
+				.find(candidate => candidate.provider === "github-copilot" && candidate.api === "anthropic-messages");
+			if (!model) throw new Error("Expected a bundled Copilot Messages model");
+			const billed = (nano?: number): AssistantMessage => ({
+				...assistant(model, 0.1, 1),
+				usage: { ...usage(0.1), ...(nano === undefined ? { aiuMissing: true } : { aiu: { nano } }) },
+			});
+			const manager = SessionManager.inMemory();
+			manager.appendMessage(billed(2_000_000_000));
+			// No billing frame arrived: the tree's credits become a lower bound.
+			manager.appendMessage(billed());
+			const worker = registry.register({
+				id: "Worker",
+				displayName: "Worker",
+				kind: "sub",
+				session: liveSession(manager, model, models),
+				sessionFile: path.join(artifacts, "Worker.jsonl"),
+				status: "idle",
+			});
+			lifecycle.adopt(
+				worker.id,
+				{
+					idleTtlMs: 0,
+					revive: async () => {
+						throw new Error("the worker is not revived");
+					},
+				},
+				worker,
+			);
+			const args = {
+				refs: [
+					worker,
+					// A background child from before a restart: its transcript scan's credits.
+					ref("Earlier", { history: { directAiu: { nano: 500_000_000, unknownCalls: 0 } } }),
+					ref("Main", { kind: "main", sessionFile: root, history: { directAiu: { nano: 9e9, unknownCalls: 3 } } }),
+				],
+				rootSessionFile: root,
+				sessionCosts: new WeakMap<object, AgentCostSnapshot>(),
+			};
+			expect(sumSubagentTreeCost(args).aiu).toEqual({ nano: 2_500_000_000, unknownCalls: 1 });
+			// Parking disposes the live session; the park-time snapshot keeps its credits.
+			await lifecycle.park(worker.id);
+			expect(worker.session).toBeNull();
+			expect(sumSubagentTreeCost(args).aiu).toEqual({ nano: 2_500_000_000, unknownCalls: 1 });
+		} finally {
+			await lifecycle.dispose();
 			auth.close();
 		}
 	});

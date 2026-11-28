@@ -6,7 +6,7 @@ import { JsRuntime } from "../../../eval/js/shared/runtime";
 import { readImageHeaderDimensions, resizeImage } from "../../../utils/image-resize";
 import { resolveToCwd } from "../../path-utils";
 import { throwIfAborted } from "../../tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import {
 	type BrowserCaptureResult,
 	type BrowserConsoleEntry,
@@ -1076,7 +1076,8 @@ export class CmuxTab implements InProcessRunTab {
 		return await this.#selectorAction<string[]>(selector, "select", { values: choices });
 	}
 
-	async extract(format: ReadableFormat = "markdown", opts?: ReadableExtractOptions): Promise<string> {
+	async extract(formatArg?: ReadableFormat | null, opts?: ReadableExtractOptions): Promise<string> {
+		const format = formatArg ?? "markdown";
 		const result = (await this.#request("browser.snapshot", { interactive: false })) as CmuxSnapshotResult;
 		const html = typeof result.page?.html === "string" ? result.page.html : "";
 		const url =

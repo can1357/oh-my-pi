@@ -2,8 +2,8 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { getSegmenter } from "@oh-my-pi/pi-tui";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import { cfgOffline } from "../config/auxiliary-model-policy";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue, resolveRoleSelection } from "../config/model-resolver";
@@ -214,7 +214,7 @@ export function maybeStartSharpshooterExtraction(options: {
 		// Count user-perceived characters, not UTF-16 units: `.length` reports 2 for "👍".
 		const minLength = Math.max(MIN_PROMPT_LENGTH_FLOOR, cfgSharpshooterMinPromptLength.get(options.settings));
 		let characters = 0;
-		for (const _grapheme of getSegmenter().segment(trimmedPrompt)) {
+		for (const _grapheme of segmentGraphemes(trimmedPrompt)) {
 			if (++characters >= minLength) break;
 		}
 		if (characters < minLength) return;

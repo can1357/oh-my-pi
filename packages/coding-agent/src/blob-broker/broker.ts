@@ -23,8 +23,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { BlobDestinationId } from "./destinations";
-import { type ExposureConfig, type ExposureKind, probeExposureHealth, startExposure } from "./exposure";
+import { isServeKind } from "./destinations";
+import { type ExposureConfig, probeExposureHealth, startExposure } from "./exposure";
 import type {
 	BlobBrokerDoctorCheck,
 	BlobBrokerProbeResponse,
@@ -62,20 +62,6 @@ export interface BlobBackend {
 	stop(): void;
 }
 
-const SERVE_KINDS: Readonly<Partial<Record<BlobDestinationId, true>>> = {
-	cloudflared: true,
-	ngrok: true,
-	tailscale: true,
-	ssh: true,
-	direct: true,
-	"localhost-run": true,
-	pinggy: true,
-	devtunnel: true,
-	zrok: true,
-	bore: true,
-	"named-cloudflared": true,
-};
-
 /** `url` without userinfo (`user:password@`), for logs and the `omp ps` label. */
 export function redactUrl(url: string): string {
 	try {
@@ -87,16 +73,6 @@ export function redactUrl(url: string): string {
 	} catch {
 		return "(unparseable url)";
 	}
-}
-
-/** Whether a destination exposes the local blob server. */
-export function isServeKind(kind: BlobDestinationId): kind is ExposureKind {
-	return SERVE_KINDS[kind] === true;
-}
-
-/** Whether a configured destination bypasses the local serving path. */
-export function isUploaderKind(kind: BlobDestinationId): boolean {
-	return !isServeKind(kind);
 }
 
 /** Longest render-on-fetch a caller may allow before the fetch answers 410. */

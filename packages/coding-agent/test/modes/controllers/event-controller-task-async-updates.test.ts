@@ -16,15 +16,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
-import { isNativeRendering, setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import type { InteractiveModeContext, PendingTool } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { isSettled } from "@oh-my-pi/pi-tui";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { TranscriptPresenter } from "../../../src/modes/interactive/transcript";
+import { initTheme } from "../../../src/ui/theme/service";
+import { blockText, transcriptText } from "../../helpers/transcript-text";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
-import type { TaskToolDetails } from "@oh-my-pi/pi-tui/tools/task";
-import { type BashToolDetails, formatBackgroundNotice } from "@oh-my-pi/pi-tui/tools/bash";
-import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
+import type { TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/task-details";
+import { type BashToolDetails, formatBackgroundNotice } from "@oh-my-pi/pi-coding-agent/tools/details/bash";
+import type { CoordinationDetails } from "@oh-my-pi/pi-coding-agent/tools/details/wait";
+import { createAssistantMessage } from "../../helpers/agent-session-setup";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 function taskResult(asyncState: "running" | "completed" | "failed" | undefined, text: string) {
@@ -55,12 +59,12 @@ function bashResult(
 }
 
 describe("EventController async update finalization", () => {
-	const sealed: ToolExecutionComponent[] = [];
+	const sealed: PendingTool[] = [];
 
 	beforeEach(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
-		await initTheme();
+		initTheme();
 	});
 
 	afterEach(() => {
@@ -69,17 +73,29 @@ describe("EventController async update finalization", () => {
 		resetSettingsForTest();
 	});
 
+	let native = false;
+
 	function createFixture(isStreaming = false) {
-		const pendingTools = new Map<string, ToolExecutionComponent>();
+		const pendingTools = new Map<string, PendingTool>();
 		const ctx = createInteractiveModeContext({
 			pendingTools,
 			session: { isStreaming: true },
 			viewSession: { isStreaming },
 		});
-		return { controller: new EventController(ctx), pendingTools, chatContainer: ctx.chatContainer, ctx };
+		vi.spyOn(ctx.shell, "native").mockImplementation(() => native);
+		return { controller: new EventController(ctx), pendingTools, ctx };
 	}
 
-	async function startTask(controller: EventController, pendingTools: Map<string, ToolExecutionComponent>) {
+	/** The first tool card in the transcript. */
+	function firstCard(ctx: InteractiveModeContext): PendingTool | undefined {
+		for (const block of ctx.shell.transcript.blocks()) {
+			const entry = ctx.transcriptEntry(block);
+			if (entry?.kind === "tool" && entry.tool.call) return entry.tool;
+		}
+		return undefined;
+	}
+
+	async function startTask(controller: EventController, pendingTools: Map<string, PendingTool>) {
 		await controller.handleEvent({
 			type: "tool_execution_start",
 			toolCallId: "tc-task",
@@ -104,7 +120,7 @@ describe("EventController async update finalization", () => {
 			partialResult: taskResult("completed", "Background task Job1 complete."),
 		});
 		expect(pendingTools.get("tc-task")).toBe(component);
-		expect(component.isTranscriptBlockFinalized()).toBe(false);
+		expect(isSettled(component.block.node)).toBe(false);
 
 		// The call's own result still lands and finalizes the block.
 		await controller.handleEvent({
@@ -115,7 +131,7 @@ describe("EventController async update finalization", () => {
 			isError: false,
 		});
 		expect(pendingTools.has("tc-task")).toBe(false);
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
+		expect(isSettled(component.block.node)).toBe(true);
 	});
 
 	it("finalizes a parked background block when its jobs settle after the end", async () => {
@@ -131,7 +147,7 @@ describe("EventController async update finalization", () => {
 		});
 		// Background: kept tracked so later job frames can update it.
 		expect(pendingTools.get("tc-task")).toBe(component);
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
+		expect(isSettled(component.block.node)).toBe(true);
 
 		await controller.handleEvent({
 			type: "tool_execution_update",
@@ -141,13 +157,13 @@ describe("EventController async update finalization", () => {
 			partialResult: taskResult("completed", "Background task Job1 complete."),
 		});
 		expect(pendingTools.has("tc-task")).toBe(false);
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
+		expect(isSettled(component.block.node)).toBe(true);
 	});
 
 	for (const arrival of ["early", "replay"] as const) {
 		for (const state of ["completed", "failed"] as const) {
 			it(`renders the ${state} outcome after a ${arrival} background task result`, async () => {
-				const { controller, pendingTools, chatContainer, ctx } = createFixture(true);
+				const { controller, pendingTools, ctx } = createFixture(true);
 				ctx.eventController = controller;
 				const helpers = new UiHelpers(ctx);
 				ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
@@ -200,11 +216,9 @@ describe("EventController async update finalization", () => {
 					controller.restorePendingToolResults();
 					ctx.viewSession.agent.getPendingToolResults = () => [];
 				}
-				const component = chatContainer.children.find(
-					(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
-				)!;
+				const component = firstCard(ctx)!;
 				sealed.push(component);
-				component.setExpanded(true);
+				ctx.toolOutputExpanded = true;
 				await controller.handleEvent({ type: "agent_start" });
 				const outcome =
 					state === "completed" ? "Worker produced the final report." : "Worker failed to read its input.";
@@ -215,24 +229,168 @@ describe("EventController async update finalization", () => {
 					args: {},
 					partialResult: taskResult(state, outcome),
 				});
-				expect(Bun.stripANSI(chatContainer.render(120).join("\n"))).toContain(outcome);
+				expect(transcriptText(ctx.shell, 120)).toContain(outcome);
 				expect(pendingTools.has("tc-task")).toBe(false);
-				expect(component.isTranscriptBlockFinalized()).toBe(true);
+				expect(isSettled(component.block.node)).toBe(true);
 			});
 		}
 	}
 
-	it("finalizes a backgrounded Bash block without tracking later job updates", async () => {
-		const { controller, pendingTools } = createFixture();
+	it("keeps later output in scrollback after replaying a running background task", async () => {
+		const { controller, ctx } = createFixture();
+		ctx.eventController = controller;
+		const helpers = new UiHelpers(ctx);
+		ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+		const running = taskResult("running", "Spawned background worker.");
+		const call: AssistantMessage = {
+			...createAssistantMessage(""),
+			timestamp: 1,
+			stopReason: "toolUse",
+			content: [{ type: "toolCall", id: "tc-task", name: "task", arguments: { tasks: [{ task: "work" }] } }],
+		};
+		const result: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "tc-task",
+			toolName: "task",
+			...running,
+			isError: false,
+			timestamp: 2,
+		};
+		ctx.viewSession.activeToolExecutionUpdates = () => [
+			{ type: "tool_execution_update", toolCallId: "tc-task", toolName: "task", args: {}, partialResult: running },
+		];
+		const reply = createAssistantMessage(
+			Array.from({ length: 30 }, (_, i) => `Output paragraph ${i + 1}.`).join("\n\n"),
+		);
+		helpers.renderSessionContext({ messages: [call, result, reply] } as SessionContext);
+		await Promise.resolve();
+
+		const term = createTestTerminal(() => ({}), { surface: ctx.shell.surface, columns: 100, rows: 12 });
+		try {
+			term.render();
+			expect(term.history().join("\n")).toContain("Output paragraph 1.");
+			expect(term.screen().join("\n")).toContain("Output paragraph 30.");
+		} finally {
+			term.dispose();
+		}
+	});
+
+	const jobFrame = (partialResult: BashFrame) => ({
+		type: "tool_execution_update" as const,
+		toolCallId: "tc-bash",
+		toolName: "bash",
+		args: {},
+		partialResult,
+	});
+
+	it("updates backgrounded Bash until a card row, not just its separator, enters scrollback", async () => {
+		const { controller, ctx } = createFixture();
+		const columns = 100;
+		ctx.presentAssistant(createAssistantMessage("Earlier assistant reply.")).finalized.set(true);
+		const transcript = ctx.shell.transcript;
+		const term = createTestTerminal(() => ({ main: transcript.nodes }), { columns, rows: 40 });
+		let replays = 0;
+		transcript.attach({
+			retired: node => term.backend.retired(node),
+			contentInHistory: node => term.backend.contentInHistory(node),
+			replayHistory: () => replays++,
+			redescribe: () => {},
+		});
+		try {
+			const earlierRows = term.rows().length;
+			await controller.handleEvent({
+				type: "tool_execution_start",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				args: { command: "run benchmark" },
+			});
+			await controller.handleEvent({
+				type: "tool_execution_end",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				result: bashResult(formatBackgroundNotice("bash-1", 300)),
+				isError: false,
+			});
+			await controller.handleEvent(jobFrame(bashResult("First sample")));
+			term.render();
+			expect(term.screen().join("\n")).toContain("First sample");
+			expect(term.history()).toEqual([]);
+
+			const cardRows = term.rows().length - earlierRows - 1;
+			term.resize(columns, cardRows);
+			expect(term.history()).toHaveLength(earlierRows + 1);
+			expect(term.history().at(-1)).toBe("");
+			await controller.handleEvent(jobFrame(bashResult("Second sample")));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Second sample");
+
+			const firstCardRow = term.rows()[0];
+			term.resize(columns, cardRows - 1);
+			expect(term.history().at(-1)).toBe(firstCardRow);
+			expect(term.screen().join("\n")).toContain("Second sample");
+			await controller.handleEvent(jobFrame(bashResult("Off-screen sample")));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Second sample");
+			expect(term.screen().join("\n")).not.toContain("Off-screen sample");
+			expect(term.history()).toHaveLength(earlierRows + 2);
+
+			// A rebuild drops the card's rows from scrollback (history is replayed), so it draws the
+			// job's latest frame, the one the frozen card dropped, and follows the job again.
+			const call: AssistantMessage = {
+				...createAssistantMessage(""),
+				stopReason: "toolUse",
+				content: [{ type: "toolCall", id: "tc-bash", name: "bash", arguments: { command: "run benchmark" } }],
+			};
+			const result: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId: "tc-bash",
+				toolName: "bash",
+				...bashResult(formatBackgroundNotice("bash-1", 300)),
+				isError: false,
+				timestamp: call.timestamp + 1,
+			};
+			ctx.eventController = controller;
+			ctx.viewSession.activeToolExecutionUpdates = () => [jobFrame(bashResult("Off-screen sample"))];
+			const helpers = new UiHelpers(ctx);
+			ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+			// What `InteractiveMode.rebuildChatFromMessages` does when no call is live.
+			transcript.retain(new Set());
+			expect(replays).toBe(1);
+			helpers.renderSessionContext({ messages: [call, result] } as SessionContext);
+			const rebuiltCard = ctx.pendingTools.get("tc-bash")!;
+			term.render();
+			expect(term.history()).toEqual([]);
+			expect(term.screen().join("\n")).toContain("Off-screen sample");
+			expect(term.screen().join("\n")).not.toContain("Second sample");
+
+			// The rebuilt card follows the job again, and freezes again once its content scrolls off.
+			await controller.handleEvent(jobFrame(bashResult("Sample after rebuild")));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Sample after rebuild");
+			expect(term.backend.contentInHistory(rebuiltCard.block.node)).toBe(true);
+			await controller.handleEvent(jobFrame(bashResult("Dropped after rebuild", "completed", 0)));
+			term.render();
+			expect(term.screen().join("\n")).toContain("Sample after rebuild");
+			expect(term.screen().join("\n")).not.toContain("Dropped after rebuild");
+		} finally {
+			transcript.attach(undefined);
+			term.dispose();
+		}
+	});
+
+	it("reports plain-terminal background job results to presenters as final, as omp's own card draws them", async () => {
+		const { controller } = createFixture();
+		const asked = vi.spyOn(TranscriptPresenter.prototype, "presentationOf");
+		const lastPartial = (text: string) =>
+			asked.mock.calls
+				.flatMap(([block]) => (block.type === "toolCall" ? [block] : []))
+				.findLast(block => JSON.stringify(block.result?.content).includes(text))?.isPartial;
 		await controller.handleEvent({
 			type: "tool_execution_start",
 			toolCallId: "tc-bash",
 			toolName: "bash",
-			args: { command: "sleep 30" },
+			args: { command: "run benchmark" },
 		});
-		const component = pendingTools.get("tc-bash")!;
-		sealed.push(component);
-
 		await controller.handleEvent({
 			type: "tool_execution_end",
 			toolCallId: "tc-bash",
@@ -240,20 +398,40 @@ describe("EventController async update finalization", () => {
 			result: bashResult(formatBackgroundNotice("bash-1", 300)),
 			isError: false,
 		});
+		// A viewport-only Bash card draws its frames as static results; reporting them partial would flip
+		// the presentation when the card freezes in scrollback and rewrite rows history already holds.
+		await controller.handleEvent(jobFrame(bashResult("Running sample")));
+		expect(lastPartial("Running sample")).toBe(false);
 
-		expect(pendingTools.has("tc-bash")).toBe(false);
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-eval",
+			toolName: "eval",
+			args: { language: "py", code: "run()" },
+		});
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-eval",
+			toolName: "eval",
+			result: {
+				content: [{ type: "text", text: "Eval backgrounded" }],
+				details: { async: { state: "running", jobId: "eval-1", type: "eval" } },
+			},
+			isError: false,
+		});
+		// A plain-terminal eval card takes no job frames: its running result is all it will show.
+		expect(lastPartial("Eval backgrounded")).toBe(false);
 	});
 
 	describe("native rendering", () => {
-		let wasNative = false;
 		beforeEach(() => {
-			wasNative = isNativeRendering();
-			setNativeRendering(true);
+			native = true;
 		});
-		afterEach(() => setNativeRendering(wasNative));
+		afterEach(() => {
+			native = false;
+		});
 
-		async function backgroundBash(controller: EventController, pendingTools: Map<string, ToolExecutionComponent>) {
+		async function backgroundBash(controller: EventController, pendingTools: Map<string, PendingTool>) {
 			await controller.handleEvent({
 				type: "tool_execution_start",
 				toolCallId: "tc-bash",
@@ -265,15 +443,7 @@ describe("EventController async update finalization", () => {
 			return component;
 		}
 
-		const jobFrame = (partialResult: BashFrame) => ({
-			type: "tool_execution_update" as const,
-			toolCallId: "tc-bash",
-			toolName: "bash",
-			args: {},
-			partialResult,
-		});
-
-		const rendered = (component: ToolExecutionComponent) => JSON.stringify(component.describe());
+		const rendered = (component: PendingTool) => blockText(component.block);
 
 		it("keeps filling a backgrounded Bash card with its job's output until the job settles", async () => {
 			const { controller, pendingTools } = createFixture();
@@ -293,9 +463,10 @@ describe("EventController async update finalization", () => {
 
 			await controller.handleEvent(jobFrame(bashResult("Benchmark 1\nBenchmark 2\nSummary", "failed", 1)));
 			expect(rendered(component)).toContain("Summary");
-			expect(rendered(component)).toContain("exit 1");
+			// The failed job's frame is the call's result.
+			expect(component.call?.status()).toBe("error");
 			expect(pendingTools.has("tc-bash")).toBe(false);
-			expect(component.isTranscriptBlockFinalized()).toBe(true);
+			expect(isSettled(component.block.node)).toBe(true);
 		});
 
 		it("seals a backgrounded Bash card as cancelled when its job is killed, keeping its output", async () => {
@@ -308,13 +479,13 @@ describe("EventController async update finalization", () => {
 				result: bashResult(formatBackgroundNotice("bash-1", 300)),
 				isError: false,
 			});
-			await controller.handleEvent(jobFrame(bashResult("[Command cancelled]\nBenchmark 1", "cancelled")));
+			await controller.handleEvent(jobFrame(bashResult("[cancelled]\nBenchmark 1", "cancelled")));
 
 			expect(rendered(component)).toContain("Benchmark 1");
-			expect(rendered(component)).toContain('"Cancelled"');
+			expect(component.call?.status()).toBe("cancelled");
 			expect(rendered(component)).not.toContain("In background");
 			expect(pendingTools.has("tc-bash")).toBe(false);
-			expect(component.isTranscriptBlockFinalized()).toBe(true);
+			expect(isSettled(component.block.node)).toBe(true);
 		});
 
 		it("settles a Bash card whose job finished before the call returned", async () => {
@@ -332,12 +503,12 @@ describe("EventController async update finalization", () => {
 			expect(rendered(component)).toContain("all done");
 			expect(rendered(component)).not.toContain("In background");
 			expect(pendingTools.has("tc-bash")).toBe(false);
-			expect(component.isTranscriptBlockFinalized()).toBe(true);
+			expect(isSettled(component.block.node)).toBe(true);
 		});
 	});
 
 	it("settles an early wait result while another reported job remains running", async () => {
-		const { controller, pendingTools, chatContainer } = createFixture();
+		const { controller, pendingTools, ctx } = createFixture();
 		const details: CoordinationDetails = {
 			op: "wait",
 			jobs: [
@@ -358,43 +529,43 @@ describe("EventController async update finalization", () => {
 			toolName: "wait",
 			args: {},
 		});
-		const component = chatContainer.children.find(
-			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
-		)!;
+		const component = firstCard(ctx)!;
 		sealed.push(component);
-		component.setExpanded(true);
-		expect(Bun.stripANSI(chatContainer.render(120).join("\n"))).toContain("Job1 Finished work");
+		ctx.toolOutputExpanded = true;
+		expect(transcriptText(ctx.shell, 120)).toContain("Job1 Finished work");
 		expect(pendingTools.has("tc-wait")).toBe(false);
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
+		expect(isSettled(component.block.node)).toBe(true);
 	});
 
 	it("seals a foreground card orphaned before the next agent turn", async () => {
-		const { controller, chatContainer, ctx } = createFixture();
+		const { controller, ctx } = createFixture();
 		await controller.handleEvent({
 			type: "tool_execution_start",
 			toolCallId: "tc-stale",
 			toolName: "wait",
 			args: {},
 		});
-		const component = chatContainer.children.find(
-			(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
-		);
+		const component = firstCard(ctx);
 		if (!component) throw new Error("expected stale wait card");
 		sealed.push(component);
 		// Model a dropped live completion: the timeline still owns the card but
 		// its pending-map entry is gone, so agent_end cannot find it.
 		ctx.pendingTools.delete("tc-stale");
-		const later = new ToolExecutionComponent("bash", { command: "echo done" }, {}, undefined, ctx.ui, process.cwd());
+		const later = ctx.presentToolCall({
+			name: "bash",
+			args: { command: "echo done" },
+			tool: undefined,
+			id: "tc-later",
+			cwd: process.cwd(),
+		});
 		sealed.push(later);
-		later.updateResult({ content: [{ type: "text", text: "done" }] });
-		chatContainer.addChild(later);
+		later.updateResult({ content: [{ type: "text", text: "done" }] }, false, "tc-later");
 
-		expect(component.isTranscriptBlockFinalized()).toBe(false);
-		expect(chatContainer.peekFinalizedBatch(80, 0)).toBeUndefined();
+		// The live card at the frontier pins retirement of everything after it.
+		expect(isSettled(component.block.node)).toBe(false);
 		await controller.handleEvent({ type: "agent_start" });
 
-		expect(component.isTranscriptBlockFinalized()).toBe(true);
-		expect(chatContainer.peekFinalizedBatch(80, 0)?.rows).toBeDefined();
+		expect(isSettled(component.block.node)).toBe(true);
 	});
 
 	it("keeps a parked task card available across the next agent turn", async () => {

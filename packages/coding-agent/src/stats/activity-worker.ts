@@ -58,9 +58,6 @@ async function handleLoad(id: string): Promise<void> {
 function handle(data: unknown): void {
 	const message = data as StatsActivityWorkerInbound;
 	switch (message.type) {
-		case "ping":
-			send({ type: "pong", id: message.id });
-			return;
 		case "load":
 			void handleLoad(message.id);
 			return;

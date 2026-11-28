@@ -10,12 +10,8 @@ import type {
 	ExtensionContext,
 } from "../../../../extensibility/extensions/types";
 import type { SendUserMessageOptions } from "../../../../session/agent-session";
-import { splitTextLines } from "@oh-my-pi/pi-tui/overlays/annotation-overlay";
-import type {
-	CodeReviewAnnotation,
-	TextReviewAnnotation,
-	TextReviewSource,
-} from "@oh-my-pi/pi-tui/overlays/annotation-types";
+import { splitTextLines } from "../../../../modes/view-model/overlays/annotation-overlay";
+import type { CodeReviewAnnotation, TextReviewAnnotation, TextReviewSource } from "./annotation-types";
 import { fetchPrReviewTarget, parseReviewPrRef } from "../review";
 import { assertReviewablePatchSize, buildCodeReviewFeedback } from "../review/prompt";
 import {
@@ -24,10 +20,9 @@ import {
 	type ResolvedReviewTarget,
 	readUncommittedReviewTarget,
 } from "../review/target";
-import { promptTextReviewSource, readFileTextReviewSource } from "./direct-source";
+import { latestAssistantTextReviewSource, promptTextReviewSource, readFileTextReviewSource } from "./direct-source";
 import { showCodeReviewOverlay, showTextReviewOverlay } from "./fullscreen";
 import { buildTextReviewPrompt } from "./text-review";
-import { latestAssistantTextReviewSource } from "./text-source";
 
 /** The slice of an extension context the annotation API reads. */
 export type AnnotationContext = Pick<ExtensionContext, "ui" | "mode" | "hasUI" | "cwd" | "sessionManager" | "isIdle">;

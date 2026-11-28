@@ -16,8 +16,8 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { TurnRecovery } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
 
 let tempDir: TempDir;
 let authStorage: AuthStorage;

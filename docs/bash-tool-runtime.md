@@ -10,7 +10,7 @@ There are two different bash execution surfaces in coding-agent:
 
 1. **Tool-call surface** (`toolName: "bash"`): used when the model calls the bash tool.
    - Entry point: `BashTool.execute()`.
-   - Parameters include `command`, optional `timeout`, `cwd`, `pty`, and, when `async.enabled` is true, `async`. With `launch.enabled` (default `true`), `name` and `ready` select managed service execution. `notify` is present with either. There is no model-facing `env` parameter.
+   - Parameters include `command`, optional `timeout`, `pty`, and, when `async.enabled` is true, `async`. With `launch.enabled` (default `true`), `name` and `ready` select managed service execution. `notify` is present with either. There is no model-facing `env` parameter.
 2. **User bang-command surface** (`!cmd` from interactive input or RPC `bash` command): session-level helper path.
    - Entry point: `AgentSession.executeBash()`.
 
@@ -25,7 +25,7 @@ Set `bash.enabled: false` in settings to remove the model-facing `bash` tool fro
 `BashTool.execute()` currently handles input as follows:
 
 - trims service names and normalizes empty readiness fields,
-- extracts a leading single-line `cd <path> && ...` into `cwd` when `cwd` was not supplied, unless the path needs shell expansion,
+- extracts a leading single-line `cd <path> && ...` into the working directory, unless the path needs shell expansion,
 - treats a nonblank `notify` regex without a service name as `async: true`, and rejects either when `async.enabled` is false,
 - rejects a `notify` regex that does not compile, or a session that cannot take its notices, before running anything,
 - passes `notify` with a service name to the launch broker, which reports the service's matching output,
@@ -33,7 +33,7 @@ Set `bash.enabled: false` in settings to remove the model-facing `bash` tool fro
 - ignores `async: true` and any supplied `timeout` in named-service mode, adding a notice for each; readiness uses `ready.timeout`,
 - ignores `ready` without a nonblank `name`, adding a notice.
 
-There are no structured `head` or `tail` parameters. Command text is never rewritten for internal URLs. The embedded shell and its in-process coreutils resolve `scheme://` paths through an injected async filesystem (`InternalUrlFilesystem`) at the moment of each operation, so URLs built from variables, redirections, globs, `cd`, and a URL `cwd` all work. File-backed schemes operate on their backing files, and `ln -s` from one to a host path stores the backing file's path; rendered resources are read-only. An external program has no view of that filesystem, so the program path, every argument (`skill://example-skill/tool.py`, `--index=skill://example-skill/data`), and the working directory it is spawned with are translated to the files they alias. Translation covers whole arguments and `--option=URL` values only; a bare scheme root (`local://`), a root followed by words (`skill:// external command`), and URLs embedded in other text stay literal, as do schemes the filesystem does not route (`https://`, `s3://`) and arguments naming a scheme that aliases no file (`omp://`, `history://`). A URL the provider rejects (an unknown skill, a path escaping its root) fails the command with the provider's error. External programs cannot start in a scheme that aliases no file, nor in a read-only one (`skill://`), since the child could write anywhere under its working directory; read-only is otherwise enforced only for builtins, so an external program handed a translated read-only path can still write it. `xargs`, `find -exec`/`-execdir`, and `ifne` run their commands through the shell's own dispatch in a subshell, so `… | xargs cat` reaches the in-process `cat` and its URL arguments. The finite-command routes also load configured direnv/devenv changes. SDK callers of the executor can supply an `env` overlay; the bash tool itself uses shell assignments for per-command variables.
+There are no structured `head` or `tail` parameters. Command text is never rewritten for internal URLs. The embedded shell and its in-process coreutils resolve `scheme://` paths through an injected async filesystem (`InternalUrlFilesystem`) at the moment of each operation, so URLs built from variables, redirections, globs, and `cd` into a URL all work. File-backed schemes operate on their backing files, and `ln -s` from one to a host path stores the backing file's path; rendered resources are read-only. An external program has no view of that filesystem, so the program path, every argument (`skill://example-skill/tool.py`, `--index=skill://example-skill/data`), and the working directory it is spawned with are translated to the files they alias. Translation covers whole arguments and `--option=URL` values only; a bare scheme root (`local://`), a root followed by words (`skill:// external command`), and URLs embedded in other text stay literal, as do schemes the filesystem does not route (`https://`, `s3://`) and arguments naming a scheme that aliases no file (`omp://`, `history://`). A URL the provider rejects (an unknown skill, a path escaping its root) fails the command with the provider's error. External programs cannot start in a scheme that aliases no file, nor in a read-only one (`skill://`), since the child could write anywhere under its working directory; read-only is otherwise enforced only for builtins, so an external program handed a translated read-only path can still write it. `xargs`, `find -exec`/`-execdir`, and `ifne` run their commands through the shell's own dispatch in a subshell, so `… | xargs cat` reaches the in-process `cat` and its URL arguments. The finite-command routes also load configured direnv/devenv changes. SDK callers of the executor can supply an `env` overlay; the bash tool itself uses shell assignments for per-command variables.
 
 ### Approval policy
 
@@ -85,7 +85,7 @@ Named-service calls omit the rules whose suggested tool is `bash`, so service co
 
 ## 3) CWD validation and timeout resolution
 
-A host `cwd` is resolved relative to session cwd (`resolveToCwd`) and validated via filesystem `stat`. A recognized internal-URL cwd is normalized and validated through `InternalUrlFilesystem`; the embedded shell enters it, and a service's or pty command's shell process starts in the session cwd and enters it from there. Client-terminal routing is skipped for a virtual cwd.
+A hoisted host `cd` target is resolved relative to session cwd and validated via filesystem `stat`. A recognized internal-URL target is normalized and validated through `InternalUrlFilesystem`; the embedded shell enters it, and a service's or pty command's shell process starts in the session cwd and enters it from there. Client-terminal routing is skipped for a virtual cwd.
 
 - missing path -> `ToolError("Working directory does not exist: ...")`
 - non-directory -> `ToolError("Working directory is not a directory: ...")`
@@ -128,6 +128,14 @@ A nonblank `name` routes to `startService()` before finite-command timeout, asyn
 - `read proc://<name>` inspects state and logs; `write proc://<name>` sends input (empty content sends Enter), `write proc://<name>/kill` stops it, and `/mode` accepts `persist`, `session`, or `detached`.
 
 The result carries `details.service` (`name`, `state`, `ready`, `timedOut`, optional `pid`), not finite-command timeout/async metadata.
+
+### The `o2ctl services` shell command
+
+While services can launch, the embedded shell also has an `o2ctl` command (`src/launch/o2ctl-command.ts`, installed with the session's tool commands for each run). Its `services` namespace reaches the same project-scoped registry as `name`; every other `o2ctl` namespace is reserved:
+
+- `o2ctl services add <name> <pid|%job>` adopts a process that is already running (`cmd &`, `nohup cmd &`) as service `<name>` without restarting it (`adoptService()`; the daemon's `open` with `adopt: <pid>`). A `%job` spec names a job of the calling shell that runs a program (the shell passes the program's pid with the request, as `jobs -x` would substitute it). The service is owned by the session and held like a started one (session lifetime, or persistent under `launch.persist`); it is never restarted. The daemon watches it by pid like a detached service, and when its stdout (else stderr) is a regular file (`nohup.out`, `> log`), that file is linked in as the service's output log, so `read proc://<name>` and the service output view show it. Fails when the name belongs to a live service, the pid is not a live process of the user, or it is already a service's process.
+- `o2ctl services ls` lists the project's services (`listServices()`); `o2ctl services stop <name>` stops one (`stopService()`). An adopted service is stopped by SIGTERM to its process tree, then SIGKILL to its whole process family; its process group is not signalled, as it need not lead one.
+- The command exists only in the embedded shell, not in a `pty` command, a service's own shell, or the user's shell.
 
 ## Non-interactive execution engine (`executeBash`)
 
@@ -180,7 +188,13 @@ At each call, the executor loads settings shell config (`shell`, `env`, optional
 
 Unless `bash.direnv` is `"off"`, preflight attempts to load the cwd's direnv/devenv changes within `bash.direnvLoadTimeoutMs`, additionally bounded by a positive command timeout. Direnv-provided variables are merged below explicit caller `env`; safe variables removed by direnv are prepended as `unset -v ...`. ACP-terminal and PTY routes run the same preflight before their backend; the non-PTY executor runs it internally. Every `BashTool` route passes the session identity (`PI_SESSION_ID`, and `PI_SESSION_FILE` as an absolute path or empty when unpersisted) and the call's `PI_TOOL_CALL_ID` as caller `env`, read with the session ID when the call starts; it is not part of the shell session key, so it never starts a new shell.
 
-Successful exports retain their loaded environment and `DIRENV_*` state per `.envrc` directory. Each call still runs `direnv export json` to check direnv's watched inputs and authorization state, but an unchanged environment avoids re-running `.envrc` and devenv setup. OMP returns the complete diff relative to its process environment. A change to that process environment, or to the nanosecond timestamp, size, or existence of the `.envrc` or any direnv-watched path (including direnv's allow/deny files), restarts the load from a clean baseline; so does a warm export that reports any change. This cache does not modify OMP's process environment.
+Preflight uses the embedded direnv builtin, even when `PI_DISABLE_UUTILS_BUILTINS` disables utilities in the command shell. It reads `.envrc` (or `.env` with `load_dotenv = true` in `direnv.toml`) without looking for `direnv` on `PATH`. The builtin honors direnv's XDG allow and deny files and configured whitelists; an explicit deny wins. As in [upstream direnv](https://github.com/direnv/direnv/blob/master/internal/cmd/rc.go), `whitelist.prefix` matches a string prefix; end it with `/` to trust only a directory's contents. Manage approvals with `direnv allow` and `direnv deny` in the embedded shell or a regular direnv installation.
+
+Evaluation uses the exact root file bytes checked against the allow list. Replacing the file during user direnv startup does not change what runs: the current load uses the approved bytes, with the original `.envrc` source name and working directory, and the next load checks the new bytes. The same rule applies when `.env` is the root file.
+
+The standard library includes `PATH_add`, `dotenv`, `watch_file`, `require_allowed`, `source_env`, and other direnv helpers. As with direnv, an approved `.envrc` can source other scripts and run subprocesses with your ordinary permissions; approval is not a sandbox. `use nix`, `use flake`, and devenv still require their respective tools, and custom helpers may have their own dependencies.
+
+Successful environments are cached per environment file. Process environment changes, changes to direnv configuration, and changes to watched files (including same-second edits and removal or creation of allow/deny files) invalidate the cache. Preflight applies the diff without changing OMP's own process environment.
 
 If the selected shell includes `bash`, it attempts `getOrCreateSnapshot()`:
 
@@ -352,7 +366,7 @@ This table covers finite-command execution; named-service routing is described s
 ## Implementation files
 
 - [`src/tools/bash.ts`](../packages/coding-agent/src/tools/bash.ts) — tool entrypoint, normalization/interception, service/async/PTY selection, result/error mapping.
-- [`packages/tui/src/tools/bash.ts`](../packages/tui/src/tools/bash.ts) — bash tool renderer and result detail types.
+- [`packages/coding-agent/src/ui/tools/bash.tsx`](../packages/coding-agent/src/ui/tools/bash.tsx) — bash tool renderer (detail types: `packages/coding-agent/src/tools/details/bash.ts`).
 - [`src/launch/services.ts`](../packages/coding-agent/src/launch/services.ts) — named-service validation and project-broker supervision.
 - [`src/internal-urls/proc-protocol.ts`](../packages/coding-agent/src/internal-urls/proc-protocol.ts) — service/job inspection, input, stop, and lifetime controls.
 - [`src/tools/bash-pty-selection.ts`](../packages/coding-agent/src/tools/bash-pty-selection.ts) — `canUseInteractiveBashPty` predicate for choosing the local PTY overlay.
@@ -362,12 +376,12 @@ This table covers finite-command execution; named-service routing is described s
 - [`src/exec/non-interactive-env.ts`](../packages/coding-agent/src/exec/non-interactive-env.ts) — non-interactive child-process env defaults (`buildNonInteractiveEnv`) used by the non-PTY executor.
 - [`src/exec/direnv.ts`](../packages/coding-agent/src/exec/direnv.ts) — direnv/devenv environment loading used by executor preflight.
 - [`src/tools/bash-interactive.ts`](../packages/coding-agent/src/tools/bash-interactive.ts) — PTY runtime, overlay UI, input normalization, and interactive `TERM` setup.
-- [`packages/tui/src/tools/streaming-output.ts`](../packages/tui/src/tools/streaming-output.ts) — `OutputSink`, `TailBuffer`, truncation/artifact spill, and summary metadata.
+- [`packages/coding-agent/src/tools/streaming-output.ts`](../packages/coding-agent/src/tools/streaming-output.ts) — `OutputSink`, `TailBuffer`, truncation/artifact spill, and summary metadata.
 - [`src/tools/output-meta.ts`](../packages/coding-agent/src/tools/output-meta.ts) — settings-to-output-budget helpers.
-- [`packages/tui/src/tools/output-meta.ts`](../packages/tui/src/tools/output-meta.ts) — truncation metadata and recovery notices.
+- [`packages/coding-agent/src/tools/output-meta.ts`](../packages/coding-agent/src/tools/output-meta.ts) — truncation metadata and recovery notices.
 - [`src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts) — session-level `executeBash` surface.
 - [`src/session/bash-runner.ts`](../packages/coding-agent/src/session/bash-runner.ts) — bang-command execution, result ownership, message recording, and abort lifecycle.
-- [`packages/tui/src/chat/bash-execution.ts`](../packages/tui/src/chat/bash-execution.ts) — interactive `!` command execution component.
+- [`packages/coding-agent/src/ui/transcript/exec-run.tsx`](../packages/coding-agent/src/ui/transcript/exec-run.tsx) — interactive `!` command execution component.
 - [`src/modes/controllers/command-controller.ts`](../packages/coding-agent/src/modes/controllers/command-controller.ts) — wiring for interactive `!` command UI stream/update completion.
 - [`src/modes/rpc/rpc-mode.ts`](../packages/coding-agent/src/modes/rpc/rpc-mode.ts) — RPC `bash` and `abort_bash` command surface.
 - [`src/internal-urls/local-protocol.ts`](../packages/coding-agent/src/internal-urls/local-protocol.ts) — `local://` resolution, including spills (`local://<id>.log`).

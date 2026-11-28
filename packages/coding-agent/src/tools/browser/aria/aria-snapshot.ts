@@ -1,5 +1,5 @@
 import type { ElementHandle, Frame, JSHandle, Page } from "puppeteer-core";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../../tool-errors";
 import {
 	type AriaHrefMap,
 	collectAriaSnapshotRefs,
@@ -122,6 +122,14 @@ export function assertSelectorString(selector: unknown): asserts selector is str
 					  !Object.values(selector).some(value => typeof value === "function")
 					? "an options object (the selector comes first; to wait for time or a condition, use wait(ms | predicate) inside tab.run)"
 					: "an element handle";
+	} else if (selector === null || selector === undefined) {
+		kind = "no selector (null/undefined passed)";
+	} else if (typeof selector === "number") {
+		kind =
+			"a number (an observe() id goes through tab.id(n); to pause for milliseconds, sleep in the cell with await Bun.sleep(ms) or call wait(ms) inside tab.run)";
+	} else if (typeof selector === "function") {
+		kind =
+			"a function (to wait for a page condition, call page.waitForFunction(fn) inside tab.run, or use tab.waitForText/tab.waitForUrl)";
 	} else {
 		kind = `a ${typeof selector}`;
 	}

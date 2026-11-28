@@ -131,9 +131,11 @@ export type TspText = string | readonly TspSpan[];
 
 /**
  * What a pointer gesture on a node does. `zoom` shows an `image` (and the images
- * beside it) large in the terminal's viewer; it is an image's click by default.
+ * beside it) large in the terminal's viewer; it is an image's click by default. `annotate` opens an `image`
+ * (with a `blob`) in the terminal's annotator when `hello` lists `"annotate"`; Done sends the annotated
+ * picture back as a `change` event.
  */
-export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | (string & {});
+export type TspAction = "toggle" | "copy" | "open" | "zoom" | "select" | "activate" | "annotate" | (string & {});
 
 /**
  * One entry of `actions.menu` or `actions.hold`: an action name (labeled from it), `"-"` a separator, a dim
@@ -172,6 +174,8 @@ export interface TspCommonProps {
 		dblclick?: TspAction;
 		menu?: readonly TspMenuEntry[];
 		hold?: readonly TspMenuEntry[];
+		/** Runs on every press starting outside the node (and outside the dock's composer). */
+		outside?: TspAction;
 	};
 	title?: string;
 	/** Accessible name for icon-only or visual-only nodes. */
@@ -289,6 +293,10 @@ export interface TspCardProps {
 	inset?: boolean;
 	/** `bare`: no ring, fill or insets — a plain head row over the body, for grouped/compact presentations inside another frame. */
 	variant?: "bare";
+	/** An attachment chip (`omp.composer.chip`): what it attaches. */
+	kind?: "image" | "video" | "paste";
+	/** A pasted-text chip (`omp.composer.chip`): the full pasted text. */
+	expansion?: string;
 }
 export interface TspSectionProps {
 	head?: TspText;
@@ -306,6 +314,11 @@ export interface TspSpacerProps {
 export interface TspTextProps {
 	text?: string;
 	spans?: readonly TspSpan[];
+	/**
+	 * What a cost text bills, by plan: dollars paid and subscription use. A host short of room (a
+	 * phone) shows one total from these in place of the text.
+	 */
+	spend?: { readonly paid: number; readonly subscription: number };
 	wrap?: TspWrap;
 	truncate?: TspTruncate;
 	lines?: number;
@@ -855,19 +868,30 @@ export interface TspPickerProps {
 	noun?: string;
 	size?: "md" | "lg" | "screen";
 	/**
-	 * Where the sheet sits: absent, its size's place in the layer; `"composer"`, rising from the program's composer
-	 * (its `composerPart: "composer"` column), left edges aligned — a drop-up for a picker acting on the draft, such as
-	 * the model switcher. Placed as if absent while no composer is drawn, and on a phone.
+	 * False for a modeless inline palette (no backdrop dim, editor retains keyboard focus, hides when pane/window
+	 * blurs). Default: true.
 	 */
-	anchor?: "composer";
+	modal?: boolean;
 	/**
-	 * Where the search sits: the head (default), or `"list"`: no head row, the query leading the column heads' row
-	 * (count and esc gone), head actions atop a `rail`. Ignored on a phone.
+	 * Where the sheet sits: absent, its size's place in the layer; `"composer"`, rising from the program's composer
+	 * (its `composerPart: "composer"` column), left edges aligned; `{ caret }`, rising from the composer aligned near
+	 * that editor's caret clamped to the composer bounds. Placed as if absent while no composer is drawn, and on a phone.
 	 */
-	search?: "head" | "list";
+	anchor?: "composer" | { caret: string };
+	/**
+	 * Where the search sits: the head (default), `"list"` (inline in the list head), or `"none"` (no search box;
+	 * query lives in the composer). Ignored on a phone.
+	 */
+	search?: "head" | "list" | "none";
 	/** How tall rows run: regular (default), or `"snug"`: 30px rows and 26px group headers, the chrome tightened to match. Ignored on a phone. */
 	density?: "regular" | "snug";
-	layout?: "rows" | "cards" | "timeline" | "tree";
+	/**
+	 * How items are laid out. `"tiles"`: one left-to-right strip of `icon` + `label` tiles, the other
+	 * facts dim after the label; the first column's fact is the tile's short name, standing in for the
+	 * label when the strip is too narrow, and it leads a description line under the strip that shows
+	 * the lit (`selected`) or hovered tile's `detail`.
+	 */
+	layout?: "rows" | "cards" | "timeline" | "tree" | "tiles";
 	/** The program's search text (keys stay the program's); `null` hides the field. */
 	query?: string | null;
 	/** Caret as a UTF-16 offset into `query`; absent puts it at the end. */
@@ -875,7 +899,7 @@ export interface TspPickerProps {
 	placeholder?: string;
 	scopes?: readonly TspPickerScope[];
 	scope?: string;
-	/** How `scopes` draw: a labeled column (default), or `"rail"`: icons only, label and count as the tooltip, kept on narrow sheets. A `group` change draws a separator. */
+	/** How `scopes` draw: a labeled column (default) or `"rail"` (icons only). A `group` change draws a separator. */
 	scopeStyle?: "column" | "rail";
 	tabs?: readonly { id: string; label: TspText; count?: number }[];
 	tab?: string;
@@ -982,8 +1006,6 @@ export interface TspPrefsProps {
 	lead?: string;
 	/** The program's search text; non-empty switches the page to search results. */
 	query?: string;
-	/** Caret as a UTF-16 offset into `query` while the program's search field has it; absent: no caret. */
-	cursor?: number;
 	sections: readonly TspPrefsSection[];
 	/** Row with keyboard focus (the program's selection). */
 	focus?: string | null;
@@ -1120,11 +1142,12 @@ export interface TspMeterMark {
 	icon?: string;
 }
 
-/** A value drawn as a bar, ring or block grid (§8.2): context %, usage windows, agent context. */
+/** A value drawn as a bar, ring, block grid or wave (§8.2): context %, usage windows, agent context, a call's voice. */
 export interface TspMeterProps {
 	/** 0–1, or null for unknown. */
 	value: number | null;
-	style?: "bar" | "ring" | "blocks";
+	/** `wave`: bars that swing with the value, animated by the host (a live voice or audio level); terminals and older hosts draw a bar. */
+	style?: "bar" | "ring" | "blocks" | "wave";
 	/** `blocks` only: exactly this many cells in one row, `round(value × steps)` of them filled (e.g. the effort chip's fallback meter). */
 	steps?: number;
 	/** Stacked parts instead of one fill (context breakdown); values sum to ≤ 1. */
@@ -1367,6 +1390,17 @@ export type TspReply =
 	  }
 	| { r: "blobs"; have: readonly string[] };
 
+/**
+ * An encoded picture a terminal hands back (an annotated `image`): standard base64 `data` of a
+ * `mime` image, `w`×`h` pixels.
+ */
+export interface TspPicture {
+	mime: "image/png" | "image/jpeg";
+	data: string;
+	w: number;
+	h: number;
+}
+
 /** Verb `e`: terminal → program events. */
 export type TspEvent =
 	| { ev: "ack"; sf: string; s: number }
@@ -1376,7 +1410,11 @@ export type TspEvent =
 	/** The terminal's features changed (a setting: Tern's Agents tray drops `tray`); the list replaces `hello.features`. */
 	| { ev: "features"; features: readonly string[] }
 	| { ev: "visible"; sf?: string; visible: boolean }
+	/** The window reads and shows this pane's checkout (branch, changes, pull request) itself: show them from `shown` and read none of it yourself while `true`. */
+	| { ev: "checkout"; sf?: string; shown: boolean }
 	| { ev: "toggle"; sf: string; id: string; key?: string; collapsed: boolean }
+	/** Menu opening/closing; a toggle of a named sub-item also reports its id. */
+	| { ev: "toggle"; sf: string; id: string; open: boolean; item?: string }
 	| { ev: "select"; sf: string; id: string; item: string }
 	| { ev: "activate"; sf: string; id: string; item: string }
 	/** A click action; a `menu` check or radio row adds its new `checked` state. */
@@ -1397,6 +1435,12 @@ export type TspEvent =
 			item: string;
 			value: boolean | number | string | readonly string[] | null;
 	  }
+	/**
+	 * The user finished annotating `image` node `id` (one whose `actions.click` is `"annotate"`; sent only
+	 * on Done, only when `hello` lists `"annotate"`): `value` is the annotated picture, at its new size (a crop
+	 * makes it smaller).
+	 */
+	| { ev: "change"; sf: string; id: string; value: TspPicture }
 	/** The user edited a `doc` (~300 ms after typing pauses, and when editing ends): `text` is its full new source. */
 	| { ev: "change"; sf: string; id: string; text: string }
 	/**
@@ -1438,4 +1482,5 @@ export type TspEvent =
 	 */
 	| { ev: "focus"; sf: string; id: string }
 	| { ev: "error"; sf?: string; s?: number; op?: number; msg: string }
+	/** A lost surface, or (scoped to `sf`) settled main children dropped under the retention budget. */
 	| { ev: "gone"; sf?: string; ids: readonly string[] };

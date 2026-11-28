@@ -27,7 +27,6 @@
 	},
 	"dependencies": {
 		"@oh-my-pi/collab-web": "workspace:*",
-		"@oh-my-pi/pi-tui": "catalog:",
 		"@oh-my-pi/pi-utils": "catalog:",
 		"@oh-my-pi/pi-wire": "catalog:",
 		"gifenc": "1.0.3",
@@ -37,7 +36,7 @@
 	},
 	"devDependencies": {
 		"@types/bun": "catalog:",
-		"@types/chrome": "0.3.7",
+		"@types/chrome": "0.3.8",
 		"@types/react": "catalog:",
 		"@types/react-dom": "catalog:",
 		"puppeteer-core": "catalog:"

@@ -34,10 +34,11 @@
  */
 import { type AgentMessage, type AgentTool, ThinkingLevel, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { Effort, ImageContent, Model, ServiceTier, ToolResultMessage, UsageReport } from "@oh-my-pi/pi-ai";
-import { AUTO_THINKING, type ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
-import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import type { JobWidgetEntry } from "@oh-my-pi/pi-tui/tools/job-widget";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import { AUTO_THINKING } from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
+import type { IrcMessage } from "../irc/irc-types";
+import type { JobWidgetEntry } from "../tools/details/job-widget";
+import type { TodoPhase } from "../tools/details/todo";
 import { getBlobsDir, logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManagerApi } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -51,6 +52,8 @@ import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentSession } from "../session/agent-session";
 import type { AgentSessionEvent, AgentSessionEventListener } from "../session/agent-session-events";
 import {
+	type AgentModelChange,
+	type AgentModelSelectionState,
 	type AgentSessionAdvisorOverview,
 	type AgentViewLoop,
 	type AgentViewRuleSource,
@@ -150,6 +153,8 @@ export function emptyMirrorState(): SessionMirrorState {
 			premiumRequests: 0,
 			cost: 0,
 			subagentCost: 0,
+			aiuNano: 0,
+			aiuUnknownCalls: 0,
 		},
 		sessionStats: {
 			sessionFile: undefined,
@@ -830,6 +835,10 @@ export class RemoteAgentSession implements AgentViewSession {
 		return this.#command("abort", options);
 	}
 
+	applyAgentModelChange(change: AgentModelChange): Promise<AgentModelSelectionState> {
+		return this.#command("applyAgentModelChange", change);
+	}
+
 	setWorkPoolYieldItems(items: readonly WorkPoolYieldItem[]): Promise<void> {
 		return this.#command("setWorkPoolYieldItems", items);
 	}
@@ -969,7 +978,7 @@ export class RemoteAgentSession implements AgentViewSession {
 				this.#state = { ...this.#state, streamMessage: event.message };
 				const delta = event.assistantMessageEvent;
 				if (delta.type === "text_delta" || delta.type === "thinking_delta" || delta.type === "toolcall_delta") {
-					this.tokenRate.push(delta.delta);
+					this.tokenRate.push(delta.delta, delta.type);
 				}
 				return;
 			}

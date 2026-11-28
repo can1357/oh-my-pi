@@ -16,18 +16,8 @@ import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
 
-import {
-	type OutputSummary,
-	type TruncationResult,
-	truncateMiddle,
-	truncateTail,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
-import {
-	formatOutputNotice,
-	type MinimizedMeta,
-	type OutputMeta,
-	type TruncationMeta,
-} from "@oh-my-pi/pi-tui/tools/output-meta";
+import { type OutputSummary, type TruncationResult, truncateMiddle, truncateTail } from "./streaming-output";
+import { formatOutputNotice, type MinimizedMeta, type OutputMeta, type TruncationMeta } from "./output-meta-format";
 import { renderError } from "./tool-errors";
 import {
 	cfgToolsArtifactHeadBytes,
@@ -44,8 +34,8 @@ const MIDDLE_ELISION_MARKER = /^\[…\d+(?:ln|B) elided…\]$/;
 /** Input for {@link OutputMetaBuilder.limits}. `columnUnit` defaults to `chars`. */
 export interface LimitsInput {
 	matchLimit?: number;
-	/** A bare number doubles as its suggestion; an object may pass `suggestion: null` to suppress the advice when the tool is already at its hard cap (#13263). */
-	resultLimit?: number | { reached: number; suggestion?: number | null };
+	/** A bare number doubles as its suggestion; an object may pass `suggestion: null` to suppress the advice when the tool is already at its hard cap (#13263), and `requested` to report a caller `limit` clamped to that cap. */
+	resultLimit?: number | { reached: number; suggestion?: number | null; requested?: number };
 	headLimit?: number;
 	columnMax?: number;
 	columnUnit?: "bytes" | "chars";
@@ -347,7 +337,7 @@ export class OutputMetaBuilder {
 			if (typeof limits.resultLimit === "number") {
 				this.resultLimit(limits.resultLimit);
 			} else {
-				this.resultLimit(limits.resultLimit.reached, limits.resultLimit.suggestion);
+				this.resultLimit(limits.resultLimit.reached, limits.resultLimit.suggestion, limits.resultLimit.requested);
 			}
 		}
 		if (limits.headLimit !== undefined) {
@@ -363,13 +353,17 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add result limit notice. No-op if reached <= 0. `suggestion: null` omits the "Use limit=" advice (hard cap reached); omitted suggestion defaults to doubling. */
-	resultLimit(reached: number, suggestion?: number | null): this {
+	/** Add result limit notice. No-op if reached <= 0. `suggestion: null` omits the "Use limit=" advice (hard cap reached); omitted suggestion defaults to doubling. `requested` reports a caller limit clamped to `reached`. */
+	resultLimit(reached: number, suggestion?: number | null, requested?: number): this {
 		if (reached <= 0) return this;
 		const resolved = suggestion === null ? undefined : (suggestion ?? reached * 2);
 		this.#meta.limits = {
 			...this.#meta.limits,
-			resultLimit: { reached, ...(resolved !== undefined ? { suggestion: resolved } : {}) },
+			resultLimit: {
+				reached,
+				...(resolved !== undefined ? { suggestion: resolved } : {}),
+				...(requested !== undefined ? { requested } : {}),
+			},
 		};
 		return this;
 	}

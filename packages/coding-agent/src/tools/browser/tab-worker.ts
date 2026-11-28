@@ -40,7 +40,7 @@ import {
 	withBrowserPromiseCombinatorTracking,
 } from "../run-scope";
 import { ToolAbortError, throwIfAborted } from "../tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import {
 	type AriaSnapshotOptions,
 	assertSelectorString,
@@ -445,7 +445,8 @@ interface TabApi {
 	screenshot(opts?: ScreenshotOptions): Promise<string | ScreenshotChangeResult>;
 	diffScreenshot(baselinePath: string, opts?: DiffScreenshotOptions): Promise<DiffScreenshotResult>;
 	pdf(opts?: PdfOptions): Promise<string>;
-	extract(format?: ReadableFormat, opts?: ReadableExtractOptions): Promise<string>;
+	/** `format` null (Python `extract(None, selector=…)`) means the default, like an omitted one. */
+	extract(format?: ReadableFormat | null, opts?: ReadableExtractOptions): Promise<string>;
 	click(
 		selector: string,
 		opts?: { button?: "left" | "right" | "middle" | "back" | "forward"; count?: number },
@@ -1900,6 +1901,11 @@ export function formatSelectorMatchHint(count: number): string {
 		: `; selector currently matches ${count} element(s) but the action never became possible — the element may be hidden or covered (try tab.scrollIntoView() or a more specific selector)`;
 }
 
+/** Chromium's `querySelectorAll` SyntaxError for selector text it cannot parse. */
+const INVALID_SELECTOR_RE = /is not a valid selector/;
+/** A query-handler prefix after a comma: `input[name=q], label/Query` reads as one (invalid) CSS list. */
+const LISTED_HANDLER_PREFIX_RE = /,\s*((?:aria|text|xpath|pierce|label|placeholder|testid|alt|title|role)\/)/;
+
 export interface InflightOp {
 	label: string;
 	startedAt: number;
@@ -2229,7 +2235,7 @@ export class WorkerCore {
 				} catch (error) {
 					if (!attach) throw error;
 					throw new ToolError(
-						`Could not create a managed tab in the attached browser profile: ${error instanceof Error ? error.message : String(error)}. To drive one of its existing pages instead, pass target (browser.targets() lists them).`,
+						`Could not create a managed tab in the attached browser profile: ${(error instanceof Error ? error.message : String(error)).replace(/\.+$/, "")}. To drive one of its existing pages instead, pass target (browser.targets() lists them).`,
 					);
 				}
 				this.#observeDialogs();
@@ -2330,6 +2336,7 @@ export class WorkerCore {
 			if (payload.mode === "attach" && payload.page.kind === "create" && payload.page.reload) {
 				// A failed load leaves the new page where it got to; the supervisor reports that from the ready URL.
 				const { url, timeoutMs } = payload.page.reload;
+				await this.#consoleCapture.prepareNavigation(url);
 				await this.#page.goto(url, { waitUntil: "load", timeout: timeoutMs }).catch(() => undefined);
 			}
 			const hiddenFrames = this.#hiddenFrames.splice(0);
@@ -2965,8 +2972,16 @@ export class WorkerCore {
 				const handles = await page.$$(resolved);
 				count = handles.length;
 				for (const handle of handles) void handle.dispose().catch(() => undefined);
-			} catch {
-				// Inconclusive probe — keep polling without advancing toward failure.
+			} catch (error) {
+				// A selector the page cannot parse never matches: say so now, not at the action deadline.
+				const message = (error instanceof Error ? error.message : String(error)).split("\n", 1)[0]!;
+				if (INVALID_SELECTOR_RE.test(message)) {
+					const prefix = LISTED_HANDLER_PREFIX_RE.exec(selector)?.[1];
+					throw new ToolError(
+						`${label}: ${message}${prefix ? `; a ${prefix} prefix applies to the whole selector and cannot join a CSS list: try each selector in its own call` : ""}`,
+					);
+				}
+				// Otherwise inconclusive (mid-navigation, detached frame) — keep polling without advancing toward failure.
 			}
 			if (count !== null && count > 0) break;
 			if (count === 0 && Date.now() >= deadline) {
@@ -3134,6 +3149,7 @@ export class WorkerCore {
 			goto: (url, opts) =>
 				input(`tab.goto(${JSON.stringify(url)})`, INF, async sig => {
 					this.#clearElementCache();
+					await this.#consoleCapture.prepareNavigation(url);
 					try {
 						// Default to "load" because dev servers with HMR/WS never reach networkidle.
 						// budgetBound (not the full cell) so a hung navigation fails named and
@@ -3189,8 +3205,9 @@ export class WorkerCore {
 			},
 			screenshot: opts =>
 				read(describeScreenshot(opts), quickOpMs, sig => this.#captureScreenshot(shots, sig, opts)),
-			extract: (format = "markdown", opts) =>
-				read(`tab.extract(${JSON.stringify(format)})`, quickOpMs, async sig => {
+			extract: (formatArg, opts) => {
+				const format = formatArg ?? "markdown";
+				return read(`tab.extract(${JSON.stringify(format)})`, quickOpMs, async sig => {
 					const html = (await untilAborted(sig, () => page.content())) as string;
 					const result = await extractReadableFromHtml(html, page.url(), format, opts);
 					if (!result) {
@@ -3205,7 +3222,8 @@ export class WorkerCore {
 						);
 					}
 					return content;
-				}),
+				});
+			},
 			click: (selector, opts) =>
 				act(
 					`tab.click(${JSON.stringify(selector)})`,

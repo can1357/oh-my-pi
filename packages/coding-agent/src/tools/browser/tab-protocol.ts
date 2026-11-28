@@ -1,6 +1,6 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { ImageTokenization } from "@oh-my-pi/pi-catalog/compat/image-tokenization";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "../tool-errors";
 import type { Viewport } from "puppeteer-core";
 import type { FrontTabSource } from "./native-windows";
 import type { HiddenFrame } from "./relay/protocol";
@@ -82,7 +82,7 @@ export function ownsPage(payload: WorkerInitPayload): boolean {
 }
 
 /** Globals every page has and omp's Bun runtime lacks: run code that cannot find one was written for the page. */
-const PAGE_ONLY_GLOBAL_RE =
+export const PAGE_ONLY_GLOBAL_RE =
 	/^(document|window|location|history|localStorage|sessionStorage|customElements|getComputedStyle|CSS|HTML\w*Element|Element|Node) is not defined$/;
 
 /**

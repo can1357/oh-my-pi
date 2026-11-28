@@ -20,20 +20,34 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
-import { isProviderEnabled, isUserSourceEnabled } from "../capability";
+import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
+import { isBunTestRuntime } from "@oh-my-pi/pi-utils/env";
+import { isProviderEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
+import { findAllNearestProjectConfigDirs } from "../config";
 import { pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
 import { substitutePluginRoot } from "../discovery/substitute-plugin-root";
 import { normalizeClaudeCodeToolName, normalizeToolNames } from "../tools/builtin-names";
-import { loadBundledAgents, parseAgent } from "./agents";
-import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
+import { loadBundledAgents } from "./agents";
+import { type AgentFileCache, createAgentFileCache } from "./discovery-cache";
+import type { AgentSource } from "./task-details";
 import type { AgentDefinition } from "./types";
 
-const TASK_AGENT_CONFIG_SOURCE = ".omp";
+const enum PluginAgentSources {
+	None = 0,
+	OmpPackages = 1,
+	ClaudeMarketplace = 2,
+}
+
+/** Snapshot the provider switches that affect the task agent roster. */
+export function getAgentDiscoverySources(): PluginAgentSources {
+	return (
+		(isProviderEnabled("omp-plugins") ? PluginAgentSources.OmpPackages : PluginAgentSources.None) |
+		(isProviderEnabled("claude-plugins") ? PluginAgentSources.ClaudeMarketplace : PluginAgentSources.None)
+	);
+}
 
 /** Result of agent discovery */
 export interface DiscoveryResult {
@@ -46,8 +60,6 @@ export interface DiscoveryResult {
 interface AgentDirectory {
 	dir: string;
 	source: AgentSource;
-	/** Frontmatter is the Claude Code dialect: drop `model:` and translate `tools:`. */
-	claudeDialect?: boolean;
 	/**
 	 * Plugin install path supplying these agents. `${CLAUDE_PLUGIN_ROOT}` /
 	 * `${OMP_PLUGIN_ROOT}` in the agent Markdown body are substituted with it
@@ -59,44 +71,50 @@ interface AgentDirectory {
 /**
  * Load agents from a directory.
  */
-async function loadAgentsFromDir({
-	dir,
-	source,
-	claudeDialect,
-	pluginRoot,
-}: AgentDirectory): Promise<AgentDefinition[]> {
+async function loadAgentsFromDir(
+	{ dir, source, pluginRoot }: AgentDirectory,
+	cache: AgentFileCache,
+): Promise<{ dir: string; agents: AgentDefinition[] }> {
 	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
 	const files = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
-		.sort((a, b) => a.name.localeCompare(b.name))
-		.map(file => {
-			const filePath = path.join(dir, file.name);
-			return fs
-				.readFile(filePath, "utf-8")
-				.then(content => {
-					const agent = parseAgent(filePath, content, source, "warn");
-					// Claude Code parity (#20165): plugin agents resolve
-					// ${CLAUDE_PLUGIN_ROOT} / ${OMP_PLUGIN_ROOT} in the Markdown
-					// body when the definition is loaded, not in bash.
-					if (pluginRoot !== undefined) agent.systemPrompt = substitutePluginRoot(agent.systemPrompt, pluginRoot);
-					if (claudeDialect) {
-						// Claude-format frontmatter: `model:` is a Claude alias, not an
-						// OMP selector, and `tools:` uses Claude names (#7966).
-						agent.model = undefined;
-						if (agent.tools) agent.tools = normalizeToolNames(agent.tools.map(normalizeClaudeCodeToolName));
-						// `parseAgent` inferred spawns from the untranslated names, so `Agent`
-						// (→ task) missed it; re-apply the same rule to the result.
-						if (agent.spawns === undefined && agent.tools?.includes("task")) agent.spawns = "*";
-					}
-					return agent;
-				})
-				.catch(error => {
+		.sort((a, b) => a.name.localeCompare(b.name));
+	if (files.length === 0) return { dir, agents: [] };
+
+	// The manifest, not the registry, determines the model and tools dialect.
+	// Do not wait for another plugin's manifest (or probe roots with no agents).
+	const [claudeDialect, loaded] = await Promise.all([
+		pluginRoot === undefined ? false : pluginUsesClaudeModelDialect(pluginRoot),
+		Promise.all(
+			files.map(async file => {
+				const filePath = path.join(dir, file.name);
+				try {
+					return await cache.load(filePath, source);
+				} catch (error) {
 					logger.warn("Failed to read agent file", { filePath, error });
 					return null;
-				});
-		});
-
-	return (await Promise.all(files)).filter(Boolean) as AgentDefinition[];
+				}
+			}),
+		),
+	]);
+	const agents: AgentDefinition[] = [];
+	for (const parsed of loaded) {
+		if (!parsed) continue;
+		if (pluginRoot === undefined) {
+			agents.push(parsed.source === source ? parsed : { ...parsed, source });
+			continue;
+		}
+		// The cache is independent of plugin context; don't mutate the parsed entry.
+		const agent = { ...parsed, source, systemPrompt: substitutePluginRoot(parsed.systemPrompt, pluginRoot) };
+		if (claudeDialect) {
+			agent.model = undefined;
+			if (agent.tools) agent.tools = normalizeToolNames(agent.tools.map(normalizeClaudeCodeToolName));
+			// `parseAgent` inferred spawns before `Agent` was translated to `task`.
+			if (agent.spawns === undefined && agent.tools?.includes("task")) agent.spawns = "*";
+		}
+		agents.push(agent);
+	}
+	return { dir, agents };
 }
 
 /**
@@ -108,86 +126,62 @@ async function loadAgentsFromDir({
  * @param cwd - Current working directory for project agent discovery
  * @param home - Home directory for user and marketplace discovery
  * @param extensionRoots - Session-local extension roots (explicit + mode + configured)
+ * @param sources - Provider switches captured by the caller when keying a shared scan
  */
 export async function discoverAgents(
 	cwd: string,
 	home: string = os.homedir(),
 	extensionRoots?: EffectiveExtensionRoots,
+	sources = getAgentDiscoverySources(),
 ): Promise<DiscoveryResult> {
 	const resolvedCwd = path.resolve(cwd);
 
-	const userDirs = getConfigDirs("agents", { project: false })
-		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
-		.map(entry => ({
-			...entry,
-			path: path.resolve(entry.path),
-		}));
+	const agentDir = getAgentDir();
+	const cache = createAgentFileCache(isBunTestRuntime() ? undefined : path.join(agentDir, "cache", "task-agents.bin"));
 
-	const projectDirs = findAllNearestProjectConfigDirs("agents", resolvedCwd)
-		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
-		.map(entry => ({
-			...entry,
-			path: path.resolve(entry.path),
-		}));
+	const project = findAllNearestProjectConfigDirs("agents", resolvedCwd)[0];
+	const nativeDirs: AgentDirectory[] = [];
+	if (project) nativeDirs.push({ dir: project.path, source: "project" });
+	nativeDirs.push({ dir: path.resolve(agentDir, "agents"), source: "user" });
+	const load = (dir: AgentDirectory) => loadAgentsFromDir(dir, cache);
 
-	const orderedDirs: AgentDirectory[] = [];
-	const project = projectDirs[0];
-	if (project) orderedDirs.push({ dir: project.path, source: "project" });
-	const user = userDirs[0];
-	if (user) orderedDirs.push({ dir: user.path, source: "user" });
+	// Start each lane independently; concatenate their results in precedence order
+	// regardless of which provider or directory finishes first.
+	const [native, packages, marketplace] = await Promise.all([
+		Promise.all(nativeDirs.map(load)),
+		sources & PluginAgentSources.OmpPackages
+			? listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null, extensionRoots }).then(roots =>
+					Promise.all(roots.map(root => load({ dir: path.join(root.path, "agents"), source: root.level }))),
+				)
+			: [],
+		sources & PluginAgentSources.ClaudeMarketplace
+			? listClaudePluginRoots(home, resolvedCwd).then(({ roots }) =>
+					Promise.all(
+						roots
+							.toSorted((a, b) => Number(b.scope === "project") - Number(a.scope === "project"))
+							.map(plugin =>
+								load({
+									dir: path.join(plugin.path, "agents"),
+									source: plugin.scope === "project" ? "project" : "user",
+									pluginRoot: plugin.path,
+								}),
+							),
+					),
+				)
+			: [],
+	]);
+	void cache.save();
 
-	// Extension-package agents use the same effective root set as sibling
-	// skills/hooks/tools, threaded whole so explicit roots and mode survive.
-	const packageRoots = isProviderEnabled("omp-plugins")
-		? await listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null, extensionRoots })
-		: [];
-	for (const root of packageRoots) {
-		orderedDirs.push({ dir: path.join(root.path, "agents"), source: root.level });
-	}
-
-	// Load agents from Claude Code marketplace plugins (respects disabledProviders and opt-in).
-	// User-scope roots whose origin is not the foreign ~/.claude/plugins tree (omp's own
-	// installs and `--plugin-dir` roots) survive the claude-plugins opt-in gate, mirroring
-	// isSourceEnabled in extensibility/skills.ts (#10743). Without this, `--plugin-dir` and
-	// omp-installed agents are dropped at user scope whenever the Claude source is disabled.
-	const claudePluginsUserEnabled = isUserSourceEnabled("claude-plugins") || isUserSourceEnabled("claude");
-	const { roots: pluginRoots } = isProviderEnabled("claude-plugins")
-		? await listClaudePluginRoots(home, resolvedCwd)
-		: { roots: [] };
-	const filteredPluginRoots = pluginRoots.filter(
-		r => r.scope === "project" || claudePluginsUserEnabled || r.origin !== "claude",
-	);
-	const sortedPluginRoots = [...filteredPluginRoots].sort((a, b) => {
-		if (a.scope === b.scope) return 0;
-		return a.scope === "project" ? -1 : 1;
-	});
-	const pluginClaudeDialect = await Promise.all(
-		// The `model:` and `tools:` dialect follows the plugin's declared manifest,
-		// not the registry that supplied it: foreign Claude roots (origin "claude")
-		// always use Claude aliases, and an omp-installed or --plugin-dir root can
-		// still ship a `.claude-plugin` package. Claude-dialect frontmatter is
-		// translated so its aliases and tool names are not misread as OMP ones
-		// (#7966); OMP-native and Agent-Plugins-standard plugin agents keep theirs
-		// (#12028).
-		sortedPluginRoots.map(
-			async plugin => plugin.origin === "claude" || (await pluginUsesClaudeModelDialect(plugin.path)),
-		),
-	);
-	sortedPluginRoots.forEach((plugin, index) => {
-		orderedDirs.push({
-			dir: path.join(plugin.path, "agents"),
-			source: plugin.scope === "project" ? "project" : "user",
-			claudeDialect: pluginClaudeDialect[index],
-			pluginRoot: plugin.path,
-		});
-	});
-
+	const directories = [...native, ...packages, ...marketplace];
 	const seen = new Set<string>();
-	const loadedAgents = (await Promise.all(orderedDirs.map(loadAgentsFromDir))).flat().filter(agent => {
-		if (seen.has(agent.name)) return false;
-		seen.add(agent.name);
-		return true;
-	});
+	const loadedAgents: AgentDefinition[] = [];
+	for (const { agents } of directories) {
+		for (const agent of agents) {
+			if (seen.has(agent.name)) continue;
+			seen.add(agent.name);
+			loadedAgents.push(agent);
+		}
+	}
 
 	const bundledAgents = loadBundledAgents().filter(agent => {
 		if (seen.has(agent.name)) return false;
@@ -195,12 +189,10 @@ export async function discoverAgents(
 		return true;
 	});
 
-	const projectAgentsDir = projectDirs.length > 0 ? projectDirs[0].path : null;
-
 	return {
 		agents: [...loadedAgents, ...bundledAgents],
-		projectAgentsDir,
-		searchedDirs: orderedDirs.map(entry => entry.dir),
+		projectAgentsDir: project?.path ?? null,
+		searchedDirs: directories.map(entry => entry.dir),
 	};
 }
 

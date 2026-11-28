@@ -9,7 +9,7 @@
 - Key collaborators:
    - `packages/coding-agent/src/web/search/provider.ts` — lazy provider registry; availability chain.
    - `packages/coding-agent/src/web/search/types.ts` — unified `SearchResponse` / `SearchProviderError` types.
-   - `packages/tui/src/tools/web-search.ts` / `web-search-types.ts` — transcript rendering and shared response/provider types.
+   - `packages/coding-agent/src/ui/tools/web-search.tsx` / `packages/coding-agent/src/web/search/provider-types.ts` — transcript rendering and shared response/provider types.
    - `packages/coding-agent/src/web/search/providers/base.ts` — provider interface and shared params contract.
    - `packages/coding-agent/src/web/search/providers/utils.ts` — credential lookup; source normalization.
    - `packages/coding-agent/src/web/search/providers/browser-headers.ts` — shared Chromium navigation headers for scrape providers.
@@ -149,9 +149,9 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - `num_search_results` controls upstream API breadth only in API-key mode. `limit` is preserved separately as `num_results` and slices returned `sources` after parsing in both auth modes.
       - Output may include `answer`, `sources`, `citations`, `usage`, `model`, `requestId`, `authMode`.
    - **Gemini** — `packages/coding-agent/src/web/search/providers/gemini.ts`
-      - Availability: OAuth credentials in `agent.db` for `google-antigravity`, or a Google Developer API key.
-      - Querying: SSE `streamGenerateContent` with Google Search grounding at the selected model's endpoint. Cloud Code Assist auth uses `withOAuthAccess`; developer API auth uses the model-registry resolver. HTTP retries use up to four attempts with exponential/server-provided delays capped at five minutes, bounded by the transport signal.
-      - Model: the selected `web` candidate (`google/…` or `google-antigravity/…` chat model).
+      - Availability: a Google Developer API key.
+      - Querying: SSE `streamGenerateContent` with Google Search grounding at the selected model's endpoint. Auth uses the model-registry resolver. HTTP retries use up to four attempts with exponential/server-provided delays capped at five minutes, bounded by the transport signal.
+      - Model: the selected `web` candidate (`google/…` chat model).
       - `max_tokens` and `temperature` pass through as `generationConfig.maxOutputTokens` / `generationConfig.temperature`.
       - `limit` and `num_search_results` are collapsed together before dispatch.
       - Output may include `answer`, `sources`, `citations`, `searchQueries`, `usage`, `model`.
@@ -235,7 +235,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - Availability: always available; uses keyless mode when no credential or self-hosted endpoint is configured. A configured credential that fails to resolve against the hosted API errors instead of downgrading to keyless mode.
       - Querying: POST `https://api.firecrawl.dev/v2/search` with `sources: [{ type: "web" }]`. The endpoint is built by the shared resolver in `packages/coding-agent/src/web/firecrawl.ts`, which applies the `FIRECRAWL_BASE_URL` (alias `FIRECRAWL_API_URL`) self-hosting override. Google-style operators are formatted into the query; `recency` and parsed absolute dates map to `tbs`.
       - `limit` / `num_search_results`: collapsed and clamped to `1..100`, default `10`; output `sources`, `requestId`, and `authMode: "api_key" | "keyless"`.
-      - The shared client also exposes `/scrape` as a `providers.fetch` reader backend, requiring a Firecrawl credential. API reference: [docs.firecrawl.dev](https://docs.firecrawl.dev).
+      - The shared client also exposes `/scrape` as a `providers.fetch` reader backend, requiring a Firecrawl credential; the in-process `local` engine (`renderHtml`/`Reader`) is the default backend. API reference: [docs.firecrawl.dev](https://docs.firecrawl.dev).
    - **Brave** — `packages/coding-agent/src/web/search/providers/brave.ts`
       - Availability: `BRAVE_API_KEY` or a configured/stored `brave` credential.
       - Querying: GET `https://api.search.brave.com/res/v1/web/search` with `count`, `extra_snippets=true`, and recency `freshness=pd|pw|pm|py`. Absolute date bounds override recency; safe search defaults to `moderate`. The public tool path does not map `lang:` to Brave's optional language/country fields.
@@ -247,8 +247,8 @@ Each provider search transport receives a hard timeout from `providers.webSearch
       - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..50`, default `10`.
       - Output: `sources` (snippet is the model-oriented `summary`, falling back to `snippet`), `authMode: "api_key"`. Billed per successful non-empty request.
    - **Kimi** — `packages/coding-agent/src/web/search/providers/kimi.ts`
-      - Availability: `MOONSHOT_SEARCH_API_KEY`, `KIMI_SEARCH_API_KEY`, or an `agent.db` credential for `kimi-code`. `MOONSHOT_API_KEY` and stored `moonshot` credentials are intentionally rejected because the Open Platform key does not authenticate the Kimi Code search service.
-      - Querying: POST to `MOONSHOT_SEARCH_BASE_URL` / `KIMI_SEARCH_BASE_URL` / default `https://api.kimi.com/coding/v1/search` with `text_query`, `limit`, `enable_page_crawling`, `timeout_seconds: 30`.
+      - Availability: `MOONSHOT_SEARCH_API_KEY`, `KIMI_SEARCH_API_KEY`, or an `agent.db` credential for `kimi-code` / `kimi-code-global`. `MOONSHOT_API_KEY` and stored `moonshot` credentials are intentionally rejected because the Open Platform key does not authenticate the Kimi Code search service.
+      - Querying: POST to `MOONSHOT_SEARCH_BASE_URL` / `KIMI_SEARCH_BASE_URL` / the credential's regional default (`https://api.kimi.com/coding/v1/search` for env keys and `kimi-code`, `https://api.kimi.ai/coding/v1/search` for `kimi-code-global`) with `text_query`, `limit`, `enable_page_crawling`, `timeout_seconds: 30`.
       - `limit` / `num_search_results`: `params.numSearchResults ?? params.limit`, clamped to `1..20`, default `10`.
       - Output: `sources`, `requestId`.
    - **Parallel** — `packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`
@@ -360,6 +360,6 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - `executeSearch()` loads provider modules lazily as the chain reaches them. Provider instances are cached per id (`packages/coding-agent/src/web/search/provider.ts`), and asking for labels via `getSearchProviderLabel()` does not trigger imports.
 - Most providers treat `limit` and `num_search_results` as the same number because adapters pass `params.numSearchResults ?? params.limit`. Perplexity preserves both concepts. TinyFish uses the collapsed value as a local cap, serializes `num_results` per page, and paginates when more results are needed. xAI uses it only to cap parsed sources/citations (`10` default, `30` max).
 - `recency` has native or engine-query mappings in Brave, DeepSeek, Perplexity, Parallel, Tavily, SearXNG, Kagi, TinyFish, Keenable, Sofya, Firecrawl, DuckDuckGo, Startpage, Google, Mojeek, Hacker News (`created_at_i` lower bound), and xAI (`x_search` `from_date` when no `after:`/`before:` bound is given). Ecosia ignores it. Public Web forwards the request to its engines.
-- `SEARCH_PROVIDER_LABELS` in `packages/tui/src/tools/web-search-types.ts` is the id→label registry for every search implementation (engines and groundings); provider ids, `SearchResponse`, and the transcript renderer all derive from it. Selection itself lives only in the `web` model role.
+- `SEARCH_PROVIDER_LABELS` in `packages/coding-agent/src/web/search/provider-types.ts` is the id→label registry for every search implementation (engines and groundings); provider ids, `SearchResponse`, and the transcript renderer all derive from it. Selection itself lives only in the `web` model role.
 - The credential-free scrapers close the auto chain: Startpage and DuckDuckGo precede the browser-backed Ecosia, Google, and Mojeek paths; `public` is listed last and never auto-selected.
 - `/login exa` stores the pasted key in AuthStorage; Exa resolves stored or environment credentials before the unauthenticated `https://mcp.exa.ai/mcp` fallback.

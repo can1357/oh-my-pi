@@ -1,6 +1,6 @@
 import type { OAuthRefreshReason } from "../../auth/types";
 import type { FetchImpl } from "../../types";
-import type { OAuthProviderUnion } from "../registry";
+import type { DpopPrivateJwk } from "./dpop";
 
 export type OAuthCredentials = {
 	refresh: string;
@@ -11,6 +11,12 @@ export type OAuthCredentials = {
 	email?: string;
 	accountId?: string;
 	apiEndpoint?: string;
+	/**
+	 * GitHub Copilot: the account meters usage in AI credits
+	 * (`token_based_billing`), so requests record no premium-request estimate.
+	 * Read at login and from each Copilot quota fetch; absent when unknown.
+	 */
+	tokenBasedBilling?: boolean;
 	/**
 	 * Organization/workspace the token is scoped to (e.g. an Anthropic org
 	 * UUID or canonical Factory org ID). Lets one account email hold
@@ -42,18 +48,37 @@ export type OAuthCredentials = {
 	/** Kiro profile ARN the login routes by; absent for Builder ID. Embeds the AWS account id, so never displayed. */
 	kiroProfileArn?: string;
 	/**
+	 * DPoP (RFC 9449) private key the refresh token is bound to, generated at
+	 * sign-in. Every refresh signs a proof with it.
+	 */
+	dpopKey?: DpopPrivateJwk;
+	/** Latest `DPoP-Nonce` the token endpoint issued, so the next refresh skips its challenge. */
+	dpopNonce?: string;
+	/**
 	 * Epoch ms of the interactive login that minted this grant. Set by
 	 * `AuthStorage.oauth.login`; token refreshes preserve it. Providers with an
 	 * absolute grant lifetime (Anthropic expires the whole refresh-token
-	 * family ~30 days after authorization regardless of rotation) use it to
-	 * surface re-login deadlines before the grant dies.
+	 * family ~30 days after authorization regardless of rotation) estimate
+	 * re-login deadlines from it when {@link refreshExpires} is unknown.
 	 */
 	authorizedAt?: number;
+	/**
+	 * Epoch ms the server says the refresh token, and with it the login, ends.
+	 * Set at login from the token response; a refresh can only bring it forward
+	 * (see `mergeRefreshedCredential`).
+	 */
+	refreshExpires?: number;
+	/**
+	 * Space-separated scopes the token endpoint granted at login (`scope` in
+	 * the token response), when the rule maps them. Lets callers skip features
+	 * a narrower grant cannot use, such as Anthropic's 1-year login without
+	 * `user:file_upload`. Absent on rows minted before scopes were recorded.
+	 */
+	scope?: string;
 };
 
-export type OAuthProvider = OAuthProviderUnion;
-
-export type OAuthProviderId = OAuthProvider | (string & {});
+/** Id of a provider whose auth policy declares a `login` flow, or of a `registerOAuthProvider` custom provider. */
+export type OAuthProviderId = string;
 
 export type OAuthPrompt = {
 	message: string;

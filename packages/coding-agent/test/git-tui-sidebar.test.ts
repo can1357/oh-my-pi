@@ -3,14 +3,39 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
-import { AvatarLoader } from "../src/cli/git-tui/avatar";
-import { Sidebar, type SidebarAction } from "@oh-my-pi/pi-tui/apps/git/sidebar";
+import type { KeyEvent } from "@oh-my-pi/pi-tui";
+import { CONSERVATIVE_EMOJI } from "@oh-my-pi/pi-tui/theme/contract";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
+import { type SidebarAction } from "@oh-my-pi/pi-coding-agent/cli/git-tui/model/sidebar";
+import type { ChangedFile } from "@oh-my-pi/pi-coding-agent/cli/git-tui/model/state";
 import { GitModel } from "../src/cli/git-tui/state";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { SidebarModel, type SidebarTarget } from "../src/ui/apps/git/sidebar-model";
+import { paintSidebar } from "../src/ui/styles/apps/git/sidebar";
+import { initTheme } from "../src/ui/theme/service";
 
-beforeAll(async () => {
-	await initTheme(false);
+beforeAll(() => {
+	initTheme({
+		dark: "dark",
+		light: "dark",
+		capabilities: { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI },
+	});
 });
+
+/** A key press as the driver decodes `input` (`j`, ` `, `\r`, `G`). */
+function key(input: string): KeyEvent {
+	if (input === "\r") return { id: "enter", kind: "press", raw: input };
+	if (input === " ") return { id: "space", text: " ", kind: "press", raw: input };
+	const lower = input.toLowerCase();
+	return { id: input === lower ? input : `shift+${lower}`, text: input, kind: "press", raw: input };
+}
+
+/** The selection with its identity key dropped (what the assertions compare). */
+function shape(target: SidebarTarget | undefined): unknown {
+	if (!target) return undefined;
+	if (target.kind === "entry") return { kind: target.entry.kind };
+	const { key: _key, ...rest } = target;
+	return rest;
+}
 
 /** Repo with three untracked files under two directories: a/one.txt, a/two.txt, b/three.txt. */
 async function withDirtyRepo(run: (harness: SidebarHarness) => Promise<void>): Promise<void> {
@@ -49,22 +74,58 @@ async function withMixedRepo(run: (harness: SidebarHarness) => Promise<void>): P
 	}
 }
 
-/** Drives a real Sidebar against a real GitModel, applying raised actions like the root component. */
+/** Drives a real sidebar against a real GitModel, applying raised actions like the app does. */
 class SidebarHarness {
 	readonly actions: SidebarAction[] = [];
 	readonly model: GitModel;
-	readonly sidebar: Sidebar;
+	readonly sidebar: {
+		handleInput(input: string): void;
+		handleClick(row: number, col: number): void;
+		handleWheel(delta: number): void;
+		handleEscape(): boolean;
+		render(width: number, height: number): string[];
+		setFocused(focused: boolean): void;
+		setGeneratedCommit: SidebarModel["setGeneratedCommit"];
+		reconcile(): void;
+		readonly selected: unknown;
+		readonly selectedFile: ChangedFile | null;
+		readonly editing: boolean;
+		readonly summary: string;
+		readonly description: string;
+		readonly aiPrompt: string;
+	};
 
 	private constructor(model: GitModel) {
 		this.model = model;
-		this.sidebar = new Sidebar({
-			model,
-			avatars: new AvatarLoader(() => {}),
-			onSelectFile: () => {},
-			onAction: action => this.actions.push(action),
-			onFocusDiff: () => {},
-			requestRender: () => {},
-		});
+		const sidebar = new SidebarModel(() => model, { onAction: action => this.actions.push(action) });
+		this.sidebar = {
+			handleInput: input => void sidebar.handleKey(key(input)),
+			handleClick: (row, col) => sidebar.handleClick(row, col),
+			handleWheel: delta => sidebar.handleWheel(delta),
+			handleEscape: () => sidebar.handleEscape(),
+			render: (width, height) => paintSidebar(currentTheme(), sidebar.layout(width, height), width),
+			setFocused: focused => sidebar.setFocused(focused),
+			setGeneratedCommit: commit => sidebar.setGeneratedCommit(commit),
+			reconcile: () => void sidebar.reconcile(),
+			get selected() {
+				return shape(sidebar.selected());
+			},
+			get selectedFile() {
+				return sidebar.selectedFile;
+			},
+			get editing() {
+				return sidebar.editing() !== undefined;
+			},
+			get summary() {
+				return sidebar.summary().text;
+			},
+			get description() {
+				return sidebar.description().text;
+			},
+			get aiPrompt() {
+				return sidebar.aiPrompt().text;
+			},
+		};
 	}
 
 	static async create(repo: string): Promise<SidebarHarness> {
@@ -131,7 +192,7 @@ describe("git tui sidebar staging", () => {
 			expect(model.staged.map(file => file.path).sort()).toEqual(["a/one.txt", "a/two.txt"]);
 			expect(model.unstaged.map(file => file.path)).toEqual(["b/three.txt"]);
 			// Selection survives onto the next row of the unstaged section.
-			expect(sidebar.selected?.kind).toBe("dir");
+			expect(sidebar.selected).toEqual({ kind: "dir" });
 		});
 	});
 
@@ -146,7 +207,7 @@ describe("git tui sidebar staging", () => {
 			sidebar.handleInput("j");
 			sidebar.handleInput("j");
 			sidebar.handleInput("j");
-			expect(sidebar.selected?.kind).toBe("dir");
+			expect(sidebar.selected).toEqual({ kind: "dir" });
 
 			const before = harness.actions.length;
 			sidebar.handleInput("s"); // wrong direction for a staged dir
@@ -173,7 +234,7 @@ describe("git tui sidebar staging", () => {
 			const { sidebar, model, actions } = harness;
 			// Targets: [Stage All] → dir a/ → a/tracked.txt → a/new.txt.
 			sidebar.handleInput("j");
-			expect(sidebar.selected?.kind).toBe("dir");
+			expect(sidebar.selected).toEqual({ kind: "dir" });
 			sidebar.handleInput("j");
 			expect(sidebar.selectedFile?.path).toBe("a/tracked.txt");
 			sidebar.handleInput("j");
@@ -267,7 +328,7 @@ describe("git tui sidebar staging", () => {
 	test("empty commit action generates before a populated action commits", async () => {
 		await withDirtyRepo(async ({ sidebar, actions }) => {
 			sidebar.handleInput("G");
-			expect(sidebar.selected?.kind).toBe("commit-button");
+			expect(sidebar.selected).toEqual({ kind: "commit-button" });
 
 			sidebar.handleInput("\r");
 			expect(actions.at(-1)).toEqual({ type: "generate" });
@@ -278,8 +339,8 @@ describe("git tui sidebar staging", () => {
 				summary: "corrected generated commit flow",
 				body: ["Preserved staged-tree analysis."],
 			});
-			expect(sidebar.summary.getValue()).toBe("fix(git-tui): corrected generated commit flow");
-			expect(sidebar.description.getText()).toBe("- Preserved staged-tree analysis.");
+			expect(sidebar.summary).toBe("fix(git-tui): corrected generated commit flow");
+			expect(sidebar.description).toBe("- Preserved staged-tree analysis.");
 
 			sidebar.handleInput("\r");
 			expect(actions.at(-1)).toEqual({
@@ -310,7 +371,7 @@ describe("git tui sidebar staging", () => {
 			sidebar.handleInput("\r");
 			expect(actions).toEqual([{ type: "stage-ai", prompt: "all comment changes" }]);
 			// Submission closes the box and clears the typed prompt.
-			expect(sidebar.aiInput.getValue()).toBe("");
+			expect(sidebar.aiPrompt).toBe("");
 			expect(sidebar.render(44, 30).some(line => strip(line).includes("What should we stage?"))).toBe(false);
 		});
 	});
@@ -326,7 +387,7 @@ describe("git tui sidebar staging", () => {
 
 			expect(sidebar.handleEscape()).toBe(true);
 			expect(actions).toEqual([]);
-			expect(sidebar.aiInput.getValue()).toBe("");
+			expect(sidebar.aiPrompt).toBe("");
 			// Empty prompt + enter must not raise an action either.
 			sidebar.handleClick(headerRow, strip(lines[headerRow] ?? "").indexOf("✦"));
 			sidebar.handleInput("\r");

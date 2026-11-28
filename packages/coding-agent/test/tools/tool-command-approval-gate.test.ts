@@ -34,7 +34,7 @@ const COMMENT_TOOL = "jira_addcomment";
 const ISSUE_TOOL = "linear_create_issue";
 
 /** Session with both tools mounted and `bash` active, so both resolve as commands. */
-function mountedBashSession(): ToolSession {
+function mountedBashSession(settings: Record<string, unknown> = {}): ToolSession {
 	const toolCommands: ToolCommandState = {
 		tools: new Map(),
 		mountedNames: new Set([COMMENT_TOOL, ISSUE_TOOL]),
@@ -47,14 +47,14 @@ function mountedBashSession(): ToolSession {
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		enableLsp: false,
-		settings: Settings.isolated({}),
+		settings: Settings.isolated(settings),
 		toolCommands,
 		isToolActive: name => name === "bash",
 	};
 }
 
-function bashApproval(command: string) {
-	return new BashTool(mountedBashSession()).approval({ command });
+function bashApproval(command: string, settings?: Record<string, unknown>) {
+	return new BashTool(mountedBashSession(settings)).approval({ command });
 }
 
 describe("bash gate for tool-command lines", () => {
@@ -69,6 +69,27 @@ describe("bash gate for tool-command lines", () => {
 		]) {
 			expect(bashApproval(command)).toBe("read");
 		}
+	});
+
+	it("does not match bash.patterns or critical patterns against tool arguments", () => {
+		const settings = {
+			"bash.patterns": [
+				{ match: "*git*reset* --hard*", approval: "deny" },
+				{ match: "*curl*", approval: "prompt" },
+			],
+		};
+		for (const command of [
+			`${COMMENT_TOOL} body="how to git reset --hard safely"`,
+			`${COMMENT_TOOL} body="curl example" && ${ISSUE_TOOL} title=bug`,
+			`${COMMENT_TOOL} body="rm -rf /"`,
+		]) {
+			expect(bashApproval(command, settings)).toBe("read");
+		}
+		// The same text run as a shell command stays gated.
+		expect(bashApproval("git reset --hard", settings)).toMatchObject({ policy: "deny" });
+		expect(bashApproval(`echo hi && ${COMMENT_TOOL} body="git reset --hard"`, settings)).toMatchObject({
+			policy: "deny",
+		});
 	});
 
 	it("keeps its normal decision for anything the scan cannot vouch for", () => {
@@ -154,8 +175,6 @@ function runnerWith(sessionManager: SessionManager, select: ExtensionUIContext["
 			getEditorText: () => "",
 			editor: async () => undefined,
 			addAutocompleteProvider: () => {},
-			setEditorComponent: () => {},
-			getEditorComponent: () => undefined,
 			get theme() {
 				return {} as never;
 			},

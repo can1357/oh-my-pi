@@ -23,7 +23,7 @@ import type { SessionHeader } from "@oh-my-pi/pi-coding-agent/session/session-en
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createSessionWorktree } from "@oh-my-pi/pi-coding-agent/session/session-worktree";
-import * as themeModule from "@oh-my-pi/pi-tui/theme";
+import * as themeService from "../src/ui/theme/service";
 import {
 	__resetDirsFromEnvForTests,
 	getProjectDir,
@@ -135,7 +135,7 @@ afterEach(async () => {
 	if (originalIsTTY) Object.defineProperty(process.stdin, "isTTY", originalIsTTY);
 	else Reflect.deleteProperty(process.stdin, "isTTY");
 	setInteractiveHost(originalInteractiveHost);
-	themeModule.stopThemeWatcher();
+	themeService.stopThemeWatcher();
 	// `runRootCommand` registers the CLI's extension roots (`--no-extensions` → explicit-only) process-wide.
 	clearOmpExtensionCliRoots();
 	setProjectDir(originalProject);
@@ -305,7 +305,12 @@ describe.skipIf(process.platform === "win32")("a removed worktree is still moved
 		await $`git init -q && git commit -q --allow-empty -m init`.cwd(repo).quiet();
 		// `/wt` moves a session into a new worktree's session directory; `omp worktree clear` removes and prunes it.
 		const manager = await answeredManager(repo);
-		const { path: worktree } = await createSessionWorktree(repo, Settings.isolated(), "wt/gone");
+		// Pin the git backend: an installed ovnfs would otherwise create a checkout `git worktree remove` cannot see.
+		const { path: worktree } = await createSessionWorktree(
+			repo,
+			Settings.isolated({ "ovnfs.path": "/nonexistent/ovnfs" }),
+			"wt/gone",
+		);
 		await manager.moveTo(worktree);
 		await manager.close();
 		sessionId = manager.getSessionId();

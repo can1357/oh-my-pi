@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -20,7 +20,6 @@ import {
 	type ManagerUpdateSteps,
 	migrateRenamedInstall,
 	parseReportedVersion,
-	parseUpdateArgs,
 	pruneBunInstallCache,
 	type ReleaseInfo,
 	type RenameMigrationSteps,
@@ -38,9 +37,8 @@ import {
 	verifyInstalledVersion,
 } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import Update from "@oh-my-pi/pi-coding-agent/commands/update";
-import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, removeSyncWithRetries, removeWithRetries } from "@oh-my-pi/pi-utils";
 import type { CliConfig } from "@oh-my-pi/pi-utils/cli";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 const miseBinary = Bun.env.MISE_BIN ?? $which("mise");
 const npmBinary = $which("npm");
@@ -158,28 +156,6 @@ describe("update command plugin dispatch", () => {
 	});
 });
 
-describe("parseUpdateArgs", () => {
-	it("preserves the legacy plugin update shorthand", () => {
-		expect(parseUpdateArgs(["update", "-l"])).toEqual({
-			force: false,
-			check: false,
-			plugins: true,
-			channel: undefined,
-		});
-	});
-
-	it("parses update channels", () => {
-		expect(parseUpdateArgs(["update", "--canary"])?.channel).toBe("canary");
-		expect(parseUpdateArgs(["update", "--stable"])?.channel).toBe("stable");
-		expect(parseUpdateArgs(["update"])?.channel).toBeUndefined();
-	});
-
-	it("rejects conflicting update channels", () => {
-		expect(() => parseUpdateArgs(["update", "--canary", "--stable"])).toThrow(
-			"--canary and --stable are mutually exclusive",
-		);
-	});
-});
 describe("parseReportedVersion", () => {
 	it("preserves the prerelease suffix so a canary launcher verifies as up to date", () => {
 		// Regression: dropping `-canary.1` made a correctly installed canary
@@ -540,6 +516,45 @@ describe("update-cli install target detection", () => {
 		});
 
 		expect(method).toBe("mise");
+	});
+});
+
+// `bun pm bin -g` and the omp path `$which` finds can name the same directory
+// through different strings (e.g. Scoop's ~/.bun junction on Windows). Bun bin
+// containment must compare real paths; a symlink exercises the same realpath
+// resolution on macOS/Linux.
+describe("update-cli install target detection through linked bin dirs", () => {
+	let tmpRoot: string;
+	let realBinDir: string;
+	let linkedBinDir: string;
+	let ompPathViaLink: string;
+
+	beforeAll(() => {
+		tmpRoot = nodeFs.mkdtempSync(path.join(os.tmpdir(), "omp-update-linked-bin-"));
+		realBinDir = path.join(tmpRoot, "real", "bin");
+		nodeFs.mkdirSync(realBinDir, { recursive: true });
+		nodeFs.writeFileSync(path.join(realBinDir, "omp"), "#!/bin/sh\n", { mode: 0o755 });
+
+		linkedBinDir = path.join(tmpRoot, "link-bin");
+		nodeFs.symlinkSync(realBinDir, linkedBinDir, "dir");
+		ompPathViaLink = path.join(linkedBinDir, "omp");
+	});
+
+	afterAll(() => {
+		removeSyncWithRetries(tmpRoot);
+	});
+
+	it("classifies omp reached through a symlinked bin dir as bun-managed", () => {
+		// $which resolves through the symlink, `bun pm bin -g` returns the real path
+		// (or vice versa). Either direction must be recognized.
+		const method = resolveUpdateMethodForTest(ompPathViaLink, realBinDir);
+		expect(method).toBe("bun");
+	});
+
+	it("classifies omp at the real bin dir as bun-managed when bunBinDir is symlinked", () => {
+		const ompAtReal = path.join(realBinDir, "omp");
+		const method = resolveUpdateMethodForTest(ompAtReal, linkedBinDir);
+		expect(method).toBe("bun");
 	});
 });
 
@@ -1624,9 +1639,6 @@ describe("update-cli concurrent binary updates", () => {
 	const verify = async () => ({ ok: true, actual: version });
 
 	async function prepare(): Promise<{ dir: string; targetPath: string }> {
-		const loadedTheme = await getThemeByName("dark");
-		if (!loadedTheme) throw new Error("theme unavailable");
-		setThemeInstance(loadedTheme);
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		const dir = await makeTempDir();
 		const targetPath = path.join(dir, "omp");

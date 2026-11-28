@@ -12,8 +12,8 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { cfgRetryRefusalFallbackRevertPolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../src/ui/theme/service";
 
 function createScriptedAgent(model: Model, requestedModels: string[], responses: MockResponse[]): Agent {
 	return new Agent({

@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as os from "node:os";
-import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/spinner-clock";
+import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-coding-agent/config/spinner-interval";
 import {
 	buildTerminalTitleWithState,
 	disposeTerminalTitleState,
 	setTerminalTitle,
+	setExtensionTerminalTitle,
 	initTerminalTitleState,
 	popTerminalTitle,
 	setSessionTerminalTitle,
@@ -47,9 +48,9 @@ describe("buildTerminalTitleWithState", () => {
 	});
 
 	it("animates spinner frames in the separator slot while working on Windows", () => {
-		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32")).toBe(`${BRAND} ⠋ ${LABEL}`);
-		expect(buildTerminalTitleWithState(LABEL, "working", 1, true, "win32")).toBe(`${BRAND} ⠙ ${LABEL}`);
-		expect(buildTerminalTitleWithState(undefined, "working", 1, true, "win32")).toBe(`${BRAND} ⠙`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 0, true, "win32")).toBe(`${BRAND} ⠙ ${LABEL}`);
+		expect(buildTerminalTitleWithState(LABEL, "working", 1, true, "win32")).toBe(`${BRAND} ⠸ ${LABEL}`);
+		expect(buildTerminalTitleWithState(undefined, "working", 1, true, "win32")).toBe(`${BRAND} ⠸`);
 	});
 
 	it("keeps the state visible as a trailing separator when there is no label", () => {
@@ -209,6 +210,19 @@ describe("disposeTerminalTitleState", () => {
 		expect(observedTitles(writes, windowsTitleMock)).toEqual([]);
 	});
 
+	it("stops the clock under an extension title and resumes on either release path", () => {
+		setTerminalTitleState("working");
+		for (const release of [() => setExtensionTerminalTitle(""), () => setSessionTerminalTitle("next")]) {
+			setExtensionTerminalTitle("owned");
+			setTerminalTitleState("working");
+			expect(vi.getTimerCount()).toBe(0);
+			release();
+			resetObserved(writes, windowsTitleMock);
+			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS);
+			expect(observedTitles(writes, windowsTitleMock)).toHaveLength(1);
+		}
+	});
+
 	it("latches: a direct setTerminalTitle after dispose cannot write the shell's tab", () => {
 		// `setTerminalTitle` is EXPORTED and writes OSC/Win32 straight out, so it
 		// bypasses the composed-state path entirely. A direct importer firing from
@@ -313,7 +327,7 @@ describe("disposeTerminalTitleState", () => {
 		}
 	});
 
-	it("falls back to braille for an unknown style", () => {
+	it("falls back to the centered default for an unknown style", () => {
 		setTerminalTitleSpinnerStyle("line");
 		setTerminalTitleSpinnerStyle("nope");
 		setTerminalTitleState("working");
@@ -323,7 +337,7 @@ describe("disposeTerminalTitleState", () => {
 
 		const titles = observedTitles(writes, windowsTitleMock);
 		expect(titles.length).toBeGreaterThan(0);
-		expect(titles.some(title => title?.includes("⠋") || title?.includes("⠙"))).toBe(true);
+		expect(titles.some(title => title?.includes("⠸") || title?.includes("⢰"))).toBe(true);
 	});
 
 	it("emits pulse frames on live ticks", () => {

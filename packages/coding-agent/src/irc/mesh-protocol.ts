@@ -1,22 +1,24 @@
 /**
- * Wire protocol of the agent mesh: omp instances in one project directory
- * messaging each other's agents through the daemon's `agents` room unit.
+ * Wire protocol of the agent mesh: omp instances on one machine messaging
+ * each other's agents through the daemon's `agents` room unit.
  *
- * Each instance attaches one tunnel (LF-delimited JSON) to its project's room.
+ * Each instance attaches one tunnel (LF-delimited JSON) to the daemon's single
+ * global room and advertises its project directory; listings default to the
+ * instance's own project, while addressing by pid works across projects.
  * An instance is addressed by its pid: `agent://<pid>` is its main agent,
  * `agent://<pid>/<id>` one of its subagents. The room only forwards; delivery
  * semantics (inject, wake, revive) stay with the recipient's local IrcBus.
  *
  * Implementations: `daemon/modules/agents.ts` (room), `irc/mesh.ts` (instance).
  */
-import type { AgentStatus } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
-import type { IrcDeliveryReceipt } from "@oh-my-pi/pi-tui/tools/irc";
+import type { AgentStatus } from "../registry/agent-hub-types";
+import type { IrcDeliveryReceipt } from "./irc-types";
 
 /** Daemon module kind and `caps` key. */
 export const AGENT_MESH_KIND = "agents";
 /** Bumped on incompatible changes to the messages below. */
-export const AGENT_MESH_VERSION = 2;
-/** The one room unit key per project scope. */
+export const AGENT_MESH_VERSION = 3;
+/** Key of the one room unit, in the global scope. */
 export const AGENT_MESH_ROOM_KEY = "room";
 
 /** Status and transcript location published by a subagent's owning process. */
@@ -28,10 +30,14 @@ export interface MeshSubagent {
 
 /** Current registry state advertised by an instance. */
 export interface MeshState {
+	/** Canonical project directory (`canonicalProjectDir`) the instance runs in. */
+	project: string;
 	/** Root transcript; its artifact directory holds the published outputs. */
 	sessionFile: string | null;
 	status: AgentStatus | "unknown";
 	agents: MeshSubagent[];
+	/** Title of the root session; peers show it in place of the pid. */
+	title?: string;
 }
 
 /** One instance in the room, as the roster shows it. */

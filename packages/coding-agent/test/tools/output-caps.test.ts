@@ -6,7 +6,7 @@
  * bounded-output paths (bash sink/minimizer) see zero behavior change.
  */
 import { describe, expect, it } from "bun:test";
-import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "@oh-my-pi/pi-coding-agent/tools/streaming-output";
 
 const MARKER_PATTERN = /\[…\d+B elided…\]/;
 
@@ -103,7 +103,7 @@ describe("enforceInlineByteCap", () => {
 		});
 		// saveArtifact receives the full original text, not the elided version.
 		expect(saved).toBe(text);
-		expect(result.endsWith("[raw output: local://17.log]")).toBe(true);
+		expect(result.endsWith("[raw output: local://17.log:raw]")).toBe(true);
 		expect(result).toMatch(MARKER_PATTERN);
 	});
 

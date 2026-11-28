@@ -9,6 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { withOfficialAnthropicEndpoint } from "./helpers/anthropic-endpoint";
 
@@ -116,25 +117,60 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.isFastModeActive()).toBe(true);
 	});
 
+	/** A Fireworks model, whose provider owns a tier control outside the service-tier families. */
+	const fireworksModel = () =>
+		buildModel({
+			id: "gpt-oss-120b",
+			name: "GPT OSS 120B",
+			api: "openai-completions",
+			provider: "fireworks",
+			baseUrl: "https://api.fireworks.ai/inference/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 64_000,
+		});
+
 	it("leaves Fireworks models on the dedicated Fireworks tier control", async () => {
-		const session = await createSessionForModel(
-			buildModel({
-				id: "gpt-oss-120b",
-				name: "GPT OSS 120B",
-				api: "openai-completions",
-				provider: "fireworks",
-				baseUrl: "https://api.fireworks.ai/inference/v1",
-				reasoning: true,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 128_000,
-				maxTokens: 64_000,
-			}),
-		);
+		const session = await createSessionForModel(fireworksModel());
 		expect(session.setFastMode(true)).toBe(false);
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeEnabled()).toBe(false);
 		expect(session.isFastModeActive()).toBe(false);
+	});
+
+	const devinModel = (priorityLane?: { id: string; routes: Record<string, string> }) =>
+		buildModel({
+			id: "claude-opus-5",
+			name: "Claude Opus 5",
+			api: "devin-agent",
+			provider: "devin",
+			baseUrl: "https://server.codeium.com",
+			requestModelId: "claude-opus-5-medium",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			...(priorityLane && {
+				priorityLane: { ...priorityLane, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
+			}),
+		});
+
+	it("enables Devin's fast lanes on a Devin model that has one, and refuses without one", async () => {
+		const laned = await createSessionForModel(
+			devinModel({ id: "claude-opus-5-fast", routes: { "claude-opus-5-medium": "claude-opus-5-medium-fast" } }),
+		);
+		expect(laned.setFastMode(true)).toBe(true);
+		expect(laned.serviceTierByFamily).toEqual({ devin: "priority" });
+		expect(laned.isFastModeActive()).toBe(true);
+		await laned.dispose();
+
+		const plain = await createSessionForModel(devinModel());
+		expect(plain.setFastMode(true)).toBe(false);
+		expect(plain.serviceTierByFamily).toEqual({});
+		expect(plain.isFastModeActive()).toBe(false);
 	});
 
 	it("clears only the current model's family when disabled", async () => {
@@ -190,7 +226,7 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.setUltrafastMode(true)).toBe(false);
 	});
 
-	it("selects Ultrafast on an advertising Codex model and clears it with /fast off", async () => {
+	it("clears Ultrafast when the session API disables fast service", async () => {
 		const session = await createSessionForModel(codexModel(["priority", "ultrafast"]));
 		expect(session.setUltrafastMode(true)).toBe(true);
 		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
@@ -200,5 +236,70 @@ describe("/fast targets the current model's service-tier family", () => {
 		session.setFastMode(false);
 		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeActive()).toBe(false);
+	});
+	async function runCommand(session: AgentSession, text: string) {
+		const outputs: string[] = [];
+		const result = await executeAcpBuiltinSlashCommand(text, {
+			session,
+			sessionManager: session.sessionManager,
+			settings: session.settings,
+			cwd: session.sessionManager.getCwd(),
+			output: message => {
+				outputs.push(message);
+			},
+			refreshCommands: () => {},
+			reloadPlugins: async () => {},
+		});
+		return { result, outputs };
+	}
+
+	it("reports /fast as unavailable for a model with no service-tier control", async () => {
+		const session = await createSessionForModel(fireworksModel());
+		const { outputs } = await runCommand(session, "/fast");
+		expect(outputs[0]).toContain("unavailable");
+		expect(session.serviceTierByFamily).toEqual({});
+	});
+
+	it("switches between distinct Fast and Ultrafast tiers and toggles each off", async () => {
+		const session = await createSessionForModel(codexModel(["priority", "ultrafast"]));
+		await runCommand(session, "/fast");
+		expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
+		await runCommand(session, "/ultrafast");
+		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
+		const { outputs } = await runCommand(session, "/session info");
+		expect(outputs[0]).toContain("Fast tier: Ultrafast");
+		await runCommand(session, "/fast");
+		expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
+		await runCommand(session, "/fast");
+		expect(session.serviceTierByFamily).toEqual({});
+		await runCommand(session, "/ultrafast");
+		await runCommand(session, "/ultrafast");
+		expect(session.serviceTierByFamily).toEqual({});
+	});
+
+	it("keeps explicit Fast controls and the enable-only /fast ultra alias", async () => {
+		const session = await createSessionForModel(codexModel(["priority", "ultrafast"]));
+		await runCommand(session, "/fast on");
+		await runCommand(session, "/fast on");
+		expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
+		await runCommand(session, "/fast ultra");
+		await runCommand(session, "/fast ultra");
+		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
+		await runCommand(session, "/fast off");
+		await runCommand(session, "/fast off");
+		expect(session.serviceTierByFamily).toEqual({});
+	});
+
+	it("sets Ultrafast explicitly without clearing Priority when Ultrafast is off", async () => {
+		const session = await createSessionForModel(codexModel(["priority", "ultrafast"]));
+		await runCommand(session, "/fast on");
+		await runCommand(session, "/ultrafast off");
+		expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
+		await runCommand(session, "/ultrafast on");
+		await runCommand(session, "/ultrafast on");
+		expect(session.serviceTierByFamily).toEqual({ openai: "ultrafast" });
+		await runCommand(session, "/ultrafast off");
+		await runCommand(session, "/ultrafast off");
+		expect(session.serviceTierByFamily).toEqual({});
 	});
 });

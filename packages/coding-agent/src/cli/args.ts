@@ -7,7 +7,8 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { MotionMode } from "../config/motion-presets";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
 import type { ApprovalMode } from "../tools/approval";
-import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import { CLI_THINKING_LEVELS, parseCliThinkingLevel } from "../thinking/levels";
+import { type ConfiguredThinkingLevel } from "../utils/render-utils";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
 	EXTENSION_SHADOWABLE_STRING_FLAGS,
@@ -38,6 +39,8 @@ export interface Args {
 	smol?: string;
 	slow?: string;
 	plan?: string;
+	/** `--preset` starts on a saved model preset's roles and default thinking level (ephemeral). */
+	preset?: string;
 	/** Objective for a fresh interactive goal session. */
 	goal?: string;
 	prewalk?: boolean;
@@ -298,7 +301,9 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		// value-taking built-in (`--plan`, `--model`, …) that branch would consume
 		// the following token — eating the user's message and setting the wrong
 		// built-in field — so registered flags shadow same-named built-ins here.
-		const extFlag = arg.startsWith("--") ? extensionFlags?.get(arg.slice(2)) : undefined;
+		// `--preset` is reserved by the built-in launch flag: the preset applies
+		// before extensions load, so a same-named extension flag cannot claim it.
+		const extFlag = arg.startsWith("--") && arg !== "--preset" ? extensionFlags?.get(arg.slice(2)) : undefined;
 		if (extFlag) {
 			const flagName = arg.slice(2);
 			if (extFlag.type === "boolean") {
@@ -332,14 +337,17 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			// (`--system-prompt --profile foo` ⇒ the prompt is the literal "--profile"),
 			// except for the profile bootstrap's internal boundary sentinel.
 			if (
-				arg === "--goal" &&
+				(arg === "--goal" || arg === "--preset") &&
 				(i + 1 >= args.length ||
 					args[i + 1] === PROFILE_BOOTSTRAP_BOUNDARY_ARG ||
 					(equalsValueIndex === -1 && args[i + 1].startsWith("-")))
 			) {
-				result.invalidFlagValues.push("--goal requires an objective.");
-				// Like every string flag, a flag-looking token after `--goal` is its (rejected)
-				// value, never a flag of its own: `--goal --profile work` must not activate a profile.
+				result.invalidFlagValues.push(
+					arg === "--goal" ? "--goal requires an objective." : "--preset requires a preset name.",
+				);
+				// Like every string flag, a flag-looking token after `--goal` or `--preset` is
+				// its (rejected) value, never a flag of its own: `--preset --profile work`
+				// must not activate a profile.
 				if (i + 1 < args.length && args[i + 1] !== PROFILE_BOOTSTRAP_BOUNDARY_ARG) i++;
 				continue;
 			}
@@ -471,6 +479,14 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		if (!path.isAbsolute(trustedPath)) {
 			throw new CliUsageError(`--trusted-extension requires an absolute path: ${trustedPath}`);
 		}
+	}
+
+	// A --no-tools session loads no extensions; an explicit one would be silently ignored.
+	if (
+		result.noTools &&
+		((result.extensions?.length ?? 0) > 0 || (result.hooks?.length ?? 0) > 0 || trustedFlagCount > 0)
+	) {
+		throw new CliUsageError("--no-tools cannot be combined with --extension, -e, --hook, or --trusted-extension");
 	}
 
 	if (result.systemPrompt !== undefined && result.systemPromptTemplate !== undefined) {

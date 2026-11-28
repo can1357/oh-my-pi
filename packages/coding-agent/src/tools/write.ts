@@ -1,4 +1,4 @@
-import type { WriteToolDetails } from "@oh-my-pi/pi-tui/tools/write";
+import type { WriteToolDetails } from "./details/write";
 import { Database } from "bun:sqlite";
 import { assertNotHeldOpen } from "@oh-my-pi/pi-utils/held-file";
 import * as fs from "node:fs/promises";
@@ -50,17 +50,17 @@ import { truncateForPrompt } from "./approval";
 import { approvalTargetKey } from "./approval-targets";
 import { assertEditableFile } from "./auto-generated-guard";
 
-import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
-import { hasColumnTruncationClause, isColumnTruncationNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
+import { isReadTruncationNotice } from "./hashline-format";
+import { hasColumnTruncationClause, isColumnTruncationNotice } from "./output-meta-format";
 import { recoverConflictUriPrefix } from "./conflict-detect";
 import { unwrapHashlineHeaderPath } from "./hashline-header-path";
 import { outputMeta } from "./output-meta";
 import { formatPathRelativeToCwd, probeLiteralPathExists, resolveToCwd, specialFileKind } from "./path-utils";
-import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { splitPathAndSel } from "./details/read";
 import { enforcePlanModeWrite, resolvePlanPath } from "./plan-mode-guard";
 import { decodeUtf8Text } from "./read-format";
 import { routeReadThroughBridge } from "./read-summary";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shortenPath } from "../utils/render-utils";
 
 import {
 	deleteRowByKey,
@@ -72,7 +72,7 @@ import {
 	updateRowByKey,
 	updateRowByRowId,
 } from "./sqlite-reader";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { maybeWriteSnapshotHeader, stripWriteContent } from "./write-content";
 import { docTopicsReadable } from "./doc-topics";
@@ -299,7 +299,13 @@ function assertNotShorterReadProjection(
 	writeContent: string = rawContent,
 ): void {
 	const rawPayloadLength = readProjectionPayloadLength(rawContent);
-	if (rawPayloadLength === undefined || currentContent === undefined) return;
+	if (rawPayloadLength === undefined) return;
+	if (currentContent === undefined) {
+		// No source to discard, but the new file would be a silently incomplete copy ending in the notice.
+		throw new ToolError(
+			`Refusing to create '${displayPath}' from an incomplete read projection: the content ends with an omp read truncation notice, so the new file would be missing the omitted content and contain the notice. Re-read the omitted ranges and write the complete file.`,
+		);
+	}
 	// A column-cap notice proves the page lossy at any length: a cut line ends in `…` in place of
 	// its tail, and a line one column past the cap renders exactly as long as its source. So does
 	// a truncation notice carrying the column clause, whose line-number prefixes pad the payload.
@@ -707,12 +713,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (sel !== undefined && !entries.has(resolvedArchivePath.archiveSubPath)) {
 					throwReadSelectorMisfire(writeTarget, sel);
 				}
-				const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
-				if (existingTarget !== undefined && endsWithReadTruncationNotice(rawContent)) {
+				if (endsWithReadTruncationNotice(rawContent)) {
+					const existingTarget = entries.get(resolvedArchivePath.archiveSubPath);
 					const existingBytes =
 						existingTarget instanceof Blob ? new Uint8Array(await existingTarget.arrayBuffer()) : existingTarget;
-					const existingText = typeof existingBytes === "string" ? existingBytes : decodeUtf8Text(existingBytes);
-					assertNotShorterReadProjection(writeTarget, rawContent, existingText ?? undefined, content);
+					const existingText =
+						existingBytes instanceof Uint8Array ? (decodeUtf8Text(existingBytes) ?? undefined) : existingBytes;
+					assertNotShorterReadProjection(writeTarget, rawContent, existingText, content);
 				}
 				entries.set(resolvedArchivePath.archiveSubPath, content);
 

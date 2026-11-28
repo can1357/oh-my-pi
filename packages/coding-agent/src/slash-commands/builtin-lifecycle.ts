@@ -2,8 +2,8 @@ import { clearSubmittedText, refuseImages, restoreDetachedDraft, runWithDetached
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
-import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
-import { rescopeSessionToCwd } from "../session/cwd-rescope";
+import { errorMessage, logger, setProjectDir } from "@oh-my-pi/pi-utils";
+import { type CwdRescopeOptions, rescopeSessionToCwd } from "../session/cwd-rescope";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import { continuesConversation } from "../modes/utils/conversation-position";
 import type { FreshSessionResult } from "../session/agent-session";
@@ -21,7 +21,7 @@ import {
 import type { SessionWorktree } from "../worktree/backend";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { resolveToCwd } from "../tools/path-utils";
-import { commandConsumed, errorMessage, usage } from "./helpers/parse";
+import { commandConsumed, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
 	ParsedSlashCommand,
@@ -88,7 +88,7 @@ async function handleCompactTui(command: ParsedSlashCommand, runtime: TuiSlashCo
 	// A switch still applying (or rolling back) decides which conversation is live.
 	if (origin && ctx.session.isSessionTransitioning) await ctx.session.waitForSessionTransition();
 	if (origin && !continuesConversation(ctx.sessionManager, origin)) {
-		restoreDetachedDraft(ctx.editor, command.text, runtime.input?.images, runtime.input?.imageLinks);
+		restoreDetachedDraft(ctx.composer, command.text, runtime.input?.images, runtime.input?.imageLinks);
 		ctx.showWarning(`Conversation changed before /${command.name} ran; returned it to the editor`);
 		return;
 	}
@@ -145,25 +145,30 @@ async function fatalMoveFailure(text: string, runtime: SlashCommandRuntime): Pro
 /** A move rollback failed: re-align the workspace to wherever the session ended up and report it. */
 async function reportFailedRollback(runtime: SlashCommandRuntime, rollbackError: unknown): Promise<SlashCommandResult> {
 	const actual = runtime.sessionManager.getCwd();
+	let memoryWarning: string | undefined;
 	try {
-		await rescopeHeadlessToCwd(runtime, actual);
+		memoryWarning = await rescopeHeadlessToCwd(runtime, actual, { restore: true });
 	} catch {
 		return fatalMoveFailure(
 			`Move failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
 			runtime,
 		);
 	}
-	return usage(
+	const result = await usage(
 		`Move failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
 		runtime,
 	);
+	if (memoryWarning) await runtime.output(memoryWarning);
+	return result;
 }
 
 /**
  * Relocate the headless session to `resolvedPath` (an existing directory):
  * flush settings, move the session file, re-scope the process, rolling back
  * on failure. Returns a result when the move did not complete; `undefined`
- * on success so the caller can report its own confirmation.
+ * on success so the caller can report its own confirmation. The memory
+ * warning for the directory the session ends up in is reported after the move
+ * or its rollback settled, so a failed delivery cannot roll back a committed move.
  */
 async function relocateHeadlessSession(
 	runtime: SlashCommandRuntime,
@@ -190,20 +195,25 @@ async function relocateHeadlessSession(
 		}
 		return usage(`Move failed: ${errorMessage(err)}`, runtime);
 	}
+	let memoryWarning: string | undefined;
+	let failure: SlashCommandResult | undefined;
 	try {
-		await rescopeHeadlessToCwd(runtime, resolvedPath);
+		memoryWarning = await rescopeHeadlessToCwd(runtime, resolvedPath);
 	} catch (err) {
 		try {
 			await runtime.sessionManager.rollbackMove(previousState);
-			await rescopeHeadlessToCwd(runtime, previousState.cwd);
+			memoryWarning = await rescopeHeadlessToCwd(runtime, previousState.cwd, { restore: true });
 		} catch (rollbackError) {
 			return reportFailedRollback(runtime, rollbackError);
 		}
-		return usage(`Move failed: ${errorMessage(err)}`, runtime);
+		failure = await usage(`Move failed: ${errorMessage(err)}`, runtime);
 	}
-	await runtime.notifyConfigChanged?.();
-	await runtime.notifyTitleChanged?.();
-	return undefined;
+	if (!failure) {
+		await runtime.notifyConfigChanged?.();
+		await runtime.notifyTitleChanged?.();
+	}
+	if (memoryWarning) await runtime.output(memoryWarning);
+	return failure;
 }
 
 /** Session id `/pin` and `/unpin` act on (the argument's match, else the active session), or the usage result. */
@@ -503,7 +513,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed({ agentInvoked: true });
 		},
 		handleTui: async (_command, runtime) => {
-			const didRetry = await runtime.ctx.session.retry();
+			// The viewed session, like Alt+R: a focused subagent retries its own failed turn.
+			const didRetry = await runtime.ctx.viewSession.retry();
 			if (!didRetry) {
 				runtime.ctx.showStatus("Nothing to retry");
 			}
@@ -712,7 +723,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.addToHistory(command.text);
+			runtime.ctx.composer.addToHistory(command.text);
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleMoveCommand(command.args || undefined);
 		},
@@ -731,7 +742,9 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			const sourceCwd = runtime.sessionManager.getCwd();
 			let worktree: SessionWorktree;
 			try {
-				worktree = await createSessionWorktree(sourceCwd, runtime.settings, branch);
+				worktree = await createSessionWorktree(sourceCwd, runtime.settings, branch, {
+					session: runtime.sessionManager.getSessionId(),
+				});
 			} catch (err) {
 				return usage(`Worktree creation failed: ${errorMessage(err)}`, runtime);
 			}
@@ -751,7 +764,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
-			runtime.ctx.editor.addToHistory(command.text);
+			runtime.ctx.composer.addToHistory(command.text);
 			clearSubmittedText(runtime);
 			await runtime.ctx.handleWorktreeCommand(command.args || undefined);
 		},
@@ -841,8 +854,14 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 ];
-async function rescopeHeadlessToCwd(runtime: SlashCommandRuntime, cwd: string): Promise<void> {
+/** Re-scope the process to `cwd`; returns the memory warning for the caller to report once the move settled. */
+async function rescopeHeadlessToCwd(
+	runtime: SlashCommandRuntime,
+	cwd: string,
+	options?: CwdRescopeOptions,
+): Promise<string | undefined> {
 	setProjectDir(cwd);
-	await rescopeSessionToCwd(runtime.session, runtime.settings, cwd);
+	const memoryWarning = await rescopeSessionToCwd(runtime.session, runtime.settings, cwd, options);
 	await runtime.refreshCommands?.();
+	return memoryWarning;
 }

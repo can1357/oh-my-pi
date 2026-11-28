@@ -1,31 +1,30 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { BtwHistoryStore } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
-import { type BtwNoteAction, BtwNoteComponent } from "@oh-my-pi/pi-tui/overlays/btw-note";
-import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import { BTW_INJECT_LABEL, BTW_INJECTED_LABEL } from "@oh-my-pi/pi-tui/overlays/btw-inject";
+import { BTW_INJECT_LABEL, BTW_INJECTED_LABEL } from "@oh-my-pi/pi-coding-agent/modes/view-model/overlays/btw-inject";
 import { BtwController } from "@oh-my-pi/pi-coding-agent/modes/controllers/btw-controller";
-import { APPROVE_ARM_MS, ApprovalDialogComponent } from "@oh-my-pi/pi-tui/overlays/approval-dialog";
 import { cfgBtwInject } from "@oh-my-pi/pi-coding-agent/modes/settings";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
+import { replaceTabs } from "@oh-my-pi/pi-coding-agent/utils/text-width";
+import { Shell, type TranscriptBlock } from "@oh-my-pi/pi-coding-agent/ui/shell/index";
+import { jsx, type UiNode } from "@oh-my-pi/pi-tui";
 import {
-	Container,
-	getKeybindings,
-	type KeybindingsManager as TuiKeybindingsManager,
-	replaceTabs,
-	setKeybindings,
-	type TUI,
-} from "@oh-my-pi/pi-tui";
+	btwShellMembers,
+	historySheet,
+	inlineText,
+	isNoteBlock,
+	noteIn,
+	notesIn,
+	setNative,
+} from "../../helpers/btw-ui";
+import { nativeShell } from "../../helpers/native-shell";
 
 const usage: Usage = {
 	input: 0,
@@ -74,28 +73,16 @@ function makeFakeSession(
 
 function makeCtx(
 	session: InteractiveModeContext["session"],
-	btwContainer = new Container(),
 	settings: Readonly<Record<string, unknown>> = {},
-): InteractiveModeContext {
+): InteractiveModeContext & {
+	setTestLeafId(nextLeafId: string | null): void;
+	setTestSessionId(nextSessionId: string): void;
+} {
 	let leafId: string | null = "leaf-1";
 	let sessionId = "session-1";
-	const editor = new Container();
-	const editorContainer = new Container();
-	editorContainer.addChild(editor);
 	return {
-		chatContainer: new TranscriptContainer(),
-		transcriptMessageComponents: new WeakMap(),
-		ui: {
-			requestRender: vi.fn(),
-			requestComponentRender: vi.fn(),
-			showOverlay: vi.fn(() => ({ hide: vi.fn() })),
-			setFocus: vi.fn(),
-			terminal: { rows: 30 },
-		} as unknown as TUI,
+		...btwShellMembers(new Shell()),
 		keybindings: KeybindingsManager.inMemory(),
-		btwContainer,
-		editor,
-		editorContainer,
 		session,
 		settings: Settings.isolated(settings),
 		sessionManager: {
@@ -107,6 +94,10 @@ function makeCtx(
 		showStatus: vi.fn(),
 		showError: vi.fn(),
 		handleBtwBranch: vi.fn(async () => {}),
+		handleImagePaste: vi.fn(async () => false),
+		handleImagePathPaste: vi.fn(async () => {}),
+		// Speech-to-text off: the space bar types.
+		dictationSpaceHold: () => ({ enabled: () => false, onStart: () => {}, onEnd: () => {} }),
 		setTestLeafId(nextLeafId: string | null) {
 			leafId = nextLeafId;
 		},
@@ -122,91 +113,74 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-beforeAll(async () => {
-	await initTheme();
-});
 async function drainBtwRequest(): Promise<void> {
 	await Promise.resolve();
 	await Promise.resolve();
 }
 
-/** The transcript notes Tern shows, in transcript order. */
-function notesIn(ctx: InteractiveModeContext): BtwNoteComponent[] {
-	return ctx.chatContainer.children.filter(child => child instanceof BtwNoteComponent);
-}
+describe("BtwController under Tern", () => {
+	// A native start repaints whatever still listens for it, settings readers included.
+	beforeAll(async () => {
+		await Settings.init({ inMemory: true });
+	});
 
-function noteIn(ctx: InteractiveModeContext): BtwNoteComponent {
-	const [note] = notesIn(ctx);
-	if (!note) throw new Error("expected a /btw note in the transcript");
-	return note;
-}
+	it("mounts BTW history as Tern's titled sheet and closes it on Escape with the draft's focus back", async () => {
+		const ctx = makeCtx(makeFakeSession(vi.fn()));
+		await using ui = await nativeShell(ctx.shell);
+		const controller = new BtwController(ctx);
+		const before = ctx.shell.focused();
 
-/** A click on the note (or one of its tools), or a chosen menu entry. */
-function press(note: BtwNoteComponent, act: BtwNoteAction): void {
-	note.handleNativeEvent({ type: "action", key: "", act, mods: [] });
-}
+		await controller.start("");
+		const overlay = ui.node("overlay");
+		expect(overlay.parent).toBe("layer");
+		// Nothing to list yet: the palette-sized sheet.
+		expect(overlay.p).toEqual({
+			role: "omp.overlay.btwHistory",
+			anchor: "center",
+			size: "md",
+			head: "BTW history",
+			modal: true,
+		});
+		const [sheet] = ui.children(overlay);
+		expect(sheet?.k).toBe("col");
+		expect(sheet?.p.role).toBeUndefined();
 
-/** The ids of the note's right-click entries. */
-function menuIds(note: BtwNoteComponent): string[] {
-	const menu = note.describe().p?.actions?.menu ?? [];
-	return menu.flatMap(entry => (typeof entry === "object" && "id" in entry ? [entry.id] : []));
-}
-
-describe("BtwPanelComponent", () => {
-	it("confirms a copy visually and clears the confirmation on the next answer", () => {
-		const ui = { requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI;
-		const panel = new BtwPanelComponent({ question: "Question?", tui: ui });
-		panel.setAnswer("Answer");
-		panel.markComplete();
-		expect(Bun.stripANSI(panel.render(80).join("\n"))).not.toContain("Copied");
-		panel.markCopied();
-		const copied = Bun.stripANSI(panel.render(80).join("\n"));
-		expect(copied).toContain("Copied");
-		expect(panel.title).toContain("Copied");
-		panel.appendText(" more");
-		expect(Bun.stripANSI(panel.render(80).join("\n"))).not.toContain("Copied");
+		ui.type("\x1b[27u");
+		expect(ctx.shell.overlays.open()).toBe(false);
+		expect(ctx.shell.focused()).toBe(before);
+		await controller.dispose();
 	});
 });
 
 describe("BtwController", () => {
-	it("returns approval input to the pending prompt after BTW history closes", async () => {
+	it("returns input to the pending prompt after BTW history closes", async () => {
 		const ctx = makeCtx(makeFakeSession(vi.fn()));
-		const editor = { render: () => ["editor"], handleInput: vi.fn() };
-		const approval = vi.fn();
-		const dialog = new ApprovalDialogComponent("Approve cfg:// change?", {
-			onApprove: approval,
-			onDeny: vi.fn(),
-		});
-		const editorContainer = new Container();
-		Object.assign(ctx, { editor, editorContainer });
-		editorContainer.addChild(editor);
-		let focused: typeof editor | ApprovalDialogComponent = editor;
-		let overlay: BtwHistoryPanel | undefined;
-		Object.assign(ctx.ui, {
-			setFocus: (component: typeof editor | ApprovalDialogComponent) => {
-				focused = component;
-			},
-			showOverlay: (component: BtwHistoryPanel) => {
-				overlay = component;
-				return {
-					hide: () => {
-						focused = editor;
-					},
-				};
-			},
-		});
+		const mountAsk = (): UiNode => {
+			ctx.shell.dock.slot("ask").set(() => jsx("col", { role: "omp.overlay.approval" }));
+			const node = ctx.shell.dock.slot("ask").view();
+			if (!node || typeof node !== "object" || !("kind" in node)) throw new Error("expected the ask node");
+			return node;
+		};
 		const controller = new BtwController(ctx);
 
+		// A prompt that held the keys before the sheet opened gets them back.
+		const before = mountAsk();
+		ctx.shell.focus(before);
 		await controller.start("");
-		editorContainer.clear();
-		editorContainer.addChild(dialog);
-		ctx.ui.setFocus(dialog);
-		vi.spyOn(performance, "now").mockReturnValue(performance.now() + APPROVE_ARM_MS + 1);
-		overlay?.handleInput("\x1b");
-		focused.handleInput("\r");
+		const first = historySheet(ctx.shell);
+		expect(ctx.shell.focused()).toBe(first.overlay);
+		first.press("escape");
+		expect(first.closed).toBe(true);
+		expect(ctx.shell.focused()).toBe(before);
 
-		expect(approval).toHaveBeenCalledTimes(1);
-		expect(editor.handleInput).not.toHaveBeenCalled();
+		// A prompt that took the keys while the sheet was open keeps them.
+		await controller.start("");
+		const second = historySheet(ctx.shell);
+		const during = mountAsk();
+		ctx.shell.focus(during);
+		second.press("escape");
+		expect(second.closed).toBe(true);
+		expect(ctx.shell.focused()).toBe(during);
 		await controller.dispose();
 	});
 
@@ -232,18 +206,17 @@ describe("BtwController", () => {
 	it("cancels a running answer on Escape and closes its retained panel on the next Escape", async () => {
 		const pending = Promise.withResolvers<RunEphemeralTurnResult>();
 		const runEphemeralTurn = vi.fn((_args: RunEphemeralTurnArgs) => pending.promise);
-		const btwContainer = new Container();
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
 		const controller = new BtwController(ctx);
 
 		await controller.start("Question?");
-		expect(btwContainer.children).toHaveLength(1);
+		expect(ctx.shell.dock.slot("btw").occupied()).toBe(true);
 		expect(controller.handleEscape()).toBe(true);
 		expect(runEphemeralTurn.mock.calls[0]?.[0].signal?.aborted).toBe(true);
-		expect(btwContainer.children).toHaveLength(1);
+		expect(ctx.shell.dock.slot("btw").occupied()).toBe(true);
 		expect(controller.hasActiveRequest()).toBe(true);
 		expect(controller.handleEscape()).toBe(true);
-		expect(btwContainer.children).toHaveLength(0);
+		expect(ctx.shell.dock.slot("btw").occupied()).toBe(false);
 		expect(controller.hasActiveRequest()).toBe(false);
 		pending.resolve({ replyText: "Late answer", assistantMessage: createAssistantMessage("Late answer") });
 		await drainBtwRequest();
@@ -257,41 +230,66 @@ describe("BtwController", () => {
 			onTextDelta = args.onTextDelta;
 			return pending.promise;
 		});
-		const btwContainer = new Container();
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
-		const showOverlay = vi.fn((_component: unknown) => ({ hide: vi.fn() }));
-		Object.assign(ctx.ui, { nativeRendering: true, showOverlay });
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		setNative(ctx.shell, true);
 		const controller = new BtwController(ctx);
 
 		await controller.start("Why?");
 		// Neither the dock panel nor a sheet: the answer streams in the transcript.
-		expect(btwContainer.children).toHaveLength(0);
-		expect(showOverlay).not.toHaveBeenCalled();
-		const note = noteIn(ctx);
+		expect(ctx.shell.dock.slot("btw").occupied()).toBe(false);
+		expect(ctx.shell.overlays.open()).toBe(false);
+		const note = noteIn(ctx.shell);
 		onTextDelta?.("Because streaming.");
-		expect(JSON.stringify(note.describe())).toContain("Because streaming.");
+		expect(note.text()).toContain("Because streaming.");
 
 		expect(controller.hasActiveRequest()).toBe(false);
-		press(note, "btw-focus");
+		// Only the head takes the click: one in the answer (reading, selecting) leaves the composer alone.
+		expect(note.clicks("btw-focus")).toEqual(["omp.btw.note.head"]);
+		note.press("btw-focus");
 		expect(controller.isFocused()).toBe(true);
-		expect(note.describe().p?.role).toBe("omp.btw.note.active");
+		expect(note.role).toBe("omp.btw.note.active");
+		expect(note.clicks("btw-focus")).toEqual(["omp.btw.note.head"]);
 		expect(controller.hasActiveRequest()).toBe(true);
 		expect(controller.handleEscape()).toBe(true);
 		expect(controller.isFocused()).toBe(false);
-		expect(note.describe().p?.role).toBe("omp.btw.note");
+		expect(note.role).toBe("omp.btw.note");
 		expect(runEphemeralTurn.mock.calls[0]?.[0].signal?.aborted).toBe(false);
 
 		// Folding the note it talks to points the composer back too; a click on the line reopens both.
-		press(note, "btw-focus");
-		press(note, "btw-fold");
+		note.press("btw-focus");
+		note.press("btw-fold");
 		expect(note.folded).toBe(true);
 		expect(controller.isFocused()).toBe(false);
-		press(note, "btw-expand");
+		note.press("btw-expand");
 		expect(note.folded).toBe(false);
 		expect(controller.isFocused()).toBe(true);
 
 		pending.resolve({ replyText: "Because streaming.", assistantMessage: createAssistantMessage("x") });
 		await drainBtwRequest();
+		await controller.dispose();
+	});
+
+	it("in Tern lets go of the focused note on a press outside it, however many arrive", async () => {
+		const runEphemeralTurn = vi.fn(async () => ({
+			replyText: "Answer",
+			assistantMessage: createAssistantMessage("Answer"),
+		}));
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
+		setNative(ctx.shell, true);
+		const controller = new BtwController(ctx);
+
+		await controller.start("Why?");
+		await drainBtwRequest();
+		const note = noteIn(ctx.shell);
+		expect(note.outside).toBeUndefined();
+		note.press("btw-focus");
+		expect(note.outside).toBe("btw-blur");
+		note.press("btw-blur");
+		expect(controller.isFocused()).toBe(false);
+		expect(note.role).toBe("omp.btw.note");
+		// A second press before Tern drew the first one's answer leaves it alone, unlike a click.
+		note.press("btw-blur");
+		expect(controller.isFocused()).toBe(false);
 		await controller.dispose();
 	});
 
@@ -301,23 +299,23 @@ describe("BtwController", () => {
 			assistantMessage: createAssistantMessage("Answer"),
 		}));
 		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
-		Object.assign(ctx.ui, { nativeRendering: true });
+		setNative(ctx.shell, true);
 		const controller = new BtwController(ctx);
 
 		await controller.start("First?");
 		await drainBtwRequest();
-		const note = noteIn(ctx);
+		const note = noteIn(ctx.shell);
 		// Not pointed at the note: nothing to send to.
 		expect(await controller.submitFollowUp("More?")).toBe(false);
-		press(note, "btw-focus");
+		note.press("btw-focus");
 		expect(await controller.submitFollowUp("More?")).toBe(true);
 		await drainBtwRequest();
 
 		expect(runEphemeralTurn).toHaveBeenCalledTimes(2);
 		expect(runEphemeralTurn.mock.calls[1]?.[0].promptText).toContain("More?");
 		// The same note carries the follow-up; no second note.
-		expect(notesIn(ctx)).toEqual([note]);
-		expect(JSON.stringify(note.describe())).toContain("More?");
+		expect(notesIn(ctx.shell).map(each => each.block)).toEqual([note.block]);
+		expect(note.text()).toContain("More?");
 		await controller.dispose();
 	});
 
@@ -327,7 +325,7 @@ describe("BtwController", () => {
 			assistantMessage: createAssistantMessage("Answer"),
 		}));
 		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
-		Object.assign(ctx.ui, { nativeRendering: true });
+		setNative(ctx.shell, true);
 		const controller = new BtwController(ctx);
 		const branch = vi.spyOn(controller, "handleBranch");
 
@@ -335,9 +333,9 @@ describe("BtwController", () => {
 		await drainBtwRequest();
 
 		expect(controller.handlesBranchKey()).toBe(false);
-		const note = noteIn(ctx);
-		expect(menuIds(note)).toContain("btw-branch");
-		press(note, "btw-branch");
+		const note = noteIn(ctx.shell);
+		expect(note.menu).toContain("btw-branch");
+		note.press("btw-branch");
 		const result = branch.mock.results[0];
 		if (result?.type !== "return") throw new Error("expected the branch operation to return a promise");
 		expect(await result.value).toBe(true);
@@ -350,7 +348,7 @@ describe("BtwController", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-btw-notes-"));
 		const manager = SessionManager.create(directory, directory);
 		const ctx = makeCtx(makeFakeSession(vi.fn()));
-		Object.assign(ctx.ui, { nativeRendering: true });
+		setNative(ctx.shell, true);
 		ctx.sessionManager = manager;
 		const controller = new BtwController(ctx);
 		try {
@@ -360,9 +358,8 @@ describe("BtwController", () => {
 			await manager.ensureOnDisk();
 			const blocks = manager.getBranch().flatMap(entry => {
 				if (entry.type !== "message") return [];
-				const block = new Container();
-				ctx.transcriptMessageComponents.set(entry.message, block);
-				ctx.chatContainer.addChild(block);
+				const block = ctx.present(() => jsx("text", { text: entry.id }));
+				ctx.transcriptBlocks.set(entry.message, block);
 				return [block];
 			});
 			const [first] = manager.getBranch();
@@ -376,11 +373,21 @@ describe("BtwController", () => {
 
 			await controller.placeNotes();
 
-			const order = ctx.chatContainer.children.map(child =>
-				child instanceof BtwNoteComponent ? child.record.id : blocks.findIndex(block => block === child),
-			);
-			expect(order).toEqual(["before-all", 0, "mid-turn", 1, 2, "latest"]);
-			expect(notesIn(ctx).every(note => note.folded)).toBe(true);
+			const notes = new Map(notesIn(ctx.shell).map(note => [note.block, note]));
+			const order = ctx.shell.transcript
+				.blocks()
+				.map((block: TranscriptBlock) =>
+					isNoteBlock(block) ? notes.get(block)!.text() : blocks.findIndex(each => each === block),
+				);
+			expect(order).toEqual([
+				expect.stringContaining("before-all"),
+				0,
+				expect.stringContaining("mid-turn"),
+				1,
+				2,
+				expect.stringContaining("latest"),
+			]);
+			expect(notesIn(ctx.shell).every(note => note.folded)).toBe(true);
 		} finally {
 			await controller.dispose();
 			await manager.flush();
@@ -397,7 +404,7 @@ describe("BtwController", () => {
 		const controller = new BtwController(ctx);
 		await controller.start("   ");
 		expect(runEphemeralTurn).not.toHaveBeenCalled();
-		expect(ctx.ui.showOverlay).toHaveBeenCalledTimes(1);
+		expect(historySheet(ctx.shell).closed).toBe(false);
 		expect(controller.hasActiveRequest()).toBe(false);
 		await controller.dispose();
 	});
@@ -503,7 +510,6 @@ describe("BtwController", () => {
 			assistantMessage: createAssistantMessage("Worker answer"),
 		}));
 		const ctx = makeCtx(makeFakeSession(mainTurn));
-		const showOverlay = vi.spyOn(ctx.ui, "showOverlay");
 		const mainManager = SessionManager.create(directory, directory);
 		ctx.sessionManager = mainManager;
 		const controller = new BtwController(ctx);
@@ -524,9 +530,8 @@ describe("BtwController", () => {
 			Object.assign(ctx, { focusedAgentId: "Worker", viewSession: focusedSession });
 
 			await controller.start("");
-			const panel = showOverlay.mock.calls.at(-1)?.[0];
-			if (!(panel instanceof BtwHistoryPanel)) throw new Error("Expected BTW history");
-			expect(Bun.stripANSI(panel.render(120).join("\n"))).not.toContain("Main question?");
+			const panel = historySheet(ctx.shell);
+			expect(panel.text(120)).not.toContain("Main question?");
 
 			await controller.start("Worker question?");
 			await drainBtwRequest();
@@ -550,9 +555,7 @@ describe("BtwController", () => {
 			replyText: "Status answer",
 			assistantMessage: createAssistantMessage("Status answer"),
 		}));
-		const btwContainer = new Container();
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
-		const showOverlay = vi.spyOn(ctx.ui, "showOverlay");
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
 		const manager = SessionManager.create(directory, directory);
 		ctx.sessionManager = manager;
 		const controller = new BtwController(ctx);
@@ -563,18 +566,16 @@ describe("BtwController", () => {
 			await controller.flush();
 
 			expect(runEphemeralTurn.mock.calls[0]?.[0].promptText).toContain(template);
-			const panel = btwContainer.children[0];
-			if (!(panel instanceof BtwPanelComponent)) throw new Error("Expected the BTW panel");
-			expect(panel.title).toBe("/sitrep");
-			expect(Bun.stripANSI(panel.render(100).join("\n"))).not.toContain("Sitrep template");
+			const inline = inlineText(ctx.shell, 100);
+			expect(inline).toContain("/sitrep");
+			expect(inline).not.toContain("Sitrep template");
 
 			const saved = (await BtwHistoryStore.open(manager.getArtifactsDir()!)).getRecords();
 			expect(saved.map(record => [record.title, record.question])).toEqual([["/sitrep", template]]);
 
 			await controller.start("");
-			const history = showOverlay.mock.calls.at(-1)?.[0];
-			if (!(history instanceof BtwHistoryPanel)) throw new Error("Expected BTW history");
-			const rendered = Bun.stripANSI(history.render(120).join("\n"));
+			const history = historySheet(ctx.shell);
+			const rendered = history.text(120);
 			expect(rendered).toContain("/sitrep");
 			expect(rendered).not.toContain("Sitrep template");
 		} finally {
@@ -596,8 +597,7 @@ describe("BtwController", () => {
 				ensureOnDisk: async () => {},
 			},
 		} as unknown as InteractiveModeContext["session"];
-		const btwContainer = new Container();
-		const ctx = Object.assign(makeCtx(makeFakeSession(vi.fn()), btwContainer), {
+		const ctx = Object.assign(makeCtx(makeFakeSession(vi.fn())), {
 			focusedAgentId: "Worker" as string | undefined,
 			viewSession: focusedSession,
 		});
@@ -612,7 +612,7 @@ describe("BtwController", () => {
 		});
 		await drainBtwRequest();
 
-		const rendered = Bun.stripANSI(btwContainer.render(120).join("\n"));
+		const rendered = inlineText(ctx.shell, 120);
 		expect(rendered).toContain("Streaming worker answer");
 		expect(controller.canCopy()).toBe(true);
 		expect(controller.canFollowUp()).toBe(false);
@@ -649,8 +649,7 @@ describe("BtwController", () => {
 		const runEphemeralTurn = vi.fn(async () => ({ replyText: "Answer", assistantMessage }));
 		const session = makeFakeSession(runEphemeralTurn);
 		Object.defineProperty(session, "isStreaming", { value: true });
-		const btwContainer = new Container();
-		const ctx = makeCtx(session, btwContainer);
+		const ctx = makeCtx(session);
 		const controller = new BtwController(ctx);
 
 		await controller.start("Question?");
@@ -696,8 +695,7 @@ describe("BtwController", () => {
 		const branch = Promise.withResolvers<void>();
 		const assistantMessage = createAssistantMessage("Answer");
 		const runEphemeralTurn = vi.fn(async () => ({ replyText: "Answer", assistantMessage }));
-		const btwContainer = new Container();
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
 		ctx.handleBtwBranch = vi.fn(async () => {
 			await branch.promise;
 		});
@@ -709,10 +707,9 @@ describe("BtwController", () => {
 		await Promise.resolve();
 		expect(controller.handlesBranchKey()).toBe(true);
 
-		const panel = btwContainer.children[0];
-		expect(Bun.stripANSI(panel?.render(120).join("\n") ?? "")).toContain("Branching to chat");
+		expect(inlineText(ctx.shell, 120)).toContain("Branching to chat");
 		expect(controller.handleEscape()).toBe(true);
-		expect(btwContainer.children).toHaveLength(1);
+		expect(ctx.shell.dock.slot("btw").occupied()).toBe(true);
 
 		branch.resolve();
 		await branchPromise;
@@ -765,7 +762,7 @@ describe("BtwController", () => {
 				assistantMessage: createAssistantMessage("raw assistant payload"),
 			};
 		});
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), new Container());
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
 		const controller = new BtwController(ctx);
 
 		await controller.start("Question?");
@@ -774,7 +771,7 @@ describe("BtwController", () => {
 		expect(controller.canCopy()).toBe(true);
 		expect(await controller.handleCopy()).toBe(true);
 		expect(copySpy).toHaveBeenCalledWith(replaceTabs("Visible\tanswer\n\nfrom /btw"));
-		expect(Bun.stripANSI(ctx.btwContainer.render(100).join("\n"))).toContain("Copied");
+		expect(inlineText(ctx.shell, 100)).toContain("Copied");
 	});
 	it("does not confirm a superseded panel when the clipboard settles late", async () => {
 		const { promise: copyGate, resolve: releaseCopy } = Promise.withResolvers<void>();
@@ -785,8 +782,7 @@ describe("BtwController", () => {
 			replyText: "First answer",
 			assistantMessage: createAssistantMessage("First answer"),
 		}));
-		const btwContainer = new Container();
-		const ctx = makeCtx(makeFakeSession(runEphemeralTurn), btwContainer);
+		const ctx = makeCtx(makeFakeSession(runEphemeralTurn));
 		const controller = new BtwController(ctx);
 		try {
 			await controller.start("First?");
@@ -797,7 +793,7 @@ describe("BtwController", () => {
 			releaseCopy();
 			expect(await copyPromise).toBe(true);
 			expect(copySpy).toHaveBeenCalledTimes(1);
-			expect(Bun.stripANSI(btwContainer.render(100).join("\n"))).not.toContain("Copied");
+			expect(inlineText(ctx.shell, 100)).not.toContain("Copied");
 		} finally {
 			await controller.dispose();
 		}
@@ -947,7 +943,6 @@ describe("BtwController", () => {
 			assistantMessage: createAssistantMessage("Saved side answer"),
 		}));
 		const ctx = makeCtx(session);
-		const showOverlay = vi.spyOn(ctx.ui, "showOverlay");
 		ctx.sessionManager = manager;
 		const controller = new BtwController(ctx);
 		try {
@@ -967,13 +962,12 @@ describe("BtwController", () => {
 
 			const restored = new BtwController(ctx);
 			await restored.start("");
-			const panel = showOverlay.mock.calls.at(-1)?.[0];
-			if (!(panel instanceof BtwHistoryPanel)) throw new Error("Expected BTW history");
+			const panel = historySheet(ctx.shell);
 			const copy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
-			panel.handleInput("c");
+			panel.press("c");
 			await drainBtwRequest();
 			expect(copy).toHaveBeenCalledWith("Saved side answer");
-			expect(Bun.stripANSI(panel.render(120).join("\n"))).toContain("Copied");
+			expect(panel.text(120)).toContain("Copied");
 			await restored.dispose();
 		} finally {
 			await controller.dispose();
@@ -987,7 +981,6 @@ describe("BtwController", () => {
 		const pending = Promise.withResolvers<RunEphemeralTurnResult>();
 		const run = vi.fn((_args: RunEphemeralTurnArgs) => pending.promise);
 		const ctx = makeCtx(makeFakeSession(run));
-		const showOverlay = vi.spyOn(ctx.ui, "showOverlay");
 		ctx.sessionManager = SessionManager.create(directory, directory);
 		const controller = new BtwController(ctx);
 		try {
@@ -1002,9 +995,8 @@ describe("BtwController", () => {
 			const saved = (await BtwHistoryStore.open(artifacts)).getRecords();
 			expect(saved.map(record => [record.answer, record.status])).toEqual([["Partial answer", "cancelled"]]);
 			await controller.start("");
-			const panel = showOverlay.mock.calls.at(-1)?.[0];
-			if (!(panel instanceof BtwHistoryPanel)) throw new Error("Expected BTW history");
-			expect(Bun.stripANSI(panel.render(100).join("\n"))).not.toContain("Partial answer");
+			const panel = historySheet(ctx.shell);
+			expect(panel.text(100)).not.toContain("Partial answer");
 		} finally {
 			await controller.dispose();
 			await fs.rm(directory, { recursive: true, force: true });
@@ -1016,18 +1008,8 @@ describe("BtwController inject", () => {
 	const steeringReply =
 		"It keeps retrying the flaky build.\n<inject>\n/stop retrying; run the unit tests first\n</inject>";
 	const steeringPrompt = "/stop retrying; run the unit tests first";
-	/** Legacy encoding of Alt+I, the default `app.btw.inject` key. */
-	const altI = "\x1bi";
-
-	// The sheet reads the global keybindings; install the app's (with `app.btw.inject`) per test.
-	let previousKeybindings: TuiKeybindingsManager;
-	beforeEach(() => {
-		previousKeybindings = getKeybindings();
-		setKeybindings(KeybindingsManager.inMemory());
-	});
-	afterEach(() => {
-		setKeybindings(previousKeybindings);
-	});
+	/** The default `app.btw.inject` key. */
+	const altI = "alt+i";
 	interface InjectPromptOptions {
 		expandPromptTemplates?: boolean;
 		onPromptAdmitted?: () => void;
@@ -1053,12 +1035,12 @@ describe("BtwController inject", () => {
 		return Object.assign(makeFakeSession(runEphemeralTurn), { prompt });
 	}
 
-	const shown = (ctx: InteractiveModeContext) => Bun.stripANSI(ctx.btwContainer.render(100).join("\n"));
+	const shown = (ctx: InteractiveModeContext) => inlineText(ctx.shell, 100);
 
 	it("with btw.inject on, shows the block and sends it verbatim and unexpanded, exactly once", async () => {
 		const runEphemeralTurn = steeringTurn();
 		const session = makeInjectSession(runEphemeralTurn);
-		const ctx = makeCtx(session, new Container(), { "btw.inject": true });
+		const ctx = makeCtx(session, { "btw.inject": true });
 		const controller = new BtwController(ctx);
 
 		await controller.start("Write a steering prompt to stop it");
@@ -1094,7 +1076,7 @@ describe("BtwController inject", () => {
 			})
 			// Dropped by an abort race that resolves without ever admitting the prompt.
 			.mockImplementationOnce(async () => true);
-		const ctx = makeCtx(makeInjectSession(steeringTurn(), prompt), new Container(), { "btw.inject": true });
+		const ctx = makeCtx(makeInjectSession(steeringTurn(), prompt), { "btw.inject": true });
 		const controller = new BtwController(ctx);
 		await controller.start("Write a steering prompt to stop it");
 		await drainBtwRequest();
@@ -1123,7 +1105,7 @@ describe("BtwController inject", () => {
 	it("refuses to inject while a branch of the same answer is in flight", async () => {
 		const branch = Promise.withResolvers<void>();
 		const session = makeInjectSession(steeringTurn());
-		const ctx = makeCtx(session, new Container(), { "btw.inject": true });
+		const ctx = makeCtx(session, { "btw.inject": true });
 		Object.assign(ctx, { handleBtwBranch: vi.fn(() => branch.promise) });
 		const controller = new BtwController(ctx);
 		await controller.start("Write a steering prompt to stop it");
@@ -1153,7 +1135,7 @@ describe("BtwController inject", () => {
 	it("gives collab guests neither the instruction nor the block, since their turns run on the host", async () => {
 		const runEphemeralTurn = steeringTurn();
 		const session = makeInjectSession(runEphemeralTurn);
-		const ctx = Object.assign(makeCtx(session, new Container(), { "btw.inject": true }), { collabGuest: {} });
+		const ctx = Object.assign(makeCtx(session, { "btw.inject": true }), { collabGuest: {} });
 		const controller = new BtwController(ctx);
 
 		await controller.start("Write a steering prompt to stop it");
@@ -1177,7 +1159,7 @@ describe("BtwController inject", () => {
 			},
 		} as unknown as InteractiveModeContext["session"];
 		const main = makeInjectSession(steeringTurn());
-		const ctx = Object.assign(makeCtx(main, new Container(), { "btw.inject": true }), {
+		const ctx = Object.assign(makeCtx(main, { "btw.inject": true }), {
 			focusedAgentId: "Worker",
 			viewSession: focusedSession,
 		});
@@ -1193,45 +1175,43 @@ describe("BtwController inject", () => {
 
 	it("in Tern sends from the history sheet with the inject key, once per answer", async () => {
 		const session = makeInjectSession(steeringTurn());
-		const ctx = makeCtx(session, new Container(), { "btw.inject": true });
-		const showOverlay = vi.fn((_component: unknown) => ({ hide: vi.fn() }));
-		Object.assign(ctx.ui, { nativeRendering: true, showOverlay });
+		const ctx = makeCtx(session, { "btw.inject": true });
+		setNative(ctx.shell, true);
 		const controller = new BtwController(ctx);
 
 		await controller.start("Write a steering prompt to stop it");
 		await drainBtwRequest();
 		await controller.start("");
-		const sheet = showOverlay.mock.calls[0]?.[0];
-		if (!(sheet instanceof BtwHistoryPanel)) throw new Error("expected the BTW history sheet");
+		const sheet = historySheet(ctx.shell);
 
 		// A bare letter never sends: only the bound chord does.
-		sheet.handleInput("i");
+		sheet.press("i");
 		expect(session.prompt).not.toHaveBeenCalled();
-		sheet.handleInput(altI);
-		sheet.handleInput(altI);
+		sheet.press(altI);
+		sheet.press(altI);
 		expect(session.prompt).toHaveBeenCalledTimes(1);
 		expect(session.prompt).toHaveBeenCalledWith(steeringPrompt, expect.anything());
-		expect(JSON.stringify(sheet.describe())).toContain(BTW_INJECTED_LABEL);
+		expect(sheet.text()).toContain(BTW_INJECTED_LABEL);
 		// The transcript note shows the block sent and offers it no more.
-		const note = noteIn(ctx);
-		expect(JSON.stringify(note.describe())).toContain(BTW_INJECTED_LABEL);
-		expect(menuIds(note)).not.toContain("btw-inject");
+		const note = noteIn(ctx.shell);
+		expect(note.text()).toContain(BTW_INJECTED_LABEL);
+		expect(note.menu).not.toContain("btw-inject");
 		await controller.dispose();
 	});
 
 	it("in Tern sends from the note's menu, once per answer", async () => {
 		const session = makeInjectSession(steeringTurn());
-		const ctx = makeCtx(session, new Container(), { "btw.inject": true });
-		Object.assign(ctx.ui, { nativeRendering: true });
+		const ctx = makeCtx(session, { "btw.inject": true });
+		setNative(ctx.shell, true);
 		const controller = new BtwController(ctx);
 
 		await controller.start("Write a steering prompt to stop it");
 		await drainBtwRequest();
-		const note = noteIn(ctx);
-		expect(JSON.stringify(note.describe())).toContain(BTW_INJECT_LABEL);
-		expect(menuIds(note)).toContain("btw-inject");
-		press(note, "btw-inject");
-		press(note, "btw-inject");
+		const note = noteIn(ctx.shell);
+		expect(note.text()).toContain(BTW_INJECT_LABEL);
+		expect(note.menu).toContain("btw-inject");
+		note.press("btw-inject");
+		note.press("btw-inject");
 		expect(session.prompt).toHaveBeenCalledTimes(1);
 		expect(session.prompt).toHaveBeenCalledWith(steeringPrompt, expect.anything());
 		await controller.dispose();
@@ -1241,8 +1221,7 @@ describe("BtwController inject", () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-btw-inject-stale-"));
 		const manager = SessionManager.create(directory, directory);
 		const session = makeInjectSession(steeringTurn());
-		const ctx = makeCtx(session, new Container(), { "btw.inject": true });
-		const showOverlay = vi.spyOn(ctx.ui, "showOverlay");
+		const ctx = makeCtx(session, { "btw.inject": true });
 		ctx.sessionManager = manager;
 		const earlier = new BtwController(ctx);
 		try {
@@ -1256,12 +1235,11 @@ describe("BtwController inject", () => {
 
 			const restarted = new BtwController(ctx);
 			await restarted.start("");
-			const sheet = showOverlay.mock.calls.at(-1)?.[0];
-			if (!(sheet instanceof BtwHistoryPanel)) throw new Error("expected the BTW history sheet");
-			const text = Bun.stripANSI(sheet.render(120).join("\n"));
+			const sheet = historySheet(ctx.shell);
+			const text = sheet.text(120);
 			expect(text).toContain("run the unit tests first");
 			expect(text).not.toContain(BTW_INJECT_LABEL);
-			sheet.handleInput(altI);
+			sheet.press(altI);
 			expect(session.prompt).not.toHaveBeenCalled();
 			await restarted.dispose();
 		} finally {
@@ -1277,7 +1255,7 @@ describe("BtwController inject", () => {
 			hasPendingDeferredExtensions: true,
 			loadDeferredExtensions: vi.fn(() => load.promise),
 		});
-		const ctx = makeCtx(session, new Container(), { "btw.inject": true });
+		const ctx = makeCtx(session, { "btw.inject": true });
 		const first = new BtwController(ctx);
 		await first.start("Write a steering prompt to stop it");
 		await drainBtwRequest();
@@ -1326,17 +1304,15 @@ describe("BtwController inject", () => {
 	it("never offers an answer asked while btw.inject was off, even after turning it on", async () => {
 		const session = makeInjectSession(steeringTurn());
 		const ctx = makeCtx(session);
-		const showOverlay = vi.spyOn(ctx.ui, "showOverlay");
 		const controller = new BtwController(ctx);
 		await controller.start("Write a steering prompt to stop it");
 		await drainBtwRequest();
 
 		cfgBtwInject.override(ctx.settings, true);
 		await controller.start("");
-		const sheet = showOverlay.mock.calls.at(-1)?.[0];
-		if (!(sheet instanceof BtwHistoryPanel)) throw new Error("expected the BTW history sheet");
-		expect(Bun.stripANSI(sheet.render(120).join("\n"))).not.toContain(BTW_INJECT_LABEL);
-		sheet.handleInput(altI);
+		const sheet = historySheet(ctx.shell);
+		expect(sheet.text(120)).not.toContain(BTW_INJECT_LABEL);
+		sheet.press(altI);
 		expect(session.prompt).not.toHaveBeenCalled();
 	});
 
@@ -1347,7 +1323,7 @@ describe("BtwController inject", () => {
 			reclaimed = controller.reclaimDroppedPrompt({ text, reason: "Session cost cap reached" });
 			throw new Error("Prompt dropped before provider dispatch.");
 		});
-		const ctx = makeCtx(makeInjectSession(steeringTurn(), prompt), new Container(), { "btw.inject": true });
+		const ctx = makeCtx(makeInjectSession(steeringTurn(), prompt), { "btw.inject": true });
 		const controller = new BtwController(ctx);
 		await controller.start("Write a steering prompt to stop it");
 		await drainBtwRequest();
@@ -1371,7 +1347,7 @@ describe("BtwController inject", () => {
 			throw new Error("Provider crashed mid-turn");
 		});
 		const session = Object.assign(makeInjectSession(steeringTurn(), prompt), { messages });
-		const ctx = makeCtx(session, new Container(), { "btw.inject": true });
+		const ctx = makeCtx(session, { "btw.inject": true });
 		const controller = new BtwController(ctx);
 		await controller.start("Write a steering prompt to stop it");
 		await drainBtwRequest();

@@ -2,12 +2,18 @@ import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { __rewriteLegacyExtensionSourceForTests } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
+import { clearClaudePluginRootsCache } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import {
+	__resetLegacyPiResolutionCache,
+	__rewriteLegacyExtensionSourceForTests,
+} from "@oh-my-pi/pi-coding-agent/extensibility/plugins/legacy-pi-compat";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tempRoots: string[] = [];
 
 afterEach(async () => {
+	__resetLegacyPiResolutionCache();
+	clearClaudePluginRootsCache();
 	mock.restore();
 	for (const root of tempRoots.splice(0)) {
 		await removeWithRetries(root);
@@ -30,13 +36,15 @@ test("bare workspace-member imports resolve through the workspace root manifest"
 	const repoRoot = path.join(root, "plugins", "node_modules", "monorepo-plugin");
 	const importer = path.join(repoRoot, "packages", "extension", "extensions", "entry.ts");
 	const memberRoot = path.join(repoRoot, "packages", "contracts");
+	const alternateRoot = path.join(repoRoot, "alternate", "contracts");
 	await fs.mkdir(path.dirname(importer), { recursive: true });
 	await fs.mkdir(path.join(memberRoot, "src"), { recursive: true });
+	await fs.mkdir(alternateRoot, { recursive: true });
 	await Bun.write(importer, "export {};\n");
 	await writeJson(path.join(repoRoot, "package.json"), {
 		name: "monorepo-plugin",
 		version: "1.0.0",
-		workspaces: ["packages/*"],
+		workspaces: ["packages/*", "alternate/*"],
 	});
 	await writeJson(path.join(memberRoot, "package.json"), {
 		name: "@monorepo/contracts",
@@ -45,6 +53,11 @@ test("bare workspace-member imports resolve through the workspace root manifest"
 		exports: { ".": { bun: "./src/index.ts", default: "./dist/index.js" } },
 	});
 	await Bun.write(path.join(memberRoot, "src", "index.ts"), "export const marker = 1;\n");
+	await writeJson(path.join(alternateRoot, "package.json"), {
+		name: "@monorepo/contracts",
+		main: "index.ts",
+	});
+	await Bun.write(path.join(alternateRoot, "index.ts"), "export const marker = 2;\n");
 
 	spyOn(Bun, "resolveSync").mockImplementation(() => {
 		throw new Error("compiled fallback");
@@ -96,4 +109,34 @@ test("installed node_modules copies shadow workspace members at the same level",
 
 	expect(rewritten).toContain("installed.js");
 	expect(rewritten).not.toContain("member.js");
+});
+
+test("bare dependency rewrites cache fallback package resolution until plugin caches clear", async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-legacy-cache-"));
+	tempRoots.push(root);
+	const importer = path.join(root, "extension", "src", "entry.ts");
+	const depRoot = path.join(root, "extension", "node_modules", "left-pad");
+	const manifestPath = path.join(depRoot, "package.json");
+	await fs.mkdir(path.dirname(importer), { recursive: true });
+	await fs.mkdir(depRoot, { recursive: true });
+	await Bun.write(importer, "export {};\n");
+	await writeJson(manifestPath, { name: "left-pad", version: "1.0.0", main: "index.js" });
+	await Bun.write(path.join(depRoot, "index.js"), "export default function leftPad() {}\n");
+	await Bun.write(path.join(depRoot, "alt.js"), "export default function altLeftPad() {}\n");
+
+	spyOn(Bun, "resolveSync").mockImplementation(() => {
+		throw new Error("compiled fallback");
+	});
+
+	const firstRewrite = await __rewriteLegacyExtensionSourceForTests('import leftPad from "left-pad";', importer);
+	await writeJson(manifestPath, { name: "left-pad", version: "1.0.0", main: "alt.js" });
+	const cachedRewrite = await __rewriteLegacyExtensionSourceForTests('import leftPad from "left-pad";', importer);
+
+	expect(firstRewrite).toContain("index.js");
+	expect(cachedRewrite).toBe(firstRewrite);
+
+	clearClaudePluginRootsCache();
+	const refreshedRewrite = await __rewriteLegacyExtensionSourceForTests('import leftPad from "left-pad";', importer);
+
+	expect(refreshedRewrite).toContain("alt.js");
 });

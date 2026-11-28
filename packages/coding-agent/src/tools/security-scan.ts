@@ -10,11 +10,10 @@ import {
 } from "../security/cloud";
 import { createSecurityEvidenceId, type SecurityEvidence, type SecurityValidationStatus } from "../security/contracts";
 import type { SecurityOperationSnapshot } from "../security/coordinator";
-import { getSecurityCoordinator } from "../security/coordinator";
 import type { SecurityTargetRequest } from "../security/preflight";
 import { SecurityStore } from "../security/store";
 import type { ToolSession } from "./index";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 
 import { cfgSecurityEnabled } from "./settings";
 
@@ -124,15 +123,18 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 		if (!cfgSecurityEnabled.get(this.session.settings)) {
 			throw new ToolError("Security is disabled. Enable security.enabled before using security_scan.");
 		}
-		const coordinatorForSession = () => {
-			if (!this.session.modelRegistry || !this.session.authStorage) {
+		const coordinatorForSession = async () => {
+			const { modelRegistry, authStorage } = this.session;
+			if (!modelRegistry || !authStorage) {
 				throw new ToolError("Security scan requires the session model and authentication registries");
 			}
+			// Only local operation actions need the coordinator and its scan runtime.
+			const { getSecurityCoordinator } = await import("../security/coordinator");
 			return getSecurityCoordinator({
 				cwd: this.session.cwd,
 				settings: this.session.settings,
-				authStorage: this.session.authStorage,
-				modelRegistry: this.session.modelRegistry,
+				authStorage,
+				modelRegistry,
 				activeModel: this.session.getActiveModel?.(),
 				sessionId: this.session.getSessionId?.() ?? undefined,
 				agentId: this.session.getAgentId?.() ?? undefined,
@@ -142,7 +144,8 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 		switch (params.action) {
 			case "preflight": {
 				const model = this.session.getActiveModel?.();
-				const plan = await coordinatorForSession().preflight({
+				const coordinator = await coordinatorForSession();
+				const plan = await coordinator.preflight({
 					target: targetFromParams(params),
 					knowledgeBasePaths: params.knowledge_base_paths,
 					outputRoot: params.output_root,
@@ -161,7 +164,8 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 				);
 			}
 			case "start": {
-				const operation = await coordinatorForSession().start({
+				const coordinator = await coordinatorForSession();
+				const operation = await coordinator.start({
 					planId: requireValue(params.plan_id, "plan_id"),
 				});
 				return textResult(`Security scan ${operation.scanId} started as ${operation.operationId}.`, {
@@ -171,7 +175,8 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 			}
 			case "status": {
 				const operationId = requireValue(params.operation_id, "operation_id");
-				const operation = await coordinatorForSession().status(operationId);
+				const coordinator = await coordinatorForSession();
+				const operation = await coordinator.status(operationId);
 				if (!operation) throw new ToolError(`Unknown security operation: ${operationId}`);
 				return textResult(
 					`Security scan ${operation.scanId}: ${operation.phase}; ${operation.findingCount} finding(s).`,
@@ -180,13 +185,14 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 			}
 			case "cancel": {
 				const operationId = requireValue(params.operation_id, "operation_id");
-				const cancelled = await coordinatorForSession().cancel(operationId);
+				const coordinator = await coordinatorForSession();
+				const cancelled = await coordinator.cancel(operationId);
 				return textResult(
 					cancelled ? `Cancellation requested for ${operationId}.` : `No running operation ${operationId}.`,
 					{
 						action: params.action,
 						cancelled,
-						operation: (await coordinatorForSession().status(operationId)) ?? undefined,
+						operation: (await coordinator.status(operationId)) ?? undefined,
 					},
 				);
 			}

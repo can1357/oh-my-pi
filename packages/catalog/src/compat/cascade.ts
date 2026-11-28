@@ -14,7 +14,6 @@
  * a tie with a bundled rule and still loses to a more specific one.
  */
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { isRecord } from "@oh-my-pi/pi-utils/type-guards";
 import { compileRuleDirectives } from "./axes";
 import { parseRevision, type Revision, type RevisionTerm, revisionSatisfies } from "./revision";
 import rules from "./rules.json";
@@ -61,19 +60,23 @@ function globSegments(pattern: string): readonly string[] {
 
 export function globMatch(pattern: string, value: string): boolean {
 	const segments = globSegments(pattern);
-	if (segments.length === 1) return value === pattern;
-	const head = segments[0] ?? "";
-	if (!value.startsWith(head)) return false;
-	let remainder = value.slice(head.length);
-	for (let i = 1; i < segments.length - 1; i++) {
-		const segment = segments[i] ?? "";
-		if (!segment) continue;
-		const found = remainder.indexOf(segment);
-		if (found === -1) return false;
-		remainder = remainder.slice(found + segment.length);
+	const len = segments.length;
+	if (len === 1) return value === pattern;
+	const head = segments[0];
+	if (head.length > 0 && !value.startsWith(head)) return false;
+	const tail = segments[len - 1];
+	const endLimit = value.length - tail.length;
+	if (endLimit < head.length) return false;
+	if (tail.length > 0 && !value.endsWith(tail)) return false;
+	let pos = head.length;
+	for (let i = 1; i < len - 1; i++) {
+		const segment = segments[i];
+		if (segment.length === 0) continue;
+		const found = value.indexOf(segment, pos);
+		if (found === -1 || found + segment.length > endLimit) return false;
+		pos = found + segment.length;
 	}
-	const last = segments[segments.length - 1] ?? "";
-	return last === "" || remainder.endsWith(last);
+	return true;
 }
 
 interface IndexedRule {
@@ -121,6 +124,7 @@ interface RankedRule {
 	rank: Rank;
 }
 
+let bundledRuleIndex: RuleIndex | undefined;
 let ruleIndex: RuleIndex | undefined;
 /** Nesting depth of {@link bypassCascadeMemoForTesting}. */
 let cascadeMemoBypassDepth = 0;
@@ -131,6 +135,78 @@ function appendRule(map: Map<string, IndexedRule[]>, key: string, rule: IndexedR
 	else map.set(key, [rule]);
 }
 
+function indexCompiledRule(compiled: CompiledRule, order: number, layer: number): IndexedRule {
+	const revision = compiled.revision?.map(term => {
+		const parsed = parseRevision(term.revision);
+		if (!parsed) throw new Error(`invalid compiled revision term in ${compiled.source}`);
+		return { op: term.op, revision: parsed } satisfies RevisionTerm;
+	});
+	const priority = compiled.priority ?? 0;
+	const dimensions =
+		Number(compiled.class !== undefined) +
+		Number(compiled.providers !== undefined) +
+		Number(compiled.apis !== undefined) +
+		Number(compiled.upstreams !== undefined) +
+		Number(compiled.family !== undefined) +
+		Number(compiled.revision !== undefined) +
+		Number(compiled.models !== undefined);
+	const ranked: RankedRule[] = [];
+	const rule: IndexedRule = {
+		compiled,
+		revision,
+		priority,
+		dimensions,
+		hasExactEffortsRule: compiled.thinking !== undefined && "efforts" in compiled.thinking,
+		order,
+		ranked,
+	};
+	for (let exactness = 0; exactness <= 2; exactness++) {
+		ranked.push({ rule, rank: [exactness, dimensions, priority, layer] });
+	}
+	if (compiled.models !== undefined) {
+		let exact: Set<string> | undefined;
+		let patterns: CompiledSelector[] | undefined;
+		for (const selector of compiled.models) {
+			if (selector.kind === "exact") {
+				(exact ??= new Set()).add(selector.value);
+			} else {
+				(patterns ??= []).push(selector);
+			}
+		}
+		if (exact !== undefined) rule.exactModels = exact;
+		if (patterns !== undefined) rule.patternModels = patterns;
+	}
+	return rule;
+}
+
+function insertIndexedRule(index: RuleIndex, rule: IndexedRule): void {
+	const compiled = rule.compiled;
+	if (compiled.class === undefined) {
+		if (compiled.providers === undefined) {
+			index.globals.push(rule);
+		} else if (compiled.providers.length === 1) {
+			appendRule(index.byProvider, compiled.providers[0], rule);
+		} else {
+			for (const provider of new Set(compiled.providers)) appendRule(index.byProvider, provider, rule);
+		}
+		return;
+	}
+	if (compiled.providers === undefined) {
+		appendRule(index.byClass, compiled.class, rule);
+		return;
+	}
+	let providers = index.byClassProvider.get(compiled.class);
+	if (!providers) {
+		providers = new Map();
+		index.byClassProvider.set(compiled.class, providers);
+	}
+	if (compiled.providers.length === 1) {
+		appendRule(providers, compiled.providers[0], rule);
+	} else {
+		for (const provider of new Set(compiled.providers)) appendRule(providers, provider, rule);
+	}
+}
+
 function buildRuleIndex(bundled: readonly CompiledRule[], runtime: readonly CompiledRule[] = []): RuleIndex {
 	const index: RuleIndex = {
 		globals: [],
@@ -138,97 +214,66 @@ function buildRuleIndex(bundled: readonly CompiledRule[], runtime: readonly Comp
 		byProvider: new Map(),
 		byClassProvider: new Map(),
 	};
-	const ordered = runtime.length === 0 ? bundled : [...bundled, ...runtime];
-	for (let order = 0; order < ordered.length; order++) {
-		const compiled = ordered[order];
-		const layer = order < bundled.length ? 0 : 1;
-		const revision = compiled.revision?.map(term => {
-			const parsed = parseRevision(term.revision);
-			if (!parsed) throw new Error(`invalid compiled revision term in ${compiled.source}`);
-			return { op: term.op, revision: parsed } satisfies RevisionTerm;
-		});
-		const priority = compiled.priority ?? 0;
-		const dimensions =
-			Number(compiled.class !== undefined) +
-			Number(compiled.providers !== undefined) +
-			Number(compiled.apis !== undefined) +
-			Number(compiled.upstreams !== undefined) +
-			Number(compiled.family !== undefined) +
-			Number(compiled.revision !== undefined) +
-			Number(compiled.models !== undefined);
-		const ranked: RankedRule[] = [];
-		const rule: IndexedRule = {
-			compiled,
-			revision,
-			priority,
-			dimensions,
-			hasExactEffortsRule: compiled.thinking !== undefined && "efforts" in compiled.thinking,
-			order,
-			ranked,
-		};
-		for (let exactness = 0; exactness <= 2; exactness++) {
-			ranked.push({ rule, rank: [exactness, dimensions, priority, layer] });
-		}
-		if (compiled.models !== undefined) {
-			const exact = new Set<string>();
-			const patterns: CompiledSelector[] = [];
-			for (const selector of compiled.models) {
-				if (selector.kind === "exact") exact.add(selector.value);
-				else patterns.push(selector);
+	for (let order = 0; order < bundled.length; order++) {
+		insertIndexedRule(index, indexCompiledRule(bundled[order], order, 0));
+	}
+	for (let i = 0; i < runtime.length; i++) {
+		insertIndexedRule(index, indexCompiledRule(runtime[i], bundled.length + i, 1));
+	}
+	return index;
+}
+
+function cloneRuleIndexWithRuntime(base: RuleIndex, baseCount: number, runtime: readonly CompiledRule[]): RuleIndex {
+	const byProvider = new Map<string, IndexedRule[]>(base.byProvider);
+	const index: RuleIndex = {
+		globals: base.globals,
+		byClass: base.byClass,
+		byProvider,
+		byClassProvider: base.byClassProvider,
+	};
+	for (let i = 0; i < runtime.length; i++) {
+		const rule = indexCompiledRule(runtime[i], baseCount + i, 1);
+		const providers = rule.compiled.providers;
+		if (rule.compiled.class === undefined && providers !== undefined) {
+			const unique = providers.length === 1 ? providers : new Set(providers);
+			for (const provider of unique) {
+				const existing = byProvider.get(provider);
+				byProvider.set(provider, existing ? [...existing, rule] : [rule]);
 			}
-			if (exact.size > 0) rule.exactModels = exact;
-			if (patterns.length > 0) rule.patternModels = patterns;
+		} else {
+			// Fallback for any non-provider-only runtime rule.
+			return buildRuleIndex(rules.cascade.rules, runtime);
 		}
-		if (compiled.class === undefined) {
-			if (compiled.providers === undefined) {
-				index.globals.push(rule);
-			} else {
-				for (const provider of new Set(compiled.providers)) appendRule(index.byProvider, provider, rule);
-			}
-			continue;
-		}
-		if (compiled.providers === undefined) {
-			appendRule(index.byClass, compiled.class, rule);
-			continue;
-		}
-		let providers = index.byClassProvider.get(compiled.class);
-		if (!providers) {
-			providers = new Map();
-			index.byClassProvider.set(compiled.class, providers);
-		}
-		for (const provider of new Set(compiled.providers)) appendRule(providers, provider, rule);
 	}
 	return index;
 }
 
 function getRuleIndex(): RuleIndex {
-	ruleIndex ??= buildRuleIndex(rules.cascade.rules, [...runtimeRules.values()]);
+	if (ruleIndex !== undefined) return ruleIndex;
+	bundledRuleIndex ??= buildRuleIndex(rules.cascade.rules);
+	if (runtimeRules.size === 0) {
+		ruleIndex = bundledRuleIndex;
+	} else {
+		ruleIndex = cloneRuleIndexWithRuntime(bundledRuleIndex, rules.cascade.rules.length, [...runtimeRules.values()]);
+	}
 	return ruleIndex;
 }
 
 /** Rules bucketed under the target's class and provider, merged back into rule order. */
 function relevantRules(index: RuleIndex, target: ResolveTarget): IndexedRule[] {
-	const buckets = [
-		index.globals,
-		index.byClass.get(target.class),
-		index.byProvider.get(target.provider),
-		index.byClassProvider.get(target.class)?.get(target.provider),
-	];
-	const positions = [0, 0, 0, 0];
+	const b0 = index.globals;
+	const b1 = index.byClass.get(target.class);
+	const b2 = index.byProvider.get(target.provider);
+	const b3 = index.byClassProvider.get(target.class)?.get(target.provider);
+	const total = b0.length + (b1?.length ?? 0) + (b2?.length ?? 0) + (b3?.length ?? 0);
+	if (total === 0) return [];
 	const relevant: IndexedRule[] = [];
-	while (true) {
-		let nextBucket = -1;
-		let nextOrder = Number.POSITIVE_INFINITY;
-		for (let bucket = 0; bucket < buckets.length; bucket++) {
-			const candidate = buckets[bucket]?.[positions[bucket]];
-			if (candidate && candidate.order < nextOrder) {
-				nextBucket = bucket;
-				nextOrder = candidate.order;
-			}
-		}
-		if (nextBucket < 0) return relevant;
-		relevant.push(buckets[nextBucket]![positions[nextBucket]++]);
-	}
+	if (b0.length > 0) for (let i = 0; i < b0.length; i++) relevant.push(b0[i]);
+	if (b1 !== undefined) for (let i = 0; i < b1.length; i++) relevant.push(b1[i]);
+	if (b2 !== undefined) for (let i = 0; i < b2.length; i++) relevant.push(b2[i]);
+	if (b3 !== undefined) for (let i = 0; i < b3.length; i++) relevant.push(b3[i]);
+	if (relevant.length > 1) relevant.sort((a, b) => a.order - b.order);
+	return relevant;
 }
 
 /** Ranks every relevant rule against the target from scratch: the unmemoized reference path. */
@@ -409,11 +454,42 @@ const resolveCache = new LRUCache<string, ResolvedAxes>({ max: 16384 });
 /** Runtime rule per provider id, in registration order ({@link setRuntimeProviderRule}). */
 const runtimeRules = new Map<string, CompiledRule>();
 const rulesChangeListeners: Array<() => void> = [];
+let rulesRevision = 0;
+const catalogAxisScopes = new Map<string, ReadonlySet<string> | null>();
+
+/** Identity of the current rules for consumers caching a resolved model reference. */
+export function cascadeRulesRevision(): number {
+	return rulesRevision;
+}
+
+/** Possible target providers for a catalog axis, or null if a rule is not provider-scoped. */
+export function catalogAxisProviders(axis: string): ReadonlySet<string> | null {
+	const cached = catalogAxisScopes.get(axis);
+	if (cached !== undefined) return cached;
+	const providers = new Set<string>();
+	for (const source of [rules.cascade.rules, runtimeRules.values()]) {
+		for (const rule of source) {
+			if (rule.catalog?.[axis] === undefined) continue;
+			if (!rule.providers) {
+				catalogAxisScopes.set(axis, null);
+				return null;
+			}
+			for (const provider of rule.providers) providers.add(provider);
+		}
+	}
+	catalogAxisScopes.set(axis, providers);
+	return providers;
+}
+
+/** Runtime rules are process-local and must never be baked into a cross-launch catalog. */
+export function hasRuntimeProviderRules(): boolean {
+	return runtimeRules.size !== 0;
+}
 
 /**
  * Adds, replaces, or (with `undefined`) removes the runtime rule assigning
  * `directives` to every model of `provider`: what a KDL `provider "<id>" { … }`
- * block's axis lines would set, keyed by directive (`{ "prompt-perturbation": true }`).
+ * block's axis lines would set, keyed by directive (`{ "requires-native-tools": true }`).
  * The rule ranks as a provider-scoped rule in the runtime layer, so it
  * overrides bundled provider-wide assignments but not model-scoped ones.
  * Clears every memo derived from rule resolution.
@@ -433,8 +509,13 @@ export function setRuntimeProviderRule(
 			...compileRuleDirectives(directives),
 		});
 	}
+	if (bundledRuleIndex !== undefined && ruleIndex === bundledRuleIndex) {
+		bundledRuleIndex.plans = undefined;
+	}
 	ruleIndex = undefined;
 	resolveCache.clear();
+	rulesRevision++;
+	catalogAxisScopes.clear();
 	for (const listener of rulesChangeListeners) listener();
 }
 
@@ -461,8 +542,9 @@ function targetKey(target: ResolveTarget): string {
 }
 
 function cloneAxisValue(value: unknown): unknown {
+	if (value === null || typeof value !== "object") return value;
 	if (Array.isArray(value)) return value.map(cloneAxisValue);
-	return isRecord(value) ? cloneAxisRecord(value) : value;
+	return cloneAxisRecord(value as Record<string, unknown>);
 }
 
 function cloneAxisRecord(source: Record<string, unknown>): Record<string, unknown> {
@@ -489,19 +571,29 @@ function cloneAxes(axes: ResolvedAxes): ResolvedAxes {
  * @throws AmbiguousOverlapError when equal-rank rules contest one axis.
  */
 export function resolveCascade(target: ResolveTarget): ResolvedAxes {
-	if (cascadeMemoBypassDepth > 0) {
-		return cloneAxes(resolveRanked(target, rankRelevantRules(getRuleIndex(), prepareTarget(target))));
-	}
+	return cloneAxes(canonicalAxes(target));
+}
+
+/** Caller-owned catalog assignments without copying wire or thinking policy. */
+export function resolveCascadeCatalog(target: ResolveTarget): Record<string, unknown> {
+	return cloneAxisRecord(canonicalAxes(target).catalog);
+}
+
+/** One caller-owned catalog assignment, without cloning unrelated policy. */
+export function resolveCascadeCatalogAxis(target: ResolveTarget, axis: string): unknown {
+	return cloneAxisValue(canonicalAxes(target).catalog[axis]);
+}
+
+/** The cached canonical graph is private; every public lookup copies the part it exposes. */
+function canonicalAxes(target: ResolveTarget): ResolvedAxes {
+	if (cascadeMemoBypassDepth > 0)
+		return resolveRanked(target, rankRelevantRules(getRuleIndex(), prepareTarget(target)));
 	const key = targetKey(target);
 	const cached = resolveCache.get(key);
-	if (cached) {
-		// Nested rule values are applied to mutable compat records; the cached
-		// canonical graph must never escape to those consumers.
-		return cloneAxes(cached);
-	}
+	if (cached) return cached;
 	const resolved = resolveRanked(target, rankPlannedRules(getRuleIndex(), prepareTarget(target)));
 	resolveCache.set(key, resolved);
-	return cloneAxes(resolved);
+	return resolved;
 }
 
 /**

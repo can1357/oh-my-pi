@@ -12,13 +12,13 @@ import {
 	splitPathAndSelPreferringLiteral,
 	splitPathAndSelPreferringLiteralSync,
 } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
-import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { splitPathAndSel } from "@oh-my-pi/pi-coding-agent/tools/details/read";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { GrepOutputMode } from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { runGrepCommand } from "../../src/cli/grep-cli";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { GrepTool } from "../../src/tools/grep";
+import { initTheme } from "../../src/ui/theme/service";
 
 function getText(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -522,7 +522,7 @@ describe("grep CLI subcommand leading-colon path (issue #5624)", () => {
 
 	beforeEach(async () => {
 		tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "grep-cli-colon-"));
-		await initTheme();
+		initTheme();
 	});
 
 	afterEach(async () => {
@@ -558,5 +558,13 @@ describe("grep CLI subcommand leading-colon path (issue #5624)", () => {
 		expect(output).toContain(`Searching in: ${abs}`);
 		expect(output).toContain("needle line A");
 		expect(output).not.toMatch(/not found/i);
+	});
+});
+
+describe("non-string path input (issue #16618)", () => {
+	it("names the expected file path string instead of failing on a string method", () => {
+		// Browser helpers fed from eval code (`tab.pdf({ path: 123 })`) reach these with any value.
+		expect(() => resolveToCwd(123 as never, process.cwd())).toThrow("Expected a file path string; got number.");
+		expect(() => expandPath(null as never)).toThrow("Expected a file path string; got null.");
 	});
 });

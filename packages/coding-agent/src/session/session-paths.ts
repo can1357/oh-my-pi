@@ -1,14 +1,14 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getTerminalId } from "@oh-my-pi/pi-tui/ttyid";
+import { getTerminalId } from "../utils/ttyid";
 import {
 	getCustomSessionFilesDir,
 	getSessionsDir,
 	getTerminalSessionsDir,
 	getWorktreesDir,
 	hashPath,
-	pathIsWithin,
+	relativePathWithinNormalizedRoot,
 	resolveEquivalentPath,
 } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
@@ -18,19 +18,66 @@ import { worktreeFamily } from "../worktree/worktrees";
 import type { SessionStorage } from "./session-storage";
 
 const migratedSessionRoots = new Set<string>();
+const migratingSessionRoots = new Map<string, Promise<void>>();
+
+// The public synchronous SessionManager factories must finish migrations before
+// returning. Use the same migration steps at startup, yielding each directory
+// to read so the async caller need not block the event loop to enumerate it.
+type DirectoryScan<T = void> = Generator<string, T, string[]>;
+
+function runDirectoryScanSync<T>(scan: DirectoryScan<T>): T {
+	let step = scan.next();
+	while (!step.done) {
+		let entries: string[];
+		try {
+			entries = fs.readdirSync(step.value);
+		} catch (error) {
+			step = scan.throw(error);
+			continue;
+		}
+		step = scan.next(entries);
+	}
+	return step.value;
+}
+
+async function runDirectoryScan<T>(scan: DirectoryScan<T>): Promise<T> {
+	let step = scan.next();
+	while (!step.done) {
+		let entries: string[];
+		try {
+			entries = await fs.promises.readdir(step.value);
+		} catch (error) {
+			step = scan.throw(error);
+			continue;
+		}
+		step = scan.next(entries);
+	}
+	return step.value;
+}
 
 /**
  * Merge or rename a legacy session directory into its canonical target.
  * Best effort: callers decide whether migration failures should surface.
  */
-function migrateSessionDirPath(oldPath: string, newPath: string): void {
+function* migrateSessionDirPath(oldPath: string, newPath: string): DirectoryScan {
 	const existing = fs.statSync(newPath, { throwIfNoEntry: false });
 	if (existing?.isDirectory()) {
-		for (const file of fs.readdirSync(oldPath)) {
+		let files: string[];
+		try {
+			files = yield oldPath;
+		} catch (error) {
+			if (isEnoent(error) && !fs.existsSync(oldPath)) return;
+			throw error;
+		}
+		// A synchronous caller may have completed this merge during the read.
+		if (!fs.existsSync(oldPath)) return;
+		for (const file of files) {
 			const src = path.join(oldPath, file);
 			const dst = path.join(newPath, file);
 			if (fs.existsSync(dst)) {
-				logger.warn("Session directory migration collision; preserving legacy entry", { src, dst });
+				if (fs.existsSync(src)) {
+					logger.warn("Session directory migration collision; preserving legacy entry", { src, dst });
+				}
 				continue;
 			}
 			fs.renameSync(src, dst);
@@ -57,7 +104,7 @@ function encodeRelativeSessionDirName(prefix: string, relative: string): string 
 /**
  * Reconstruct the short-lived hashed session dir name used by 17.2.5-17.2.8
  * (reverted PR #7397): `<scope>-<readable>-<sha256hex>` keyed by the canonical
- * cwd. Kept only so {@link migrateHashedSessionDir} can recover sessions
+ * cwd. Kept only so {@link prepareProjectSessionDir} can recover sessions
  * stranded when 17.2.9 restored the legacy names without a reverse migration.
  */
 function encodeHashedSessionDirName(canonicalCwd: string, scope: "home" | "tmp" | "abs"): string {
@@ -76,7 +123,7 @@ function isRelativeWithin(relative: string): boolean {
 	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function getDefaultSessionDirName(cwd: string): {
+interface DefaultSessionDirNames {
 	encodedDirName: string;
 	hashedDirName: string;
 	/** Home-relative name a temp-root cwd got while home was checked first; migrated forward. */
@@ -84,7 +131,9 @@ function getDefaultSessionDirName(cwd: string): {
 	/** Hashed home-scoped name from before temp-root precedence. */
 	shadowedHomeHashedDirName?: string;
 	resolvedCwd: string;
-} {
+}
+
+function getDefaultSessionDirName(cwd: string): DefaultSessionDirNames {
 	const resolvedCwd = path.resolve(cwd);
 	const canonicalCwd = resolveEquivalentPath(resolvedCwd);
 	const home = os.homedir();
@@ -127,9 +176,8 @@ function getDefaultSessionDirName(cwd: string): {
  * Migrate old `--<home-encoded>-*--` session dirs to the new `-*` format.
  * Runs once per sessions root on first access, best-effort.
  */
-function migrateHomeSessionDirs(sessionsRoot: string): void {
+function* migrateHomeSessionDirs(sessionsRoot: string): DirectoryScan {
 	if (migratedSessionRoots.has(sessionsRoot)) return;
-	migratedSessionRoots.add(sessionsRoot);
 
 	const home = os.homedir();
 	const homeEncoded = home.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-");
@@ -138,8 +186,9 @@ function migrateHomeSessionDirs(sessionsRoot: string): void {
 
 	let entries: string[];
 	try {
-		entries = fs.readdirSync(sessionsRoot);
+		entries = yield sessionsRoot;
 	} catch {
+		migratedSessionRoots.add(sessionsRoot);
 		return;
 	}
 
@@ -153,12 +202,14 @@ function migrateHomeSessionDirs(sessionsRoot: string): void {
 			continue;
 		}
 
+		// A synchronous factory can finish the sweep while an async read is pending.
+		if (migratedSessionRoots.has(sessionsRoot)) return;
 		const newName = remainder ? `-${remainder}` : "-";
 		const oldPath = path.join(sessionsRoot, entry);
 		const newPath = path.join(sessionsRoot, newName);
 
 		try {
-			migrateSessionDirPath(oldPath, newPath);
+			yield* migrateSessionDirPath(oldPath, newPath);
 		} catch (error) {
 			logger.warn("Failed to migrate legacy home session directory", {
 				oldPath,
@@ -167,38 +218,24 @@ function migrateHomeSessionDirs(sessionsRoot: string): void {
 			});
 		}
 	}
+	migratedSessionRoots.add(sessionsRoot);
 }
 
 /** Move the session dir `legacyDirName` under `sessionsRoot` into `sessionDir`. Best-effort. */
-function migrateNamedSessionDir(legacyDirName: string, sessionDir: string, sessionsRoot: string): void {
+function* migrateNamedSessionDir(
+	legacyDirName: string,
+	sessionDir: string,
+	sessionsRoot: string,
+	kind: "legacy" | "hashed" = "legacy",
+): DirectoryScan {
 	const legacyDir = path.join(sessionsRoot, legacyDirName);
 	if (legacyDir === sessionDir || !fs.existsSync(legacyDir)) return;
 
 	try {
-		migrateSessionDirPath(legacyDir, sessionDir);
+		yield* migrateSessionDirPath(legacyDir, sessionDir);
 	} catch (error) {
-		logger.warn("Failed to migrate legacy session directory", {
+		logger.warn(`Failed to migrate ${kind} session directory`, {
 			oldPath: legacyDir,
-			newPath: sessionDir,
-			error: String(error),
-		});
-	}
-}
-
-/**
- * Migrate a 17.2.5-17.2.8 hashed session dir back into its legacy path-based
- * directory. The 17.2.9 revert restored the legacy names but dropped migration,
- * stranding sessions written under the hashed scheme (issue #7677). Best-effort.
- */
-function migrateHashedSessionDir(hashedDirName: string, sessionDir: string, sessionsRoot: string): void {
-	const hashedDir = path.join(sessionsRoot, hashedDirName);
-	if (hashedDir === sessionDir || !fs.existsSync(hashedDir)) return;
-
-	try {
-		migrateSessionDirPath(hashedDir, sessionDir);
-	} catch (error) {
-		logger.warn("Failed to migrate hashed session directory", {
-			oldPath: hashedDir,
 			newPath: sessionDir,
 			error: String(error),
 		});
@@ -294,14 +331,49 @@ export function computeDefaultSessionDir(
 	storage: SessionStorage,
 	sessionsRoot: string = getSessionsDir(),
 ): string {
-	const { encodedDirName, hashedDirName, shadowedHomeDirName, shadowedHomeHashedDirName, resolvedCwd } =
-		getDefaultSessionDirName(cwd);
-	migrateHomeSessionDirs(sessionsRoot);
-	const sessionDir = path.join(sessionsRoot, encodedDirName);
-	migrateNamedSessionDir(encodeLegacyAbsoluteSessionDirName(resolvedCwd), sessionDir, sessionsRoot);
-	if (shadowedHomeDirName) migrateNamedSessionDir(shadowedHomeDirName, sessionDir, sessionsRoot);
-	if (shadowedHomeHashedDirName) migrateNamedSessionDir(shadowedHomeHashedDirName, sessionDir, sessionsRoot);
-	migrateHashedSessionDir(hashedDirName, sessionDir, sessionsRoot);
+	const names = getDefaultSessionDirName(cwd);
+	const root = path.isAbsolute(sessionsRoot) ? sessionsRoot : path.resolve(sessionsRoot);
+	if (!migratedSessionRoots.has(root)) runDirectoryScanSync(migrateHomeSessionDirs(root));
+	return runDirectoryScanSync(prepareProjectSessionDir(names, storage, root, sessionsRoot));
+}
+
+/** The startup counterpart to {@link computeDefaultSessionDir}: never enumerate directories synchronously. */
+export async function computeDefaultSessionDirAsync(
+	cwd: string,
+	storage: SessionStorage,
+	sessionsRoot: string = getSessionsDir(),
+): Promise<string> {
+	const names = getDefaultSessionDirName(cwd);
+	const root = path.isAbsolute(sessionsRoot) ? sessionsRoot : path.resolve(sessionsRoot);
+	if (!migratedSessionRoots.has(root)) {
+		let pending = migratingSessionRoots.get(root);
+		if (!pending) {
+			pending = runDirectoryScan(migrateHomeSessionDirs(root)).finally(() => {
+				migratingSessionRoots.delete(root);
+			});
+			migratingSessionRoots.set(root, pending);
+		}
+		await pending;
+	}
+	return runDirectoryScan(prepareProjectSessionDir(names, storage, root, sessionsRoot));
+}
+
+function* prepareProjectSessionDir(
+	{ encodedDirName, hashedDirName, shadowedHomeDirName, shadowedHomeHashedDirName, resolvedCwd }: DefaultSessionDirNames,
+	storage: SessionStorage,
+	sessionsRoot: string,
+	requestedRoot: string,
+): DirectoryScan<string> {
+	let sessionDir = path.join(sessionsRoot, encodedDirName);
+	yield* migrateNamedSessionDir(encodeLegacyAbsoluteSessionDirName(resolvedCwd), sessionDir, sessionsRoot);
+	if (shadowedHomeDirName) yield* migrateNamedSessionDir(shadowedHomeDirName, sessionDir, sessionsRoot);
+	if (shadowedHomeHashedDirName) yield* migrateNamedSessionDir(shadowedHomeHashedDirName, sessionDir, sessionsRoot);
+	yield* migrateNamedSessionDir(hashedDirName, sessionDir, sessionsRoot, "hashed");
+	// Keep the caller's relative path unless chdir during a read would now
+	// point it at a different bucket. All migration I/O used the original root.
+	if (requestedRoot !== sessionsRoot && path.resolve(requestedRoot) === sessionsRoot) {
+		sessionDir = path.join(requestedRoot, encodedDirName);
+	}
 	storage.ensureDirSync(sessionDir);
 	return sessionDir;
 }
@@ -415,6 +487,47 @@ function writeIfChangedSync(file: string, content: string): void {
 }
 
 /**
+ * Whether the garbage collector's recursive `*.jsonl` scan of the sessions root reaches `file`:
+ * a JSONL transcript under that root with no dot-leading path segment, since the scan skips dot
+ * entries. Anything else needs a marker to stay visible to the collector.
+ */
+function isFoundByManagedScan(file: string): boolean {
+	if (!file.endsWith(".jsonl")) return false;
+	const root = getSessionsDir();
+	try {
+		const present = fs.lstatSync(file, { throwIfNoEntry: false });
+		if (!present) {
+			// A lazy transcript in an ordinary root/bucket needs no realpath: aliases
+			// at or above root are shared by the scan. A dangling leaf link is not absent.
+			const bucket = path.dirname(file);
+			if (path.dirname(bucket) === root && !fs.lstatSync(bucket, { throwIfNoEntry: false })?.isSymbolicLink()) {
+				return !path.basename(bucket).startsWith(".") && !path.basename(file).startsWith(".");
+			}
+		}
+
+		const realRoot = fs.realpathSync(root);
+		let existing = file;
+		if (!present) {
+			// Keep markers for missing custom paths. For a candidate under the physical
+			// root, check its nearest existing ancestor so a bucket link cannot escape.
+			if (relativePathWithinNormalizedRoot(realRoot, file) === null) return false;
+			do {
+				if (path.basename(existing).startsWith(".")) return false;
+				const parent = path.dirname(existing);
+				if (parent === existing) return false;
+				existing = parent;
+			} while (!fs.lstatSync(existing, { throwIfNoEntry: false }));
+		}
+		const relative = relativePathWithinNormalizedRoot(realRoot, fs.realpathSync(existing));
+		if (relative === null || relative.startsWith(".") || relative.includes(`${path.sep}.`)) return false;
+		return !present || relative.endsWith(".jsonl");
+	} catch {
+		// Inaccessible entries or dangling links are not provably covered by the scan.
+		return false;
+	}
+}
+
+/**
  * Record a session's exact file in the persistent custom-files registry when
  * the managed-root glob scan cannot fully account for it. Idempotent: the
  * marker is keyed by a hash of the resolved file, and its content is the
@@ -428,7 +541,7 @@ function recordCustomSessionFile(cwd: string, sessionFile: string, scope: Custom
 	if (scope?.remoteStorage) return;
 	try {
 		const resolvedSessionFile = path.resolve(cwd, sessionFile);
-		if (resolvedSessionFile.endsWith(".jsonl") && pathIsWithin(getSessionsDir(), resolvedSessionFile)) return;
+		if (isFoundByManagedScan(resolvedSessionFile)) return;
 		writeIfChangedSync(path.join(getCustomSessionFilesDir(), hashPath(resolvedSessionFile)), resolvedSessionFile);
 	} catch (err) {
 		if (!isEnoent(err)) logger.debug("Custom session file record failed", { err });

@@ -1,21 +1,13 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { TextContent } from "@oh-my-pi/pi-ai";
 import { type ImageMetadata, parseImageMetadata, TempDir } from "@oh-my-pi/pi-utils";
-import {
-	type ArchiveFormat,
-	type ArchiveReader,
-	archiveFormatFromPath,
-	formatArchiveEntryLines,
-	openArchive,
-	parseArchivePathCandidates,
-	sniffArchiveFormat,
-} from "@oh-my-pi/pi-utils/ar";
+import { type ArchiveFormat, type ArchiveReader, formatArchiveEntryLines, openArchive } from "@oh-my-pi/pi-utils/ar";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { ToolSession } from "../sdk";
 import { convertBufferWithMarkit } from "../utils/markit";
-import { truncateHead } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { resolveReadPath } from "./path-utils";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import { truncateHead } from "./streaming-output";
+import type { ResolvedArchiveReadPath } from "./read-archive-path";
+import type { ReadToolDetails } from "./details/read";
 import {
 	buildInMemorySelectorResult,
 	decodeUtf8Text,
@@ -23,29 +15,17 @@ import {
 	prependSuffixResolutionNotice,
 	toReadTruncationStats,
 } from "./read-format";
-import {
-	findSuffixMatchCached,
-	isNotFoundError,
-	isRemoteMountPath,
-	type SuffixMatchCache,
-} from "./read-path-resolution";
 import { isMultiRange, type ParsedSelector, parseSel, resolveTailSelector, selToOffsetLimit } from "./read-selector";
 import { type PdfImageReadTarget, type PdfPageReadOptions, splitPdfImageReadPath } from "./read-pdf";
 import { cfgReadRenderMarkdown } from "./settings";
-import { formatBytes } from "@oh-my-pi/pi-tui/render/render-utils";
+import { formatBytes } from "@oh-my-pi/pi-utils";
 import { throwIfAborted } from "./tool-errors";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { RACY_STAMP_WINDOW_MS } from "./racy-stamp";
 import { parseJsonSelector, readJson, splitJsonQueryTarget } from "./read-json";
 
-interface ResolvedArchiveReadPath {
-	absolutePath: string;
-	archiveSubPath: string;
-	suffixResolution?: { from: string; to: string };
-	/** Container format, when the file's extension does not name it (`report.docx:word/document.xml`). */
-	format?: ArchiveFormat;
-}
+export { resolveArchiveReadPath } from "./read-archive-path";
 
 /** An image member, materialized for the read tool's image loader. */
 export interface ArchiveImageReadOptions {
@@ -55,52 +35,6 @@ export interface ArchiveImageReadOptions {
 	imageMetadata: ImageMetadata;
 	fileSize: number;
 	signal?: AbortSignal;
-}
-
-/**
- * ZIP-container documents. A bare read converts them to text; `doc.docx:word/document.xml` reads a member.
- * The lookahead requires the `:member` part.
- */
-const ZIP_DOCUMENT_MEMBER_RE = /\.(?:docx|docm|dotx|xlsx|xlsm|pptx|pptm|odt|ods|odp|epub)(?=:)/gi;
-
-const isZipHeader = (bytes: Uint8Array): boolean => sniffArchiveFormat(bytes) === "zip";
-const isUnixArHeader = (bytes: Uint8Array): boolean => sniffArchiveFormat(bytes) === "ar";
-
-/** Whether the file's first `length` bytes pass `sniff`; an unreadable file does not. */
-async function hasMagic(absolutePath: string, sniff: (bytes: Uint8Array) => boolean, length: number): Promise<boolean> {
-	try {
-		return sniff(await Bun.file(absolutePath).slice(0, length).bytes());
-	} catch {
-		return false;
-	}
-}
-
-/**
- * Whether the file is the archive its extension names. `.lib` also names text (SPICE models), so an `ar`
- * extension needs the `!<arch>` header; other extensions are trusted, and a mismatch fails when opened.
- */
-async function claimsArchiveFormat(archivePath: string, absolutePath: string): Promise<boolean> {
-	return archiveFormatFromPath(archivePath) !== "ar" || hasMagic(absolutePath, isUnixArHeader, 8);
-}
-
-/** `doc.docx:<member>` candidates: an existing ZIP file whose member part is no line selector. */
-async function resolveZipDocumentMember(
-	session: ToolSession,
-	readPath: string,
-): Promise<ResolvedArchiveReadPath | null> {
-	const normalized = readPath.replace(/\\/g, "/");
-	for (const match of normalized.matchAll(ZIP_DOCUMENT_MEMBER_RE)) {
-		const end = (match.index ?? 0) + match[0].length;
-		const subPath = normalized.slice(end + 1);
-		if (subPath.length === 0 || parseSel(subPath).kind !== "none") continue;
-		const absolutePath = resolveReadPath(readPath.slice(0, end), session.cwd);
-		const stat = await Bun.file(absolutePath)
-			.stat()
-			.catch(() => null);
-		if (!stat?.isFile() || !(await hasMagic(absolutePath, isZipHeader, 4))) continue;
-		return { absolutePath, archiveSubPath: subPath, format: "zip" };
-	}
-	return null;
 }
 
 /**
@@ -167,54 +101,6 @@ async function openArchiveCached(absolutePath: string, format?: ArchiveFormat): 
 		entryCount,
 	});
 	return reader;
-}
-export async function resolveArchiveReadPath(
-	session: ToolSession,
-	readPath: string,
-	suffixCache: SuffixMatchCache,
-	signal?: AbortSignal,
-): Promise<ResolvedArchiveReadPath | null> {
-	const candidates = parseArchivePathCandidates(readPath);
-	for (const candidate of candidates) {
-		let absolutePath = resolveReadPath(candidate.archivePath, session.cwd);
-		let suffixResolution: { from: string; to: string } | undefined;
-
-		try {
-			const stat = await Bun.file(absolutePath).stat();
-			if (stat.isDirectory()) continue;
-			if (!(await claimsArchiveFormat(candidate.archivePath, absolutePath))) continue;
-			return {
-				absolutePath,
-				archiveSubPath: candidate.archivePath === readPath ? "" : candidate.subPath,
-				suffixResolution,
-			};
-		} catch (error) {
-			if (!isNotFoundError(error) || isRemoteMountPath(absolutePath)) continue;
-
-			const suffixMatch = await findSuffixMatchCached(session, suffixCache, candidate.archivePath, signal);
-			if (!suffixMatch) continue;
-
-			try {
-				const retryStat = await Bun.file(suffixMatch.absolutePath).stat();
-				if (retryStat.isDirectory()) continue;
-				if (!(await claimsArchiveFormat(candidate.archivePath, suffixMatch.absolutePath))) continue;
-
-				absolutePath = suffixMatch.absolutePath;
-				suffixResolution = { from: candidate.archivePath, to: suffixMatch.displayPath };
-				return {
-					absolutePath,
-					archiveSubPath: candidate.archivePath === readPath ? "" : candidate.subPath,
-					suffixResolution,
-				};
-			} catch (retryError) {
-				if (!isNotFoundError(retryError)) {
-					throw retryError;
-				}
-			}
-		}
-	}
-
-	return resolveZipDocumentMember(session, readPath);
 }
 async function readArchiveDirectory(
 	archive: ArchiveReader,

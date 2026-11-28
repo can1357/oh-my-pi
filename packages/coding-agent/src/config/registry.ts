@@ -24,7 +24,7 @@
  * (sections follow `TAB_GROUPS`), and `config/all-settings.ts` imports every domain in that order.
  */
 import { logger, parseFlag } from "@oh-my-pi/pi-utils";
-import type { AnyUiMetadata, SubmenuOption, UiBase } from "@oh-my-pi/pi-tui/overlays/settings-defs";
+import type { AnyUiMetadata, SubmenuOption, UiBase } from "./settings-defs";
 import type { SettingProvenance, Settings } from "./settings";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -108,6 +108,13 @@ interface DefinitionBase {
 	 * the host configured a value itself (caller overrides, project settings, `--config`, global config).
 	 */
 	protocolDefault?: readonly ProtocolHost[];
+	/**
+	 * The prepaint frame (`modes/startup-composer.ts`) draws this setting from the last launch's
+	 * startup cache before settings load, so a `--config` / `PI_CONFIG_FILES` overlay configuring it
+	 * skips that frame (`overlaysKeepPrepaint`). Declare it only in `modes/settings.ts`: the CLI loads
+	 * that module alone to find these.
+	 */
+	prepaint?: true;
 	/**
 	 * Rejects a malformed configured value with a descriptive error. Runs on every load/reload and
 	 * before every write, so a typo fails loudly instead of silently reading as the default.
@@ -913,21 +920,65 @@ export function inheritWarnings(target: Settings, source: Settings): void {
 // ═══════════════════════════════════════════════════════════════════════════
 
 interface EffectEntry {
-	/** Subscribes the effect to `settings`, applying the current value right away; returns the unsubscribe. */
-	bind(settings: Settings): () => void;
-	/** Applies the value `defaults` yields when the process last applied a different one (test reset). */
+	bind(settings: Settings): void;
+	unbind(): void;
 	reset(defaults: Settings): void;
 }
 
-interface EffectBinding {
-	settings: Settings;
-	stops: Map<EffectEntry, () => void>;
+const neverApplied = Symbol("unapplied setting effect");
+
+class SettingEffect<T> implements EffectEntry {
+	readonly #value: Derived<T>;
+	readonly #apply: (next: T) => void | Promise<void>;
+	#applied: T | typeof neverApplied = neverApplied;
+	#stop?: () => void;
+
+	constructor(value: Derived<T>, apply: (next: T) => void | Promise<void>) {
+		this.#value = value;
+		this.#apply = apply;
+	}
+
+	bind(settings: Settings): void {
+		// Registration during another effect's apply binds immediately. The outer loop
+		// may visit that new entry too, but must not subscribe or apply it twice.
+		if (this.#stop) return;
+		let current = this.#value.get(settings);
+		this.#stop = settings.onEffectiveChange(this.#value.sources, () => {
+			const next = this.#value.get(settings);
+			if (settingValuesEqual(next, current)) return;
+			current = next;
+			this.#run(next);
+		});
+		this.#run(current);
+	}
+
+	unbind(): void {
+		this.#stop?.();
+		this.#stop = undefined;
+	}
+
+	reset(defaults: Settings): void {
+		if (this.#applied === neverApplied) return;
+		const next = this.#value.get(defaults);
+		if (!settingValuesEqual(next, this.#applied)) this.#run(next);
+	}
+
+	#run(next: T): void {
+		this.#applied = next;
+		try {
+			const apply = this.#apply;
+			const result = apply(next);
+			if (result instanceof Promise) result.catch(error => reportListenerError(this.#value.sources, error));
+		} catch (error) {
+			reportListenerError(this.#value.sources, error);
+		}
+	}
 }
 
 const effects = new Set<EffectEntry>();
 /** Outstanding {@link bindEffects} holds, oldest first; the last one drives effects. */
 const effectHolds: { settings: Settings }[] = [];
-let effectBinding: EffectBinding | undefined;
+let effectBinding: Settings | undefined;
 
 /**
  * Declares a process-wide side effect of a setting (theme, credential redaction, request limits…).
@@ -939,40 +990,12 @@ let effectBinding: EffectBinding | undefined;
  * (module-level declarations never call it; test-scoped effects do).
  */
 export function effect<T>(value: Derived<T>, apply: (value: T) => void | Promise<void>): () => void {
-	let applied: { value: T } | undefined;
-	const run = (next: T) => {
-		applied = { value: next };
-		try {
-			const result = apply(next);
-			if (result instanceof Promise) result.catch(error => reportListenerError(value.sources, error));
-		} catch (error) {
-			reportListenerError(value.sources, error);
-		}
-	};
-	const entry: EffectEntry = {
-		bind: settings => {
-			let current = value.get(settings);
-			const unsubscribe = settings.onEffectiveChange(value.sources, () => {
-				const next = value.get(settings);
-				if (settingValuesEqual(next, current)) return;
-				current = next;
-				run(next);
-			});
-			run(current);
-			return unsubscribe;
-		},
-		reset: defaults => {
-			if (!applied) return;
-			const next = value.get(defaults);
-			if (!settingValuesEqual(next, applied.value)) run(next);
-		},
-	};
+	const entry = new SettingEffect(value, apply);
 	effects.add(entry);
-	effectBinding?.stops.set(entry, entry.bind(effectBinding.settings));
+	if (effectBinding) entry.bind(effectBinding);
 	return () => {
 		effects.delete(entry);
-		effectBinding?.stops.get(entry)?.();
-		effectBinding?.stops.delete(entry);
+		entry.unbind();
 	};
 }
 
@@ -998,26 +1021,25 @@ export function bindEffects(settings: Settings): () => void {
 /** Points effects at the newest hold's instance, re-subscribing only when that instance changed. */
 function syncEffectBinding(): void {
 	const settings = effectHolds.at(-1)?.settings;
-	if (effectBinding?.settings === settings) return;
+	if (effectBinding === settings) return;
 	stopEffectBinding();
 	if (!settings) return;
-	const binding: EffectBinding = { settings, stops: new Map() };
-	effectBinding = binding;
-	// An effect declared while binding binds itself (see `effect`); the guard skips it here.
+	effectBinding = settings;
 	for (const entry of effects) {
-		if (!binding.stops.has(entry)) binding.stops.set(entry, entry.bind(settings));
+		if (effectBinding !== settings) break; // An effect bound another instance during its apply.
+		entry.bind(settings);
 	}
 }
 
 function stopEffectBinding(): void {
-	const binding = effectBinding;
+	if (!effectBinding) return;
 	effectBinding = undefined;
-	for (const stop of binding?.stops.values() ?? []) stop();
+	for (const entry of effects) entry.unbind();
 }
 
 /** Instance currently driving effects, if any. */
 export function effectsSettings(): Settings | undefined {
-	return effectBinding?.settings;
+	return effectBinding;
 }
 
 /** Drops every {@link bindEffects} hold, so no instance drives effects (test teardown). */

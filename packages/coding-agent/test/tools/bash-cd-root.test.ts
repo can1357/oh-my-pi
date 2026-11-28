@@ -7,7 +7,7 @@ import * as daemonClients from "@oh-my-pi/pi-coding-agent/daemon/client";
 import type { DaemonClient, DaemonOp } from "@oh-my-pi/pi-coding-agent/daemon/protocol";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import type { UnitSnapshot } from "@oh-my-pi/pi-tui/tools/daemon";
+import type { UnitSnapshot } from "@oh-my-pi/pi-coding-agent/daemon/daemon-types";
 
 const MARKER = "omp-bash-cd-root-marker";
 const FILESYSTEM_ROOT = path.resolve("/");
@@ -75,14 +75,6 @@ describe("bash leading cd filesystem root", () => {
 				expect(lines).not.toContain("where:workspace");
 				expect(result.details?.cdSeparator).toBe(separator);
 			}
-
-			const aliased = await tool.execute("explicit-slash-cwd", { command: rest, cwd: "/" });
-			const aliasedLines = linesOf(textOf(aliased));
-			expect(aliased.isError).toBeUndefined();
-			expect(aliased.details?.cwd).toBe(workspace);
-			expect(aliasedLines).toContain(workspace);
-			expect(aliasedLines).toContain("where:workspace");
-			expect(aliasedLines).not.toContain("where:root");
 		},
 		30_000,
 	);

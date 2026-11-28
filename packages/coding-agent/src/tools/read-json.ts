@@ -3,15 +3,16 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Shell } from "@oh-my-pi/pi-natives";
-import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
+import type { ReadToolDetails } from "./details/read";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	truncateHead,
+	truncateHeadBytes,
 	truncateMiddle,
 	truncateTail,
-} from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+} from "./streaming-output";
+import { ToolError } from "./tool-errors";
 import {
 	IMAGE_METADATA_HEADER_BYTES,
 	isEnoent,
@@ -23,6 +24,7 @@ import {
 import { peekFile } from "@oh-my-pi/pi-utils/peek-file";
 import type { ToolSession } from "../sdk";
 import { quotePosixArgument } from "../utils/shell-quote";
+import { resolveArtifactSpillThreshold } from "./output-meta";
 import { resolveReadPath } from "./path-utils";
 import { buildInMemorySelectorResult, prependSuffixResolutionNotice, toReadTruncationStats } from "./read-format";
 import {
@@ -490,13 +492,29 @@ export async function readJson(
 		}
 	}
 
-	const truncation = truncateHead(output, { maxLines: DEFAULT_MAX_LINES });
+	// A spill of an already-cut preview would advertise the prefix as the full query result.
+	const maxBytes = Math.min(DEFAULT_MAX_BYTES, resolveArtifactSpillThreshold(session.settings));
+	let truncation = truncateHead(output, { maxLines: DEFAULT_MAX_LINES, maxBytes });
+	if (truncation.firstLineExceedsLimit) {
+		// truncateHead keeps nothing when the first line alone is over budget; show its
+		// UTF-8-safe byte prefix as one partial line instead of an empty result.
+		const newline = output.indexOf("\n");
+		const firstLine = newline === -1 ? output : output.slice(0, newline);
+		const snippet = truncateHeadBytes(firstLine, maxBytes);
+		truncation = {
+			...truncation,
+			content: snippet.text,
+			totalBytes: Buffer.byteLength(firstLine, "utf-8"),
+			outputLines: snippet.bytes > 0 ? 1 : 0,
+			outputBytes: snippet.bytes,
+		};
+	}
 	details.truncation = truncation.truncated ? toReadTruncationStats(truncation) : undefined;
 	const resultBuilder = toolResult<ReadToolDetails>(details).text(truncation.content);
 	if (resource) resultBuilder.sourceInternal(resource.url);
 	else if (file) resultBuilder.sourcePath(file.absolutePath);
 	if (truncation.truncated) {
-		resultBuilder.truncation(truncation, { direction: "head", maxBytes: DEFAULT_MAX_BYTES });
+		resultBuilder.truncation(truncation, { direction: "head", maxBytes });
 	}
 
 	return resultBuilder.done();

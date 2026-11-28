@@ -1,4 +1,4 @@
-import type { StatusLineHost, StatusLineSession } from "@oh-my-pi/pi-tui/status-line/host";
+import type { StatusLineHost, StatusLineSession } from "./view-model/status-line/host";
 import { Settings, settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import { getSessionCompactionBoundaries } from "../session/context-usage-runtime";
@@ -10,6 +10,7 @@ import { calculateTokensPerSecond } from "../utils/token-rate";
 
 import {
 	cfgGitEnabled,
+	cfgGitChildRepoDiscovery,
 	cfgStatusLineCompactThinkingLevel,
 	cfgStatusLineContextLine,
 	cfgStatusLineLeftSegments,
@@ -69,7 +70,7 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	},
 	canFetchUsageReports: session => typeof session.fetchUsageReports === "function",
 	fetchUsageReports: (session, signal) => session.fetchUsageReports?.(signal) ?? Promise.resolve(null),
-	resolveActiveRepo: resolveActiveRepoContextSync,
+	resolveActiveRepo: cwd => (cfgGitChildRepoDiscovery.get(settings) ? resolveActiveRepoContextSync(cwd) : null),
 	lookupPullRequest: cwd =>
 		github.run(cwd, ["pr", "view", "--json", "number,url"], AbortSignal.timeout(GH_COMMAND_TIMEOUT_MS)),
 	calculateTokensPerSecond,

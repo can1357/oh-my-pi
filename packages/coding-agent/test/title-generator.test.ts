@@ -5,8 +5,8 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { formatModelStringWithRouting, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { DEFAULT_TITLE_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-coding-agent/config/spinner-interval";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
-import { DEFAULT_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/spinner-clock";
 import {
 	disposeTerminalTitleState,
 	generateSessionTitle,
@@ -17,8 +17,9 @@ import {
 	setTerminalTitlePullRequest,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleState,
+	TERMINAL_TITLE_SPINNER_STYLES,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
-import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { setNativeRenderingForTest as setNativeRendering } from "@oh-my-pi/pi-tui";
 import { isWsl, logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
 
@@ -35,7 +36,9 @@ function getModelFor(provider: GeneratedProvider, id: string): Model<Api> {
 }
 
 function createSettings(model: Model<Api>): Settings {
-	return Settings.isolated({ modelRoles: { tiny: `${model.provider}/${model.id}` } });
+	return Settings.isolated({
+		modelRoles: { tiny: `${model.provider}/${model.id}` },
+	});
 }
 
 function createRegistry(model: Model<Api>, availableModels: Model<Api>[] = [model]) {
@@ -285,7 +288,12 @@ describe("title generator", () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
 		vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "stop",
-			content: [{ type: "text", text: '```json\n{"title": "Fix login button on mobile"}\n```' }],
+			content: [
+				{
+					type: "text",
+					text: '```json\n{"title": "Fix login button on mobile"}\n```',
+				},
+			],
 		} as never);
 
 		const title = await generateSessionTitle(
@@ -301,7 +309,12 @@ describe("title generator", () => {
 		const model = getModelOrThrow("claude-sonnet-4-5");
 		vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "stop",
-			content: [{ type: "text", text: '<title>{"title": "Add OAuth authentication"}</title>' }],
+			content: [
+				{
+					type: "text",
+					text: '<title>{"title": "Add OAuth authentication"}</title>',
+				},
+			],
 		} as never);
 
 		const title = await generateSessionTitle(
@@ -404,12 +417,18 @@ describe("title generator", () => {
 					({
 						stopReason: "stop",
 						content: [
-							{ type: "text", text: model.id === primary.id ? reply : "<title>Unwanted fallback title</title>" },
+							{
+								type: "text",
+								text: model.id === primary.id ? reply : "<title>Unwanted fallback title</title>",
+							},
 						],
 					}) as never,
 			);
 			const settings = Settings.isolated({
-				modelRoles: { tiny: `${primary.provider}/${primary.id}`, smol: `${fallback.provider}/${fallback.id}` },
+				modelRoles: {
+					tiny: `${primary.provider}/${primary.id}`,
+					smol: `${fallback.provider}/${fallback.id}`,
+				},
 				"retry.modelFallback": true,
 				"retry.fallbackChains": {
 					[`${primary.provider}/${primary.id}`]: [`${fallback.provider}/${fallback.id}`],
@@ -440,11 +459,19 @@ describe("title generator", () => {
 					content:
 						model.id === primary.id
 							? primaryContent
-							: [{ type: "text", text: "<title>Fix resolver errors</title>" }],
+							: [
+									{
+										type: "text",
+										text: "<title>Fix resolver errors</title>",
+									},
+								],
 				}) as never,
 		);
 		const settings = Settings.isolated({
-			modelRoles: { tiny: `${primary.provider}/${primary.id}`, smol: `${fallback.provider}/${fallback.id}` },
+			modelRoles: {
+				tiny: `${primary.provider}/${primary.id}`,
+				smol: `${fallback.provider}/${fallback.id}`,
+			},
 		});
 
 		const title = await generateSessionTitle(
@@ -626,8 +653,11 @@ describe("title generator", () => {
 			createSettings(model),
 		);
 
-		const sentMessages = (completeSimpleMock.mock.calls[0]?.[1] as { messages?: Array<{ content?: string }> })
-			?.messages;
+		const sentMessages = (
+			completeSimpleMock.mock.calls[0]?.[1] as {
+				messages?: Array<{ content?: string }>;
+			}
+		)?.messages;
 		const userContent = sentMessages?.[0]?.content ?? "";
 		expect(userContent).not.toContain("Claude Code v2.1.158");
 		expect(userContent).toContain("pick provider then theme");
@@ -950,9 +980,8 @@ describe("title generator", () => {
 
 const OSC_TITLE_RE = /\x1b\]0;([\s\S]*?)\x07/;
 
-// Braille spinner frames used by the `working` state (mirrors the module's
-// private TITLE_SPINNER_FRAMES); a clobbered override would surface one of these.
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+// Frames of the default `working` spinner; a clobbered override would surface one of these.
+const SPINNER_FRAMES = TERMINAL_TITLE_SPINNER_STYLES.centered;
 
 // The `working` separator is a spinner frame everywhere except WSL, where the title is
 // static `:` because no interval is ever scheduled. Assert the separator the host actually
@@ -991,7 +1020,10 @@ describe("terminal title runtime", () => {
 		// Force the real write path: not headless, stdout is a TTY.
 		prevHeadless = setTerminalHeadless(false);
 		ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
-		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+		Object.defineProperty(process.stdout, "isTTY", {
+			value: true,
+			configurable: true,
+		});
 
 		windowsTitleMock = mockWindowsConsoleTitle();
 		windowsTitleMock.succeeds = true;
@@ -1006,6 +1038,7 @@ describe("terminal title runtime", () => {
 		// teardown latched it off), clear any override + session base, and settle
 		// the run state to idle.
 		initTerminalTitleState();
+		setTerminalTitleSpinnerStyle("centered");
 		setSessionTerminalTitle(undefined);
 		setTerminalTitleState("idle");
 
@@ -1099,23 +1132,29 @@ describe("terminal title runtime", () => {
 	it("animates the working title on Windows", () => {
 		const originalPlatform = process.platform;
 		try {
-			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: "win32",
+				configurable: true,
+			});
 			setTerminalTitleSpinnerStyle("line");
-			setTerminalTitleSpinnerStyle("braille");
+			setTerminalTitleSpinnerStyle("centered");
 			setSessionTerminalTitle("windows-project");
 			resetEmitted();
 
 			setTerminalTitleState("working");
-			expect(emittedTitles()).toEqual(["π ⠋ windows-project"]);
+			expect(emittedTitles()).toEqual(["π ⠙ windows-project"]);
 
 			resetEmitted();
-			vi.advanceTimersByTime(DEFAULT_SPINNER_INTERVAL_MS * 2);
+			vi.advanceTimersByTime(DEFAULT_TITLE_SPINNER_INTERVAL_MS * 2);
 			const titles = emittedTitles();
 			expect(titles.length).toBeGreaterThan(0);
 			expect(titles.every(title => SPINNER_FRAMES.some(frame => title.includes(frame)))).toBe(true);
-			expect(titles.some(title => title !== "π ⠋ windows-project")).toBe(true);
+			expect(titles.some(title => title !== "π ⠙ windows-project")).toBe(true);
 		} finally {
-			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: originalPlatform,
+				configurable: true,
+			});
 		}
 	});
 
@@ -1123,7 +1162,10 @@ describe("terminal title runtime", () => {
 		const originalPlatform = process.platform;
 		const originalWslDistro = process.env.WSL_DISTRO_NAME;
 		try {
-			Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: "linux",
+				configurable: true,
+			});
 			process.env.WSL_DISTRO_NAME = "Ubuntu";
 			setSessionTerminalTitle("wsl-project");
 			resetEmitted();
@@ -1137,7 +1179,10 @@ describe("terminal title runtime", () => {
 		} finally {
 			if (originalWslDistro === undefined) delete process.env.WSL_DISTRO_NAME;
 			else process.env.WSL_DISTRO_NAME = originalWslDistro;
-			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: originalPlatform,
+				configurable: true,
+			});
 		}
 	});
 
@@ -1147,14 +1192,20 @@ describe("terminal title runtime", () => {
 		if (!native) throw new Error("Windows console title mock not initialized");
 		native.succeeds = true;
 		try {
-			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: "win32",
+				configurable: true,
+			});
 			setTerminalTitle("native Ω");
 			setTerminalTitle("native Ω");
 
 			expect(native.titles).toEqual(["native Ω"]);
 			expect(writes).toEqual([]);
 		} finally {
-			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: originalPlatform,
+				configurable: true,
+			});
 		}
 	});
 
@@ -1166,7 +1217,10 @@ describe("terminal title runtime", () => {
 		const native = windowsTitleMock;
 		if (!native) throw new Error("Windows console title mock not initialized");
 		try {
-			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: "win32",
+				configurable: true,
+			});
 			setNativeRendering(true);
 			setSessionTerminalTitle("HOST: Summarize self-host blog post");
 			resetEmitted();
@@ -1181,7 +1235,10 @@ describe("terminal title runtime", () => {
 			expect(writes).toEqual([]);
 		} finally {
 			setNativeRendering(false);
-			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: originalPlatform,
+				configurable: true,
+			});
 		}
 	});
 
@@ -1190,7 +1247,10 @@ describe("terminal title runtime", () => {
 		const native = windowsTitleMock;
 		if (!native) throw new Error("Windows console title mock not initialized");
 		try {
-			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: "win32",
+				configurable: true,
+			});
 			native.succeeds = false;
 			resetEmitted();
 
@@ -1206,7 +1266,10 @@ describe("terminal title runtime", () => {
 			expect(emittedTitles()).toEqual([]);
 			expect(vi.getTimerCount()).toBe(0);
 		} finally {
-			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: originalPlatform,
+				configurable: true,
+			});
 		}
 	});
 
@@ -1215,7 +1278,10 @@ describe("terminal title runtime", () => {
 		const native = windowsTitleMock;
 		if (!native) throw new Error("Windows console title mock not initialized");
 		try {
-			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: "win32",
+				configurable: true,
+			});
 			native.succeeds = true;
 			resetEmitted();
 			setSessionTerminalTitle("windows-project");
@@ -1233,7 +1299,10 @@ describe("terminal title runtime", () => {
 			vi.advanceTimersByTime(400);
 			expect(emittedTitles()).toEqual([]);
 		} finally {
-			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+			Object.defineProperty(process, "platform", {
+				value: originalPlatform,
+				configurable: true,
+			});
 		}
 	});
 

@@ -5,6 +5,7 @@ import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createCompactionSummaryMessage } from "@oh-my-pi/pi-agent-core/compaction";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import {
 	type AnthropicFallbackCreditHandle,
 	type Api,
@@ -29,14 +30,11 @@ import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-model
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import { parseModelString } from "@oh-my-pi/pi-coding-agent/config/model-selector";
 import { formatModelStringWithRouting, parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
-import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -49,14 +47,16 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { computerTurnInFlight, registerComputerController } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionTools } from "@oh-my-pi/pi-coding-agent/session/session-tools";
+import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking/levels";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { __resetDirsFromEnvForTests, setAgentDir, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
-import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
+import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/utils/render-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 import { restoreEnvValue } from "./helpers/settings-test-state";
 
 import { cfgRetryUsageReservePolicy } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
+import { initTheme } from "../src/ui/theme/service";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -171,6 +171,28 @@ function thinkingLoopErrorStream(model: Model<Api>): AssistantMessageEventStream
 	return stream;
 }
 
+/** A stream ending in a 503 its provider transport already retried to its own budget. */
+function retriesExhaustedErrorStream(model: Model<Api>): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() => {
+		const partial: AssistantMessage = {
+			role: "assistant",
+			content: [],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: emptyUsage(),
+			stopReason: "error",
+			errorStatus: 503,
+			errorMessage: "Gemini API error (503): The model is overloaded.",
+			errorId: AIError.create(AIError.Flag.Transient, AIError.Flag.RetriesExhausted),
+			timestamp: Date.now(),
+		};
+		stream.push({ type: "error", reason: "error", error: partial });
+	});
+	return stream;
+}
+
 /** Finalize a real Codex `turn_rate_limit_exceeded` 429 the way the provider does. */
 async function finalizeCodexCapacityError(retryAfterSeconds: string): Promise<AIError.FinalizeResult> {
 	const response = new Response(
@@ -215,6 +237,32 @@ function finalizedErrorStream(model: Model<Api>, failure: AIError.FinalizeResult
 			timestamp: Date.now(),
 		};
 		stream.push({ type: "error", reason: "error", error: partial });
+	});
+	return stream;
+}
+
+/** A stream that ends the turn with `failure`'s error, as the agent sees a failed turn. */
+function failedTurnStream(
+	model: Model<Api>,
+	failure: Pick<AssistantMessage, "errorMessage" | "errorFromAgentLoop">,
+): AssistantMessageEventStream {
+	const stream = new AssistantMessageEventStream();
+	queueMicrotask(() => {
+		stream.push({
+			type: "error",
+			reason: "error",
+			error: {
+				role: "assistant",
+				content: [],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: emptyUsage(),
+				stopReason: "error",
+				...failure,
+				timestamp: Date.now(),
+			},
+		});
 	});
 	return stream;
 }
@@ -315,7 +363,7 @@ describe("AgentSession retry fallback", () => {
 	// mutable retry-fallback cooldown state between tests.
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-retry-fallback-");
-		await initTheme();
+		initTheme();
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
 		authStorage.keys.setRuntime("openai", "openai-test-key");
@@ -465,6 +513,133 @@ describe("AgentSession retry fallback", () => {
 			},
 		]);
 	});
+
+	it.each([
+		{
+			cause: "a failed request",
+			failure: { errorMessage: "overloaded_error: provider returned error 503" },
+			trigger: "request-error",
+			notice: "Request failed: overloaded_error: provider returned error 503",
+		},
+		{
+			cause: "a turn the agent loop stopped",
+			failure: {
+				errorMessage:
+					"Soft tool requirement 'bash' was not satisfied after 3 forced turns; aborting to avoid an unbounded force loop.",
+				errorFromAgentLoop: true,
+			},
+			trigger: "agent-loop",
+			notice:
+				"Turn stopped: Soft tool requirement 'bash' was not satisfied after 3 forced turns; aborting to avoid an unbounded force loop.",
+		},
+	])(
+		"records why $cause moved the session to a fallback on its model_change entry",
+		async ({ failure, trigger, notice }) => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) {
+				throw new Error("Expected bundled test models to exist");
+			}
+			const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					if (`${model.provider}/${model.id}` === primarySelector) return failedTurnStream(model, failure);
+					mock.push({ content: ["Recovered on the fallback"] });
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [fallbackSelector] },
+			});
+			settings.setModelRole("default", primarySelector);
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+			const notices: Array<string | undefined> = [];
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_applied") notices.push(event.reason);
+			});
+
+			await session.prompt("Recover on the fallback");
+			await session.waitForIdle();
+
+			expect(session.model?.id).toBe(fallbackModel.id);
+			expect(notices).toEqual([notice]);
+			const fallbackChange = sessionManager
+				.getEntries()
+				.find(entry => entry.type === "model_change" && entry.resolvedModelIsFallback === true);
+			expect(fallbackChange).toMatchObject({
+				model: fallbackSelector,
+				fallback: { from: primarySelector, trigger, reason: failure.errorMessage },
+			});
+		},
+	);
+
+	it.each([
+		{
+			cause: "the Fast tier rejected a request",
+			failure: { errorMessage: "upstream connect error or disconnect/reset before headers" },
+			trigger: "request-error",
+			notice: "Request rejected by the Fast tier. Retrying on the Standard tier.",
+		},
+		{
+			cause: "the agent loop stopped a turn",
+			failure: {
+				errorMessage:
+					"Soft tool requirement 'bash' was not satisfied after 3 forced turns; aborting to avoid an unbounded force loop.",
+				errorFromAgentLoop: true,
+			},
+			trigger: "agent-loop",
+			notice:
+				"Turn stopped: Soft tool requirement 'bash' was not satisfied after 3 forced turns; aborting to avoid an unbounded force loop. Retrying on the Standard tier.",
+		},
+	])(
+		"records why $cause moved a Fireworks Fast session to the Standard tier",
+		async ({ failure, trigger, notice }) => {
+			const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+			if (!fastModel) throw new Error("Expected the bundled Fireworks Fast model to exist");
+			const fastSelector = `${fastModel.provider}/${fastModel.id}`;
+			const baseSelector = `fireworks/${fastModel.id.replace(/-fast$/, "")}`;
+
+			const mock = createMockModel();
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: fastModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					if (model.id === fastModel.id) return failedTurnStream(model, failure);
+					mock.push({ content: ["the base model did the work"] });
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({ "compaction.enabled": false, "retry.baseDelayMs": 5 });
+			settings.setModelRole("default", fastSelector);
+			const sessionManager = SessionManager.inMemory();
+			session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+			const notices: Array<string | undefined> = [];
+			session.subscribe(event => {
+				if (event.type === "retry_fallback_applied") notices.push(event.reason);
+			});
+
+			await session.prompt("Degrade off Fast and answer on the Standard tier");
+			await session.waitForIdle();
+
+			expect(`${session.model?.provider}/${session.model?.id}`).toBe(baseSelector);
+			expect(notices).toEqual([notice]);
+			const fallbackChange = sessionManager
+				.getEntries()
+				.find(entry => entry.type === "model_change" && entry.resolvedModelIsFallback === true);
+			expect(fallbackChange).toMatchObject({
+				model: baseSelector,
+				fallback: { from: fastSelector, trigger, reason: failure.errorMessage },
+			});
+		},
+	);
 
 	it("walks the fallback chain when the primary provider has no credential, then restores it once one returns", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -906,6 +1081,75 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
+	describe("a 503 the transport already retried to its budget", () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+
+		/** An agent whose primary always fails with an exhausted 503; other models answer. */
+		function exhaustedPrimaryAgent(primary: Model, requestedModels: string[]): Agent {
+			const mock = createMockModel();
+			return new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					if (model.provider === primary.provider && model.id === primary.id) {
+						return retriesExhaustedErrorStream(model);
+					}
+					mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+					return mock.stream(model, context, options);
+				},
+			});
+		}
+
+		it("walks the fallback chain at once, without another request to the primary", async () => {
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled fallback models");
+			const requestedModels: string[] = [];
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			session = new AgentSession({
+				agent: exhaustedPrimaryAgent(primaryModel, requestedModels),
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+
+			await session.prompt("Recover the overloaded provider");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([
+				`${primaryModel.provider}/${primaryModel.id}`,
+				`${fallbackModel.provider}/${fallbackModel.id}`,
+			]);
+			expect(session.model?.id).toBe(fallbackModel.id);
+		});
+
+		it("ends the turn with the provider's message when no fallback is configured", async () => {
+			if (!primaryModel) throw new Error("Expected bundled primary model");
+			const requestedModels: string[] = [];
+			const settings = Settings.isolated({ "compaction.enabled": false, "retry.baseDelayMs": 5 });
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			session = new AgentSession({
+				agent: exhaustedPrimaryAgent(primaryModel, requestedModels),
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+
+			await session.prompt("Fail on the overloaded provider");
+			await session.waitForIdle();
+
+			expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+			const last = getLastAssistantMessage(session);
+			expect(last.stopReason).toBe("error");
+			expect(last.errorMessage).toBe("Gemini API error (503): The model is overloaded.");
+		});
 	});
 
 	it("never falls back to a model of a provider that settings disable", async () => {
@@ -10594,12 +10838,8 @@ describe("AgentSession retry fallback", () => {
 				: { state: "healthy", accounts: [] },
 		);
 
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
 		session.subscribe(event => {
 			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
@@ -10619,6 +10859,18 @@ describe("AgentSession retry fallback", () => {
 			thinkingLevel: undefined,
 			isFallback: true,
 			contextWindow: fallbackModel.contextWindow,
+		});
+		// #13240: the transcript alone attributes the switch, with what the live event carried.
+		const fallbackChange = sessionManager
+			.getEntries()
+			.find(entry => entry.type === "model_change" && entry.resolvedModelIsFallback === true);
+		expect(fallbackChange).toMatchObject({
+			model: `${fallbackModel.provider}/${fallbackModel.id}`,
+			fallback: {
+				from: `${primaryModel.provider}/${primaryModel.id}`,
+				trigger: "usage-preflight",
+				reason: fallbackEvents[0].reason,
+			},
 		});
 	});
 

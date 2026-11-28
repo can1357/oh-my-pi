@@ -18,6 +18,7 @@ _DARWIN_RUSTC_ENV_FILES = select({
 
 rust_binary(
     name = "generate_syntax_set",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = [
         "src/syntaxes/builder.rs",
         "src/syntaxes/generate.rs",
@@ -71,6 +72,7 @@ applefm_bridge(
 
 rust_binary(
     name = "oauth_callback_relay",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = [
         "src/oauth_callback/publication.rs",
         "src/oauth_callback/relay.rs",
@@ -101,6 +103,7 @@ rust_binary(
 # route.rs with the addon.
 rust_binary(
     name = "input_release_helper",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = [
         "src/desktop/macos/release.rs",
         "src/desktop/macos/release_helper.rs",
@@ -138,6 +141,7 @@ write_file(
 # committed, so artifact builds never need the napi CLI.
 rust_shared_library(
     name = "pi_natives",
+    lint_config = "//bazel/lints:workspace_lints",
     srcs = glob(["src/**/*.rs"]),
     aliases = aliases(),
     compile_data = [
@@ -145,7 +149,6 @@ rust_shared_library(
         ":syntax_set",
     ] + glob([
         "src/syntaxes/*.sublime-syntax",
-        "src/fonts/*",
         "data/*.bin.zst",
         "src/utok/claude/testdata/*.json",
         "src/desktop/linux/wayland/testdata/*.xkb",
@@ -234,6 +237,7 @@ rust_shared_library(
         "//crates/vcs",
         "//crates/vfs",
         "//crates/voice",
+        "//crates/web",
         "//crates/vendor/napi",
     ],
 )

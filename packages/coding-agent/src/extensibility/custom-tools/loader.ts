@@ -12,6 +12,7 @@ import * as zod from "@oh-my-pi/omptype/zod";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { toolCapability } from "../../capability/tool";
+import type { EffectiveExtensionRoots } from "../../capability/types";
 import { type CustomTool, loadCapability } from "../../discovery";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
@@ -95,7 +96,9 @@ async function loadTool(
 		// `reload: false`: a tool module and its helpers are evaluated once per
 		// process and shared, as with a native import; each session still calls
 		// the factory with its own API.
-		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath, { reload: false }))) as {
+		const module = (await logger.time("module", () =>
+			withHostGuard(() => loadLegacyPiModule(resolvedPath, { reload: false })),
+		)) as {
 			default?: unknown;
 		};
 		const factory = customToolFactoryOf(module);
@@ -104,7 +107,7 @@ async function loadTool(
 			return { tools: [], errors: [{ path: toolPath, error: "Tool must export a default function", source }] };
 		}
 
-		const toolResult: unknown = await withHostGuard(async () => factory(sharedApi));
+		const toolResult: unknown = await logger.time("factory", () => withHostGuard(async () => factory(sharedApi)));
 		const toolsArray = Array.isArray(toolResult) ? toolResult : [toolResult];
 
 		const loadedTools: LoadedCustomTool[] = [];
@@ -191,7 +194,14 @@ export class CustomToolLoader {
 
 	async load(pathsWithSources: ToolPathWithSource[]): Promise<void> {
 		for (const { path: toolPath, source } of pathsWithSources) {
-			const { tools: loadedTools, errors } = await loadTool(toolPath, this.#sharedApi.cwd, this.#sharedApi, source);
+			const { tools: loadedTools, errors } = await logger.time(
+				`customTool:${logger.timingPath(toolPath, this.#sharedApi.cwd)}`,
+				loadTool,
+				toolPath,
+				this.#sharedApi.cwd,
+				this.#sharedApi,
+				source,
+			);
 			this.errors.push(...errors);
 
 			for (const loadedTool of loadedTools) {
@@ -245,6 +255,18 @@ export async function loadCustomTools(
 	};
 }
 
+export interface DiscoverCustomToolPathOptions {
+	/**
+	 * Include ambient sources: native/Claude/Codex tool dirs, marketplace and
+	 * installed plugins. `false` (an explicit-only `disableExtensionDiscovery`
+	 * session) keeps only the `tools/` of explicitly named extension package
+	 * roots and the configured paths. Default: true.
+	 */
+	ambient?: boolean;
+	/** Session-local extension roots for loads outside the construction-time scope. */
+	extensionRoots?: EffectiveExtensionRoots;
+}
+
 /**
  * Collect the absolute tool-source paths to load, without importing or
  * binding factories. Hot path on session startup — the scan walks
@@ -258,12 +280,15 @@ export async function loadCustomTools(
  * @param configuredPaths - Explicit paths from settings.json and CLI --tool flags
  * @param cwd - Current working directory
  * @param agentDir - Native user config dir. Default: getAgentDir()
+ * @param options - Ambient-source gate and session-local extension roots
  */
 export async function discoverCustomToolPaths(
 	configuredPaths: string[],
 	cwd: string,
 	agentDir?: string,
+	options: DiscoverCustomToolPathOptions = {},
 ): Promise<ToolPathWithSource[]> {
+	const ambient = options.ambient !== false;
 	const allPathsWithSources: ToolPathWithSource[] = [];
 	const seen = new Set<string>();
 
@@ -278,10 +303,14 @@ export async function discoverCustomToolPaths(
 
 	// Capability providers also expose metadata and scripts. Filter before deduplication
 	// so those entries cannot shadow executable modules with the same name.
+	// Non-ambient discovery reads only the `omp-plugins` provider, which in
+	// explicit-only mode lists just the explicit extension package roots.
 	const discoveredTools = await loadCapability<CustomTool>(toolCapability.id, {
 		cwd,
 		agentDir,
 		filter: tool => /\.(ts|js|mjs|cjs)$/.test(tool.path) && !tool.path.endsWith(".d.ts"),
+		...(ambient ? {} : { providers: ["omp-plugins"] }),
+		...(options.extensionRoots ? { extensionRoots: options.extensionRoots } : {}),
 	});
 	for (const tool of discoveredTools.items) {
 		addPath(tool.path, {
@@ -292,8 +321,10 @@ export async function discoverCustomToolPaths(
 	}
 
 	// 2. Plugin tools: ~/.omp/plugins/node_modules/*/
-	for (const pluginPath of await getAllPluginToolPaths(cwd)) {
-		addPath(pluginPath, { provider: "plugin", providerName: "Plugin", level: "user" });
+	if (ambient) {
+		for (const pluginPath of await getAllPluginToolPaths(cwd)) {
+			addPath(pluginPath, { provider: "plugin", providerName: "Plugin", level: "user" });
+		}
 	}
 
 	// 3. Explicitly configured paths (can override/add)

@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
-import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { shortenPath } from "../utils/render-utils";
+import { ToolError } from "../tools/tool-errors";
 import type { HostEvalPreludeDefinition } from "../eval/preludes";
 import archiveDocumentation from "../prompts/tools/archive.md" with { type: "text" };
 import type { TimeWindow } from "../session/time-window";
@@ -26,12 +26,15 @@ import {
 	archiveSession,
 	archiveSessions,
 } from "./archive";
+import { archiveTranscript } from "./transcript";
 // @ts-expect-error Bun imports this JavaScript source as text instead of evaluating its module shape.
 import archiveJavascript from "./prelude.js" with { type: "text" };
 import archivePython from "./prelude.py" with { type: "text" };
 
 /** Listing size when a call omits `limit`. */
 const DEFAULT_LIMIT = 20;
+/** Characters of a transcript rendering when a call omits `budget`: about a thousand tokens. */
+const DEFAULT_TRANSCRIPT_BUDGET = 4000;
 /** Milliseconds per unit of a relative `since`/`until` age. */
 const AGE_UNIT_MS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 };
 
@@ -44,6 +47,16 @@ const tools = "string > 0 | (string > 0)[]";
 const window = { "since?": "string > 0", "until?": "string > 0" } as const;
 const grepSources = type("'user' | 'assistant' | 'thinking' | 'args' | 'result'").array().atLeastLength(1);
 const messageKinds = type("'user' | 'assistant' | 'thinking' | 'call' | 'result'").array().atLeastLength(1);
+const detailLevel = type("'auto' | 'omit' | 'brief' | 'normal' | 'full'");
+const transcriptDetail = detailLevel.or({
+	"user?": detailLevel,
+	"assistant?": detailLevel,
+	"thinking?": detailLevel,
+	"call?": detailLevel,
+	"result?": detailLevel,
+	"+": "reject",
+});
+const transcriptTurns = type("number.integer").or(type(["number.integer", "number.integer"]));
 const callFilter = {
 	"tool?": tools,
 	"match?": pattern,
@@ -85,6 +98,15 @@ const paramsSchema = type({ action: "'projects'", "limit?": limit, ...window, "+
 		id: "string > 0",
 		"kinds?": messageKinds,
 		"limit?": recordLimit,
+		...window,
+		"+": "reject",
+	})
+	.or({
+		action: "'transcript'",
+		id: "string > 0",
+		"budget?": "500 <= number.integer <= 1000000",
+		"detail?": transcriptDetail,
+		"turns?": transcriptTurns,
 		...window,
 		"+": "reject",
 	});
@@ -181,7 +203,22 @@ function toolList(tool: string | string[] | undefined): string[] | undefined {
 	return typeof tool === "string" ? [tool] : tool;
 }
 
+/** A session id prefix as given, or a `.jsonl` transcript path resolved against the cwd. */
+function transcriptRef(id: string, cwd: string): string {
+	return id.endsWith(".jsonl") ? resolveToCwd(id, cwd) : id;
+}
+
 async function archiveView(params: ArchiveParams, cwd: string, signal?: AbortSignal): Promise<ArchiveView<unknown>> {
+	// A transcript is bounded by its character budget, not a record limit.
+	if (params.action === "transcript") {
+		return archiveTranscript(transcriptRef(params.id, cwd), {
+			budget: params.budget ?? DEFAULT_TRANSCRIPT_BUDGET,
+			detail: params.detail ?? "auto",
+			turns: params.turns,
+			window: resolveWindow(params),
+			signal,
+		});
+	}
 	const count = params.limit ?? DEFAULT_LIMIT;
 	switch (params.action) {
 		case "projects":
@@ -189,7 +226,7 @@ async function archiveView(params: ArchiveParams, cwd: string, signal?: AbortSig
 		case "sessions":
 			return archiveSessions(scopeOf(params, cwd, count));
 		case "session":
-			return archiveSession(params.id.endsWith(".jsonl") ? resolveToCwd(params.id, cwd) : params.id, count);
+			return archiveSession(transcriptRef(params.id, cwd), count);
 		case "prompts":
 			return archivePrompts(params.query, scopeOf(params, cwd, count));
 		case "search":
@@ -223,7 +260,7 @@ async function archiveView(params: ArchiveParams, cwd: string, signal?: AbortSig
 				signal,
 			);
 		case "messages":
-			return archiveMessages(params.id.endsWith(".jsonl") ? resolveToCwd(params.id, cwd) : params.id, {
+			return archiveMessages(transcriptRef(params.id, cwd), {
 				kinds: params.kinds,
 				window: resolveWindow(params),
 				limit: count,
@@ -241,6 +278,7 @@ function describeArchiveCall(parameters: unknown): string | undefined {
 			return "archive.projects()";
 		case "session":
 		case "messages":
+		case "transcript":
 			return `archive.${parsed.action}(${parsed.id})`;
 		case "search":
 			return `archive.search(${JSON.stringify(parsed.query)})`;

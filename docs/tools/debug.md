@@ -14,15 +14,15 @@
    - `packages/coding-agent/src/dap/types.ts` — request/response/capability shapes
    - `packages/coding-agent/src/tools/tool-timeouts.ts` — per-tool timeout clamp
    - `packages/coding-agent/src/debug/index.ts` — interactive debug selector menu
-   - `packages/tui/src/apps/debug/log-viewer.ts` — recent-log TUI viewer
-   - `packages/tui/src/apps/debug/raw-sse.ts` — raw SSE TUI viewer
-   - `packages/tui/src/apps/debug/raw-sse-buffer.ts` — bounded SSE capture buffer
+   - `packages/coding-agent/src/ui/apps/log-viewer/log-viewer.tsx` — recent-log TUI viewer
+   - `packages/coding-agent/src/ui/apps/raw-sse/raw-sse.tsx` — raw SSE TUI viewer
+   - `packages/coding-agent/src/debug/raw-sse-buffer.ts` — bounded SSE capture buffer
    - `packages/coding-agent/src/debug/remote-debugger.ts` — one-shot JavaScriptCore remote inspector socket
    - `packages/coding-agent/src/debug/profiler.ts` — CPU/heap profiling helpers
    - `packages/coding-agent/src/debug/report-bundle.ts` — `.tar.gz` report bundling, log source, cache cleanup
    - `packages/coding-agent/src/debug/system-info.ts` — system snapshot collection and env redaction
-   - `packages/tui/src/apps/debug/terminal-info.ts` — terminal state collection/formatting
-   - `packages/tui/src/apps/debug/protocol-probe.ts` — terminal protocol probe panel and sample image
+   - `packages/coding-agent/src/modes/view-model/apps/debug/terminal-info.ts` — terminal state collection/formatting
+   - `packages/coding-agent/src/ui/apps/protocol-probe/protocol-probe.tsx` — terminal protocol probe panel and sample image
 
 ## Inputs
 
@@ -168,10 +168,10 @@ Side-channel artifacts outside the model tool result:
    - Built-in adapter ids are `gdb`, `lldb-dap`, `codelldb`, `debugpy`, `dlv`, `js-debug-adapter`, `netcoredbg`, `kotlin-debug-adapter`, `rdbg`, `php-debug-adapter`, `bash-debug-adapter`, `dart-debug-adapter`, `flutter-debug-adapter`, and `elixir-ls-debugger`.
    - `launch`: explicit `adapter` wins. Otherwise extension-matching adapters are tried first; if configured matches exist but none resolve, the tool reports their installation/configuration failure rather than silently choosing an unrelated debugger. Root markers are checked up the target's ancestry. Package directories prefer matching directory-capable adapters; remaining candidates rank by extension match, root match, then native-debugger preference (`gdb`, `lldb-dap`).
    - Delve uses `mode: "debug"` for directories and `.go` sources, and `mode: "exec"` for existing compiled binaries, overriding its static launch default.
-   - `attach`: explicit `adapter` wins; otherwise remote `port` prefers `debugpy`, then native debuggers, then first available adapter.
+   - `attach`: explicit `adapter` wins. A `pid` selects the runtime adapter by the live process's executable image (not its display name). A `port` serving a V8 inspector prefers `js-debug-adapter`; other ports prefer `debugpy`. If none match, native debuggers then the first available adapter are tried.
 - **Custom adapter config**
    - Debug adapters can be added or overridden with `dap.json`, `.dap.json`, `dap.yaml`, `.dap.yaml`, `dap.yml`, or `.dap.yml`.
-   - Search order: selected cwd, its project config dirs (`.omp/`, `.claude/`, `.codex/`, `.gemini/`), enabled user config dirs (`~/.omp/agent/`, Claude's active config directory, `~/.codex/`, `~/.gemini/`), plugin roots, then home-root fallback. `CLAUDE_CONFIG_DIR` overrides Claude's user directory. Files are merged from lowest to highest priority.
+   - Search order: selected cwd, its project config dir (`.omp/`), the user config dir (`~/.omp/agent/`), plugin roots, then home-root fallback. Files are merged from lowest to highest priority.
    - Config shape may be either `{ "adapters": { ... } }` or a top-level adapter map.
    - Adapter fields:
       - `command`: executable name or path. Required.
@@ -311,13 +311,12 @@ GDB example for an OpenOCD remote target:
 - Output capture cap: `MAX_OUTPUT_BYTES = 128 * 1024`; whole chunks are dropped from the front (then the front chunk is byte-sliced so exactly the cap remains) and `outputTruncated` is recorded.
 - Initial stop capture timeout after launch/attach: `STOP_CAPTURE_TIMEOUT_MS = 5_000`.
 - Socket-mode adapter readiness timeout: `10_000` ms in `waitForCondition()` and TCP connect timeout logic in `packages/coding-agent/src/dap/client.ts`.
-- Raw SSE buffer caps in `packages/tui/src/apps/debug/raw-sse-buffer.ts`:
+- Raw SSE buffer caps in `packages/coding-agent/src/debug/raw-sse-buffer.ts`:
    - `MAX_RAW_SSE_EVENTS = 1_000`
    - `MAX_RAW_SSE_CHARS = 512_000`
    - `MAX_RAW_SSE_EVENT_CHARS = 64_000` per event; over-budget events first compact long `tools` schemas/descriptions to 200-character previews (name/type retained), then, if still oversized, use head+tail trimming with `: omp-debug-elided chars=...`. Trimmed events end with `: omp-debug-truncated originalChars=...`.
-- Log viewer window in `packages/tui/src/apps/debug/log-viewer.ts`:
-   - `INITIAL_LOG_CHUNK = 50`
-   - `LOAD_OLDER_CHUNK = 50`
+- Log viewer window in `packages/coding-agent/src/ui/apps/log-viewer/entries.ts`:
+   - `LOG_CHUNK = 50` (initial window and each older-chunk load)
 - Report/log ingestion caps in `packages/coding-agent/src/debug/report-bundle.ts`:
    - `MAX_LOG_LINES = 5000` for interactive log reading
    - `MAX_LOG_BYTES = 2 * 1024 * 1024` tail-read ceiling

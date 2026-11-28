@@ -21,7 +21,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { capFrameDataBytes, frameDataBytesBudget, providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { declaredTools } from "../utils/tool-declarations";
-import { imageDecodeFailureReason } from "@oh-my-pi/pi-tui/chat/image-loading";
+import { imageDecodeFailureReason } from "../utils/image-input";
 
 const IMAGE_OMISSION: TextContent = {
 	type: "text",
@@ -505,12 +505,7 @@ function sendsInlineImageBytes(image: ImageContent, model: Model): boolean {
 				if (reference.id && model.api === "anthropic-messages") return false;
 				break;
 			case "google":
-				if (
-					reference.uri &&
-					(model.api === "google-generative-ai" ||
-						model.api === "google-gemini-cli" ||
-						model.api === "google-vertex")
-				) {
+				if (reference.uri && (model.api === "google-generative-ai" || model.api === "google-vertex")) {
 					return false;
 				}
 				break;

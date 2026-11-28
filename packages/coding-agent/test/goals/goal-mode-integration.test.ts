@@ -8,16 +8,18 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { normalizeCustomMessagePayload } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { normalizeCustomMessagePayload, SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { BUILTIN_MODE_SLASH_COMMANDS } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-modes";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/details/todo";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { initTheme } from "../../src/ui/theme/service";
+import { createModeTerminal } from "../helpers/mode-terminal";
 
 function createToolSession(cwd: string, settings: Settings, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -96,7 +98,15 @@ async function createGoalHarness(shared: SharedFixture): Promise<GoalHarness> {
 		toolRegistry,
 		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
 	});
-	const mode = new InteractiveMode(session, "test");
+	const mode = new InteractiveMode(
+		session,
+		"test",
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		createModeTerminal().frame,
+	);
 	const toolSession = createToolSession(tempDir.path(), settings, {
 		getGoalModeState: () => session.getGoalModeState(),
 		getGoalRuntime: () => session.goalRuntime,
@@ -122,6 +132,11 @@ async function createGoalHarness(shared: SharedFixture): Promise<GoalHarness> {
 			resetSettingsForTest();
 		},
 	};
+}
+
+/** Replace a draft array's contents in place (the composer's pending images are read-only references). */
+function replace<T>(target: T[], items: readonly T[]): void {
+	target.splice(0, target.length, ...items);
 }
 
 async function toolNamesFor(harness: GoalHarness): Promise<string[]> {
@@ -348,9 +363,9 @@ describe("InteractiveMode goal mode integration", () => {
 		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
 		const imageLinks = ["file:///shot.png"];
 		const commandText = "/goal [Image #1, 10x10] fix this";
-		harness.mode.editor.setText(commandText);
-		harness.mode.editor.pendingImages = images;
-		harness.mode.editor.pendingImageLinks = imageLinks;
+		harness.mode.composer.setText(commandText);
+		replace(harness.mode.composer.pendingImages, images);
+		replace(harness.mode.composer.pendingImageLinks, imageLinks);
 		vi.spyOn(harness.session.goalRuntime, "createGoal").mockRejectedValueOnce(new Error("goal setup failed"));
 		const showError = vi.spyOn(harness.mode, "showError");
 
@@ -360,16 +375,16 @@ describe("InteractiveMode goal mode integration", () => {
 		});
 
 		expect(showError).toHaveBeenCalledWith("goal setup failed");
-		expect(harness.mode.editor.getText()).toBe(commandText);
-		expect(harness.mode.editor.pendingImages).toEqual(images);
-		expect(harness.mode.editor.pendingImageLinks).toEqual(imageLinks);
+		expect(harness.mode.composer.text()).toBe(commandText);
+		expect(harness.mode.composer.pendingImages).toEqual(images);
+		expect(harness.mode.composer.pendingImageLinks).toEqual(imageLinks);
 	});
 
 	it("keeps images pasted while delayed plan setup completes in the later draft", async () => {
 		const submittedImages: ImageContent[] = [{ type: "image", data: "b2xk", mimeType: "image/png" }];
 		const submittedLinks = ["file:///submitted.png"];
-		harness.mode.editor.pendingImages = submittedImages;
-		harness.mode.editor.pendingImageLinks = submittedLinks;
+		replace(harness.mode.composer.pendingImages, submittedImages);
+		replace(harness.mode.composer.pendingImageLinks, submittedLinks);
 		const waiter = await armInputWaiter(harness.mode);
 		const setupStarted = Promise.withResolvers<void>();
 		const continueSetup = Promise.withResolvers<void>();
@@ -386,23 +401,23 @@ describe("InteractiveMode goal mode integration", () => {
 		});
 		await setupStarted.promise;
 		const laterImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/png" };
-		harness.mode.editor.pendingImages = [laterImage];
-		harness.mode.editor.pendingImageLinks = ["file:///later.png"];
+		replace(harness.mode.composer.pendingImages, [laterImage]);
+		replace(harness.mode.composer.pendingImageLinks, ["file:///later.png"]);
 		continueSetup.resolve();
 		await command;
 		await waiter.inputPromise;
 
 		expect(waiter.getResolvedInput()?.images).toBe(submittedImages);
-		expect(harness.mode.editor.pendingImages).toEqual([laterImage]);
-		expect(harness.mode.editor.pendingImageLinks).toEqual(["file:///later.png"]);
+		expect(harness.mode.composer.pendingImages).toEqual([laterImage]);
+		expect(harness.mode.composer.pendingImageLinks).toEqual(["file:///later.png"]);
 	});
 
 	it("keeps a later draft when a preserve-draft submission is cancelled", () => {
 		const submittedImage: ImageContent = { type: "image", data: "b2xk", mimeType: "image/png" };
 		const laterImage: ImageContent = { type: "image", data: "bmV3", mimeType: "image/png" };
-		harness.mode.editor.setText("later draft");
-		harness.mode.editor.pendingImages = [laterImage];
-		harness.mode.editor.pendingImageLinks = ["file:///later.png"];
+		harness.mode.composer.setText("later draft");
+		replace(harness.mode.composer.pendingImages, [laterImage]);
+		replace(harness.mode.composer.pendingImageLinks, ["file:///later.png"]);
 
 		harness.mode.startPendingSubmission(
 			{ text: "submitted draft", images: [submittedImage], imageLinks: ["file:///submitted.png"] },
@@ -410,9 +425,27 @@ describe("InteractiveMode goal mode integration", () => {
 		);
 
 		expect(harness.mode.cancelPendingSubmission()).toBe(true);
-		expect(harness.mode.editor.getText()).toBe("later draft");
-		expect(harness.mode.editor.pendingImages).toEqual([laterImage]);
-		expect(harness.mode.editor.pendingImageLinks).toEqual(["file:///later.png"]);
+		expect(harness.mode.composer.text()).toBe("later draft");
+		expect(harness.mode.composer.pendingImages).toEqual([laterImage]);
+		expect(harness.mode.composer.pendingImageLinks).toEqual(["file:///later.png"]);
+	});
+
+	it("recovers a cancelled submission without losing text and images added after Enter", () => {
+		const submittedImage: ImageContent = { type: "image", data: "YQ==", mimeType: "image/png" };
+		const laterImage: ImageContent = { type: "image", data: "Yg==", mimeType: "image/png" };
+		harness.mode.composer.setText("");
+		harness.mode.startPendingSubmission(
+			{ text: "first [Image #1]", images: [submittedImage], imageLinks: ["file:///first.png"] },
+			{ clearEditor: false },
+		);
+		replace(harness.mode.composer.pendingImages, [laterImage]);
+		replace(harness.mode.composer.pendingImageLinks, ["file:///later.png"]);
+		harness.mode.composer.setCollapsedText("later [Image #1]");
+
+		expect(harness.mode.cancelPendingSubmission()).toBe(true);
+		expect(harness.mode.composer.expandedText()).toBe("first [Image #1]\nlater [Image #2]");
+		expect(harness.mode.composer.pendingImages).toEqual([submittedImage, laterImage]);
+		expect(harness.mode.composer.pendingImageLinks).toEqual(["file:///first.png", "file:///later.png"]);
 	});
 
 	it("includes escaped live todo state in hidden goal context during continuations", async () => {
@@ -802,6 +835,122 @@ describe("InteractiveMode goal mode integration", () => {
 			},
 		},
 	];
+
+	/**
+	 * Entering plan/vibe mode with an inline prompt whose text invokes a registered
+	 * skill dispatches the skill as a user-attributed SKILL_PROMPT_MESSAGE
+	 * (surrounding prose collapsed into the skill args), rather than submitting
+	 * the raw `.../skill:<name>` text as a normal prompt.
+	 */
+	describe("inline /skill in mode-command prompts", () => {
+		beforeEach(async () => {
+			const skillPath = path.join(harness.tempDir.path(), "grilling.md");
+			await Bun.write(skillPath, "---\nname: grilling\n---\nGrill the steak thoroughly.\n");
+			harness.mode.skillCommands.set("skill:grilling", {
+				name: "grilling",
+				description: "Grilling skill",
+				filePath: skillPath,
+				baseDir: harness.tempDir.path(),
+				source: "test",
+			});
+		});
+
+		it("dispatches an inline /skill invocation from a /plan prompt as a skill message", async () => {
+			const promptCustomMessage = vi.spyOn(harness.session, "promptCustomMessage").mockResolvedValue(true);
+			let submitted: { text: string } | undefined;
+			harness.mode.onInputCallback = input => {
+				submitted = input;
+			};
+
+			await harness.mode.handlePlanModeCommand("do X /skill:grilling");
+
+			expect(harness.mode.planModeEnabled).toBe(true);
+			// The skill goes through the custom-message path, NOT a raw prompt.
+			expect(submitted).toBeUndefined();
+			expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+			const [message] = promptCustomMessage.mock.calls[0] ?? [];
+			expect(message?.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
+			expect(message?.details).toMatchObject({ name: "grilling", args: "do X" });
+		});
+
+		it("dispatches an inline /skill invocation from a /vibe prompt as a skill message", async () => {
+			vi.spyOn(harness.session, "activateVibeTools").mockResolvedValue(undefined);
+			const promptCustomMessage = vi.spyOn(harness.session, "promptCustomMessage").mockResolvedValue(true);
+			let submitted: { text: string } | undefined;
+			harness.mode.onInputCallback = input => {
+				submitted = input;
+			};
+
+			await harness.mode.handleVibeModeCommand("do X /skill:grilling");
+
+			expect(harness.mode.vibeModeEnabled).toBe(true);
+			expect(submitted).toBeUndefined();
+			expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+			const [message] = promptCustomMessage.mock.calls[0] ?? [];
+			expect(message?.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
+			expect(message?.details).toMatchObject({ name: "grilling", args: "do X" });
+		});
+
+		it("clears /plan and /vibe drafts before awaiting the skill turn", async () => {
+			for (const [name, handlerName] of [
+				["plan", "handlePlanModeCommand"],
+				["vibe", "handleVibeModeCommand"],
+			] as const) {
+				const { promise: turn, resolve: finishTurn } = Promise.withResolvers<void>();
+				const handleModeCommand = vi.fn((_prompt?: string) => turn);
+				const clearDraft = vi.fn();
+				const setText = vi.fn();
+				const command = BUILTIN_MODE_SLASH_COMMANDS.find(candidate => candidate.name === name);
+				if (!command?.handleTui) throw new Error(`Expected /${name} TUI handler`);
+
+				const inFlight = command.handleTui(
+					{ name, args: "do X /skill:grilling", text: `/${name} do X /skill:grilling` },
+					{ ctx: { [handlerName]: handleModeCommand, composer: { clearDraft, setText } } } as never,
+				);
+				await Promise.resolve();
+				const clearedBeforeTurnFinished = clearDraft.mock.calls.length + setText.mock.calls.length;
+				finishTurn();
+				await inFlight;
+
+				expect(handleModeCommand.mock.calls[0]?.[0]).toBe("do X /skill:grilling");
+				expect(clearedBeforeTurnFinished).toBe(1);
+			}
+		});
+
+		it("forwards draft images into the dispatched skill message", async () => {
+			const promptCustomMessage = vi.spyOn(harness.session, "promptCustomMessage").mockResolvedValue(true);
+			const image: ImageContent = { type: "image", data: "aGk=", mimeType: "image/png" };
+
+			await harness.mode.handlePlanModeCommand("do X /skill:grilling", { images: [image] });
+
+			expect(promptCustomMessage).toHaveBeenCalledTimes(1);
+			const [message] = promptCustomMessage.mock.calls[0] ?? [];
+			expect(Array.isArray(message?.content)).toBe(true);
+			expect(message?.content).toContainEqual(image);
+		});
+
+		it("propagates a failed skill dispatch so the detached draft can be restored", async () => {
+			const skill = harness.mode.skillCommands.get("skill:grilling");
+			if (!skill) throw new Error("Expected grilling skill");
+			skill.filePath = path.join(harness.tempDir.path(), "missing-skill.md");
+
+			await expect(harness.mode.handlePlanModeCommand("do X /skill:grilling")).rejects.toThrow();
+		});
+
+		it("still submits a non-skill /plan prompt as a normal prompt", async () => {
+			const promptCustomMessage = vi.spyOn(harness.session, "promptCustomMessage").mockResolvedValue(true);
+			let submitted: { text: string } | undefined;
+			harness.mode.onInputCallback = input => {
+				submitted = input;
+			};
+
+			await harness.mode.handlePlanModeCommand("just plan the migration");
+
+			expect(harness.mode.planModeEnabled).toBe(true);
+			expect(promptCustomMessage).not.toHaveBeenCalled();
+			expect(submitted?.text).toBe("just plan the migration");
+		});
+	});
 
 	for (const testCase of lateToolExitCases) {
 		it(`keeps a tool enabled after it registers when ${testCase.name}`, async () => {
