@@ -16,7 +16,7 @@
  * fallbacks cover unmatched targets.
  */
 import { Effort, THINKING_EFFORTS } from "../effort";
-import { classifyEndpointHosts, modelMatchesHost } from "../hosts";
+import { classifyEndpointHosts, hostMatchesUrl, modelMatchesHost } from "../hosts";
 import type {
 	Api,
 	CatalogPolicyInputs,
