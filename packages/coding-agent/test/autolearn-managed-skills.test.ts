@@ -280,12 +280,14 @@ describe("managed-skills primitives", () => {
 			expect(parsed.body).toBe("# Foo\n\nSteps.");
 		});
 
-		it("falls back to the body frontmatter's description on create only", async () => {
-			await writeManagedSkill({ origin, action: "create", name: "foo", body: "---\ndescription: New.\n---\nnew" });
-			let parsed = parseFrontmatter(await Bun.file(skillFile("foo")).text(), { source: "test" });
-			expect(parsed.frontmatter.description).toBe("New.");
-			expect(parsed.body).toBe("new");
+		it("never takes the description from a stripped body block", async () => {
+			const body = "---\ndescription: From the body.\n---\nnew";
+			await expect(writeManagedSkill({ origin, action: "create", name: "foo", body })).rejects.toThrow(
+				/requires both/,
+			);
+			expect(await Bun.file(skillFile("foo")).exists()).toBe(false);
 
+			await writeManagedSkill({ origin, action: "create", name: "foo", description: "Stored.", body });
 			// A body-only update strips the block but keeps the stored description.
 			await writeManagedSkill({
 				origin,
@@ -293,8 +295,8 @@ describe("managed-skills primitives", () => {
 				name: "foo",
 				body: "---\nname: foo\ndescription: Replaced.\n---\nnewer",
 			});
-			parsed = parseFrontmatter(await Bun.file(skillFile("foo")).text(), { source: "test" });
-			expect(parsed.frontmatter.description).toBe("New.");
+			const parsed = parseFrontmatter(await Bun.file(skillFile("foo")).text(), { source: "test" });
+			expect(parsed.frontmatter.description).toBe("Stored.");
 			expect(parsed.body).toBe("newer");
 		});
 

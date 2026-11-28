@@ -204,12 +204,11 @@ const LEADING_FRONTMATTER = /^\uFEFF?\s*---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?
  * Only a block that parses as a YAML mapping carrying a skill metadata key
  * (`name`, `description`, or the provenance key) counts, so a body opening with
  * a horizontal rule (even one followed by a `Key: value` Setext heading) keeps
- * it. Returns the first stripped block's `description` for `create` to fall
- * back to; its `name` is ignored (the explicit name wins).
+ * it. The stripped blocks' values are discarded: the explicit `name` and
+ * `description` (or the stored ones on `update`) always win.
  */
-export function stripBodyFrontmatter(raw: string): { body: string; description?: string } {
+export function stripBodyFrontmatter(raw: string): string {
 	let body = raw;
-	let description: string | undefined;
 	for (;;) {
 		const match = LEADING_FRONTMATTER.exec(body);
 		if (!match) break;
@@ -221,12 +220,9 @@ export function stripBodyFrontmatter(raw: string): { body: string; description?:
 		}
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) break;
 		if (!("name" in parsed || "description" in parsed || MANAGED_SKILL_PROVENANCE_KEY in parsed)) break;
-		if (description === undefined && "description" in parsed && typeof parsed.description === "string") {
-			description = parsed.description;
-		}
 		body = body.slice(match[0].length);
 	}
-	return { body, description };
+	return body;
 }
 
 /**
@@ -303,15 +299,12 @@ async function openManagedSkillFileForUpdate(name: string, file: string) {
 /** Create or update a managed `SKILL.md`. Returns the resolved file path. */
 export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<{ path: string }> {
 	const name = sanitizeSkillName(input.name);
-	const stripped = input.body === undefined ? undefined : stripBodyFrontmatter(input.body);
-	// An explicit description always wins. On `create` the body's frontmatter
-	// `description` is a fallback; on `update` an omitted description keeps the
-	// stored one, so a body-only update never touches discovery.
-	const description = input.description ?? (input.action === "create" ? stripped?.description : undefined);
-	if (input.action === "create" && (description === undefined || stripped === undefined)) {
+	const strippedBody = input.body === undefined ? undefined : stripBodyFrontmatter(input.body);
+	const description = input.description;
+	if (input.action === "create" && (description === undefined || strippedBody === undefined)) {
 		throw new Error(`Creating managed skill "${name}" requires both a description and a body.`);
 	}
-	if (description === undefined && stripped === undefined) {
+	if (description === undefined && strippedBody === undefined) {
 		throw new Error(`Updating managed skill "${name}" requires a description, a body, or both.`);
 	}
 	const render = (rawDescription: string, rawBody: string, prior: ManagedSkillProvenance | undefined): Buffer => {
@@ -340,7 +333,7 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 	// Fail an empty or oversized create/update before touching the filesystem; an
 	// update re-renders below once the stored skill (provenance and any field the
 	// call left out) is known.
-	if (description !== undefined && stripped !== undefined) render(description, stripped.body, undefined);
+	if (description !== undefined && strippedBody !== undefined) render(description, strippedBody, undefined);
 	return serializeSkillMutation(name, async () => {
 		await assertManagedRootSafe();
 		const dir = path.join(getManagedSkillsDir(), name);
@@ -359,10 +352,10 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 		}
 		if (input.action === "create") {
 			// Unreachable after the checks above; narrows both fields for the compiler.
-			if (description === undefined || stripped === undefined) {
+			if (description === undefined || strippedBody === undefined) {
 				throw new Error(`Creating managed skill "${name}" requires both a description and a body.`);
 			}
-			const content = render(description, stripped.body, undefined);
+			const content = render(description, strippedBody, undefined);
 			await fs.mkdir(dir, { recursive: true });
 			// O_CREAT|O_EXCL ("wx"): atomic create that fails if the file already
 			// exists (closing the check-then-write race) and refuses a symlinked SKILL.md.
@@ -409,7 +402,7 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 			const storedDescription = stored.frontmatter.description;
 			const content = render(
 				description ?? (typeof storedDescription === "string" ? storedDescription : ""),
-				stripped?.body ?? stored.body,
+				strippedBody ?? stored.body,
 				readManagedSkillProvenance(stored.frontmatter),
 			);
 			await handle.truncate(0);

@@ -23,7 +23,7 @@
 | `action`      | `"create" \| "update" \| "delete"` |      Yes | Managed-skill mutation.                                                                                                                                                                                                          |
 | `name`        | `string`                           |      Yes | Managed skill name; trimmed and lowercased before path resolution, then validated against `[a-z0-9][a-z0-9-]{0,63}`.                                                                                                             |
 | `description` | `string`                           |   Create | One-line description used for skill discovery. `update` needs `description`, `body`, or both; an omitted field keeps its stored value.                                                                                           |
-| `body`        | `string`                           |   Create | Markdown body for `SKILL.md`; replaces the whole stored body. Do not include frontmatter: leading frontmatter blocks are stripped, and on `create` a stripped block's `description` is used only when `description` is omitted.  |
+| `body`        | `string`                           |   Create | Markdown body for `SKILL.md`; replaces the whole stored body. Do not include frontmatter: leading frontmatter blocks are stripped and their values ignored.                                                                      |
 
 ## Outputs
 
@@ -81,7 +81,7 @@
 ## Notes
 
 - Managed skills are generated under `<agent-dir>/managed-skills` and never edit authored skills.
-- Do not include YAML frontmatter in `body`; `writeManagedSkill(...)` generates normalized `name` and sanitized `description` frontmatter plus provenance. Leading `---` blocks that parse as a YAML mapping with a `name`, `description`, or `x-omp-provenance` key are stripped from `body` (any other leading horizontal rule stays, including one followed by a `Key: value` Setext heading). The explicit `name` and `description` win; on `create` the first stripped block carrying a `description` supplies a fallback when `description` is omitted, while on `update` an omitted `description` always keeps the stored one.
+- Do not include YAML frontmatter in `body`; `writeManagedSkill(...)` generates normalized `name` and sanitized `description` frontmatter plus provenance. Leading `---` blocks that parse as a YAML mapping with a `name`, `description`, or `x-omp-provenance` key are stripped from `body` (any other leading horizontal rule stays, including one followed by a `Key: value` Setext heading). Their values are discarded: the explicit `name` and `description` always win, and on `update` an omitted `description` keeps the stored one.
 - Provenance frontmatter (`x-omp-provenance`, never rendered into the system prompt): `generator` (`manage_skill` or `learn`, the last writer), `created` (absent for skills written before provenance existed), `updated`, and `sessions` / `projects` — the contributing session ids and working directories, oldest first; a repeat contributor moves to the end. `update` carries the stored block forward.
 - Users review managed skills and their provenance with `/skills learned` and delete one with `/skills forget <name>`.
 - `update` does not bypass authored-skill precedence: if an authored skill has the same name, the managed skill remains shadowed in discovery.
