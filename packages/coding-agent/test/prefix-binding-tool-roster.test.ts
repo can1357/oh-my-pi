@@ -73,6 +73,7 @@ function newSession(
 		beforeRequest?: () => Promise<void>;
 		/** Prompt-cache key inherited from the session a fork was taken from. */
 		forkPromptCacheKey?: string;
+		settings?: Record<string, unknown>;
 	} = {},
 ): TestSession {
 	const read = createTool("read");
@@ -114,7 +115,7 @@ function newSession(
 	const session = new AgentSession({
 		agent,
 		sessionManager: options.sessionManager ?? SessionManager.inMemory(),
-		settings: Settings.isolated({ "compaction.enabled": false }),
+		settings: Settings.isolated({ "compaction.enabled": false, ...options.settings }),
 		modelRegistry: { getApiKey: async () => "test-key" } as never,
 		toolRegistry,
 		builtInToolNames: ["read", "bash"],
@@ -244,6 +245,36 @@ describe("prefix-bound tool roster changes", () => {
 			await resumed.session.prompt("second");
 
 			expect(resumed.systemPrompts[0]).toEqual(transcript.systemPrompt);
+			expect(providerText(resumed.contexts[0])).not.toContain("Tool availability changed.");
+		});
+
+		it("commits a late rebuild that reproduces the base of the transcript's kept hook prompt", async () => {
+			// The transcript records the hook prompt it was sent with, and the base that prompt was built on.
+			const keep = { "extensionHandlers.keepSystemPromptOverride": true };
+			const hookPrompt = ["hook prompt"];
+			const sessionManager = SessionManager.inMemory();
+			const live = newSession(createPrefixBindingModel(), {
+				sessionManager,
+				beforeAgentStartSystemPrompt: hookPrompt,
+				settings: keep,
+			});
+			sessions.push(live.session);
+			await live.session.setActiveToolPresentation(["read", "bash"], []);
+			await live.session.prompt("first");
+
+			const resumed = newSession(createPrefixBindingModel(), {
+				sessionManager,
+				beforeAgentStartSystemPrompt: hookPrompt,
+				settings: keep,
+			});
+			sessions.push(resumed.session);
+			await resumed.session.setActiveToolPresentation(["read"], []);
+			await resumed.session.setActiveToolPresentation(["read", "bash"], []);
+
+			// The rebuild sends the recorded hook prompt again, so it commits and the late tool needs no notice.
+			expect(resumed.session.agent.state.systemPrompt).toEqual(hookPrompt);
+			await resumed.session.prompt("second");
+			expect(resumed.systemPrompts[0]).toEqual(hookPrompt);
 			expect(providerText(resumed.contexts[0])).not.toContain("Tool availability changed.");
 		});
 

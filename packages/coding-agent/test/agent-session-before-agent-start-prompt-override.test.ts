@@ -5,8 +5,10 @@ import { createMockModel, type MockResponseSource } from "@oh-my-pi/pi-ai/provid
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SessionMaintenance } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 
 // Contract: a per-turn system prompt returned by `before_agent_start`
@@ -111,6 +113,44 @@ describe("AgentSession before_agent_start system prompt override", () => {
 		// override must still reach the provider instead of the rebuilt base.
 		expect(systemPrompts).toHaveLength(1);
 		expect(systemPrompts[0]).toEqual([OVERRIDE]);
+	});
+
+	it("keeps the override of a turn that starts while an abort is still finishing", async () => {
+		const started = Promise.withResolvers<void>();
+		const { session, systemPrompts } = createSession([
+			() => {
+				started.resolve();
+				return { content: ["too late"], delayMs: 60_000 };
+			},
+			{ content: ["Done"] },
+		]);
+		// Hold the abort after the aborted turn has unwound, before it settles.
+		const abortParked = Promise.withResolvers<void>();
+		const abortGate = Promise.withResolvers<void>();
+		vi.spyOn(GoalRuntime.prototype, "onTaskAborted").mockImplementationOnce(async () => {
+			abortParked.resolve();
+			await abortGate.promise;
+		});
+		const first = session.prompt("first");
+		await started.promise;
+		const aborting = session.abort();
+		await abortParked.promise;
+		await first;
+
+		// The next turn has committed its override when its pre-prompt maintenance runs: the abort settles there,
+		// then a rebuild lands before the turn's request.
+		let rebuiltBeforeRequest = false;
+		vi.spyOn(SessionMaintenance.prototype, "runPrePromptCompactionIfNeeded").mockImplementationOnce(async () => {
+			abortGate.resolve();
+			await aborting;
+			await session.refreshBaseSystemPrompt();
+			rebuiltBeforeRequest = true;
+		});
+		await session.prompt("second");
+		await session.waitForIdle();
+
+		expect(rebuiltBeforeRequest).toBe(true);
+		expect(systemPrompts.at(-1)).toEqual([OVERRIDE]);
 	});
 
 	it("falls back to the rebuilt base once the turn ends", async () => {

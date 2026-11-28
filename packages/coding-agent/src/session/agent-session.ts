@@ -1647,8 +1647,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// finishing has its bracket reset by it and ends here.
 		if (epoch === this.#inFlightEpoch) this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
-		// No run is in flight, whichever path started it (a prompt, a wake, a queued drain, an idle delivery):
-		// a prompt prepared for it no longer governs rebuilds, which now apply what the branch recorded.
+		// No run is in flight, whichever path started it (a prompt, a wake, a queued drain, an idle delivery, a
+		// stream-guard recovery): a prompt prepared for it no longer governs rebuilds.
 		this.#tools.clearTurnSystemPromptOverride();
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
@@ -2200,7 +2200,6 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#resetInFlight(): void {
 		this.#inFlightEpoch++;
 		this.#promptInFlightCount = 0;
-		this.#tools.clearTurnSystemPromptOverride();
 		this.#clientPromptInFlightCount = 0;
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
@@ -2944,6 +2943,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			promptSequence: () => this.#promptSequence,
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			schedulePostPromptTask: task => this.#schedulePostPromptTask(task),
+			continueAgent: async () => {
+				// A recovery continuation is a run of its own: a queued batch it prepares ends with it.
+				const epoch = this.#beginInFlight();
+				try {
+					await this.agent.continue();
+				} finally {
+					this.#endInFlight(epoch);
+				}
+			},
 			discardAssistantTurn: message => this.#recovery.discardAssistantTurn(message),
 		};
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
@@ -12933,6 +12941,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			for (const controller of this.#usagePreflightAbortControllers) controller.abort();
 			this.abortRetry();
 			this.#promptGeneration++;
+			// The aborted turn's policy ends here: a turn that starts before this abort finishes sets its own.
+			this.#tools.clearTurnSystemPromptOverride();
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
 			this.#promptSetupAbortController?.abort(options?.reason);
@@ -15894,6 +15904,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		const displayContext = this.#withEvalStateContext(deobfuscateSessionContext(stateContext, this.#obfuscator));
 		this.replaceMessagesFromSessionContext(displayContext.messages);
+		this.#tools.followBranchSystemPrompt();
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();

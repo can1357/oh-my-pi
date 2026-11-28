@@ -62,6 +62,8 @@ export interface StreamGuardsHost {
 	promptSequence(): number;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	schedulePostPromptTask(task: (signal: AbortSignal) => Promise<void>): void;
+	/** Continues the agent loop as a run of the session, which ends what it prepared with it. */
+	continueAgent(): Promise<void>;
 	discardAssistantTurn(message: AssistantMessage): void;
 }
 
@@ -189,7 +191,7 @@ export class StreamingEditGuard {
 				STREAMING_EDIT_NOTICE_SOURCE,
 			);
 			try {
-				await this.#host.agent.continue();
+				await this.#host.continueAgent();
 			} catch (error) {
 				logger.warn("streaming edit recovery continue failed", { error: String(error) });
 			}
@@ -347,7 +349,7 @@ export class LoopGuards {
 				"agent",
 			);
 			try {
-				await this.#host.agent.continue();
+				await this.#host.continueAgent();
 			} catch (error) {
 				logger.warn("gemini tool-call reminder continue failed", { error: String(error) });
 			}

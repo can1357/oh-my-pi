@@ -19,6 +19,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/edit";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -79,11 +80,11 @@ const streamingEditFailureStream = (opts: {
 	return stream;
 };
 
-/** Second-call stream: the re-driven turn answers with plain text. */
-const textStream = (opts: { model: Model<Api>; text: string }): AssistantMessageEventStream => {
+/** Second-call stream: the re-driven turn answers with plain text, after `delayMs` when given. */
+const textStream = (opts: { model: Model<Api>; text: string; delayMs?: number }): AssistantMessageEventStream => {
 	const { model, text } = opts;
 	const stream = new AssistantMessageEventStream();
-	queueMicrotask(() => {
+	const answer = (): void => {
 		const message: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text }],
@@ -99,7 +100,9 @@ const textStream = (opts: { model: Model<Api>; text: string }): AssistantMessage
 		stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: message });
 		stream.push({ type: "text_end", contentIndex: 0, content: text, partial: message });
 		stream.push({ type: "done", reason: "stop", message });
-	});
+	};
+	if (opts.delayMs === undefined) queueMicrotask(answer);
+	else setTimeout(answer, opts.delayMs);
 	return stream;
 };
 
@@ -235,6 +238,96 @@ describe("AgentSession streaming edit preview recovery", () => {
 			);
 			if (!finalAssistant) throw new Error("expected a recovered final assistant message");
 			expect(messageText(finalAssistant)).toContain("Recovered");
+		} finally {
+			await removeWithRetries(dir);
+		}
+	}, 20_000);
+	it("ends the hook prompt of a batch prepared in the recovery run with that run", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "streaming-edit-recovery-policy-"));
+		try {
+			await Bun.write(path.join(dir, "sample.txt"), "alpha\n");
+			const settings = Settings.isolated({
+				"edit.mode": "patch",
+				"edit.streamingAbort": true,
+				"compaction.enabled": false,
+				"retry.enabled": false,
+				"todo.enabled": false,
+				"advisor.enabled": false,
+			});
+			const toolSession = {
+				cwd: dir,
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				enableLsp: false,
+				settings,
+				getArtifactsDir: () => null,
+				getSessionId: () => null,
+				getPlanModeState: () => undefined,
+			} as unknown as ToolSession;
+			const agentEditTool = new EditTool(toolSession, "patch") as AgentTool;
+			const model = createMockModel({ provider: "anthropic", id: "claude-streaming-edit-recovery" }).model;
+			settings.setModelRole("default", `${model.provider}/${model.id}`);
+			const hookPrompt = "Hook prompt for the queued follow-up.";
+			let base = "First base.";
+			const contexts: Context[] = [];
+			let call = 0;
+			const agent = new Agent({
+				getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+				initialState: { model, systemPrompt: [base], tools: [agentEditTool], messages: [] },
+				streamFn: (streamModel, context) => {
+					contexts.push(context);
+					call += 1;
+					if (call === 1) {
+						return streamingEditFailureStream({
+							model: streamModel,
+							args: { path: "sample.txt", edits: [{ diff: "@@\n-missing\n+replacement\n" }] },
+						});
+					}
+					if (call === 2) {
+						// The recovery run is streaming: a user follow-up arrives and is queued into it.
+						void active.prompt("Follow up.", { streamingBehavior: "followUp" });
+						return textStream({ model: streamModel, text: "Recovered.", delayMs: 200 });
+					}
+					return textStream({ model: streamModel, text: "Followed up." });
+				},
+				convertToLlm,
+			});
+			const active = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+				toolRegistry: new Map([["edit", agentEditTool]]),
+				extensionRunner: {
+					emitBeforeAgentStart: async () => ({ systemPrompt: [hookPrompt] }),
+					emit: async () => undefined,
+					hasHandlers: () => false,
+				} as unknown as ExtensionRunner,
+				rebuildSystemPrompt: async () => ({ systemPrompt: [base] }),
+			});
+			session = active;
+			// An idle delivery starts the run the preview fails in; it does not wait out the recovery it schedules.
+			active.yieldQueue.register<string>("delivery", {
+				build: ([text]) => ({
+					role: "custom",
+					customType: "delivery",
+					content: text ?? "",
+					display: false,
+					attribution: "agent",
+					timestamp: Date.now(),
+				}),
+			});
+			active.yieldQueue.enqueue("delivery", "Fix sample.txt");
+			await active.waitForIdle();
+
+			expect(call).toBe(3);
+			// The follow-up was prepared in the recovery run, with the hook prompt.
+			expect(contexts[2]?.systemPrompt).toEqual([hookPrompt]);
+			// That run has ended, so a rebuild applies the new base.
+			base = "Second base.";
+			await active.refreshBaseSystemPrompt();
+			expect(active.systemPrompt).toEqual(["Second base."]);
 		} finally {
 			await removeWithRetries(dir);
 		}
