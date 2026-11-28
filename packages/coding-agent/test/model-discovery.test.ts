@@ -2919,6 +2919,7 @@ describe("ModelRegistry runtime discovery", () => {
 	test.each([
 		["openai-models-list", "gw:openai-models-list-context-v8"],
 		["proxy", "gw:proxy-v2-context-v6"],
+		["lm-studio", "gw"],
 	] as const)(
 		"%s discovery refetches rows cached before the reasoning object ladder was read",
 		async (type, retiredCacheProviderId) => {
@@ -3926,6 +3927,49 @@ describe("ModelRegistry runtime discovery", () => {
 			{ apiKey: "TEST_KEY", fetch: chatFetch, disableReasoning: true },
 		).result();
 		expect(requestPayload?.reasoning_effort).toBe("none");
+	});
+
+	test("openai-models-list discovery locks reasoning on for a mandatory reasoning object without a ladder", async () => {
+		// Like the OpenRouter catalog mapper, `reasoning: { mandatory: true }` without
+		// `supported_efforts` keeps the ladder the row would otherwise get, locked on.
+		const discover = (rows: Record<string, unknown>[]) =>
+			discoverOpenAIModelsList(
+				{
+					provider: "custom-discovery",
+					api: "openai-completions",
+					baseUrl: "https://custom.example/v1",
+					discovery: { type: "openai-models-list" },
+				},
+				{
+					fetch: async input =>
+						String(input).endsWith("/v1/models")
+							? Response.json({ data: rows })
+							: new Response(null, { status: 404 }),
+					getBearerApiKeyResolver: async () => undefined,
+				},
+			);
+		const [silent] = await discover([{ id: "gpt-5" }]);
+		const models = await discover([
+			{ id: "gpt-5", reasoning: { mandatory: true } },
+			{ id: "acme-native", reasoning: true },
+			{ id: "acme-mandatory", reasoning: { mandatory: true } },
+			{ id: "acme-mandatory-vetoed", reasoning_required: false, reasoning: { mandatory: true } },
+		]);
+		const find = (id: string) => models.find(model => model.id === id);
+		// A referenced id keeps the bundled reference's ladder and gains the lock.
+		expect(silent?.thinking?.efforts?.length).toBeGreaterThan(0);
+		expect(silent?.thinking?.requiresEffort).not.toBe(true);
+		expect(find("gpt-5")?.thinking).toMatchObject({ efforts: silent?.thinking?.efforts, requiresEffort: true });
+		// Without a reference the row gets the ladder `reasoning: true` would, locked on.
+		const native = find("acme-native");
+		expect(native?.thinking?.efforts?.length).toBeGreaterThan(0);
+		expect(native?.thinking?.requiresEffort).not.toBe(true);
+		const mandatory = find("acme-mandatory");
+		expect(mandatory?.reasoning).toBe(true);
+		expect(mandatory?.thinking).toMatchObject({ efforts: native?.thinking?.efforts, requiresEffort: true });
+		expect(mandatory?.thinking?.unverified).not.toBe(true);
+		// A flat `reasoning_required: false` still outranks `mandatory`.
+		expect(find("acme-mandatory-vetoed")?.thinking?.requiresEffort).not.toBe(true);
 	});
 
 	test("openai-models-list discovery carries advertised effort aliases and mandatory reasoning", async () => {

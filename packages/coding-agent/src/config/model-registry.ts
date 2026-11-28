@@ -3391,6 +3391,12 @@ export class ModelRegistry {
 			// ladder was read, as context-v9 does for openai-models-list above.
 			return `${providerConfig.provider}:proxy-v2-${reasoning}context-v7`;
 		}
+		if (providerConfig.discovery.type === "lm-studio") {
+			// LM Studio rows go through the openai-models-list parser. context-v1
+			// leaves the bare provider id, where pre-fix builds cached rows without
+			// the `reasoning` object ladder; the opt-out splits off as above.
+			return `${providerConfig.provider}:lm-studio-${reasoning}context-v1`;
+		}
 		if (providerConfig.discovery.type === "litellm") {
 			// rich-v7 invalidates incomplete /v2/model/info rosters cached before
 			// pagination. rich-v6 moved decisions-mode groups to the Decisions

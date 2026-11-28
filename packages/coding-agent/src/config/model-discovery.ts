@@ -1057,8 +1057,8 @@ function advertisedReasoningEnabled(providerConfig: DiscoveryProviderConfig): bo
 type AdvertisedReasoning =
 	/** The row states it does not reason. */
 	| { kind: "none" }
-	/** The row confirms reasoning without advertising a controllable ladder. */
-	| { kind: "native" }
+	/** The row confirms reasoning without advertising a controllable ladder, and may declare it mandatory. */
+	| { kind: "native"; requiresEffort?: true }
 	/** The row advertises an effort ladder, whether it accepts `none`, its aliases, and whether thinking can be off. */
 	| {
 			kind: "ladder";
@@ -1105,21 +1105,24 @@ function extractAdvertisedReasoning(item: {
 	const flatLevels = metadata?.supported_reasoning_levels ?? item.supported_reasoning_levels;
 	const reasoningObject = flatLevels == null && isRecord(reasoning) ? reasoning : undefined;
 	const raw = reasoningObject ? reasoningObject.supported_efforts : flatLevels;
-	const efforts = extractReasoningLevels(raw);
-	if (efforts === undefined) {
-		return reasoning === true ? { kind: "native" } : undefined;
-	}
-	const rawDefault = reasoningObject
-		? reasoningObject.default_effort
-		: (metadata?.default_reasoning_level ?? item.default_reasoning_level);
-	const defaultLevel = advertisedReasoningEffort(rawDefault);
-	const effortMap = extractReasoningEffortMap(metadata?.reasoning_effort_map ?? item.reasoning_effort_map);
 	// Like the OpenRouter catalog mapper, read only `mandatory: true`: a defaulted
 	// `false` must not veto an identity lock.
 	const requiresEffort =
 		metadata?.reasoning_required ??
 		item.reasoning_required ??
 		(reasoningObject?.mandatory === true ? true : undefined);
+	const efforts = extractReasoningLevels(raw);
+	if (efforts === undefined) {
+		if (reasoning === true) return { kind: "native" };
+		return requiresEffort === true && reasoningObject?.mandatory === true
+			? { kind: "native", requiresEffort: true }
+			: undefined;
+	}
+	const rawDefault = reasoningObject
+		? reasoningObject.default_effort
+		: (metadata?.default_reasoning_level ?? item.default_reasoning_level);
+	const defaultLevel = advertisedReasoningEffort(rawDefault);
+	const effortMap = extractReasoningEffortMap(metadata?.reasoning_effort_map ?? item.reasoning_effort_map);
 	return {
 		kind: "ladder",
 		efforts,
@@ -1182,7 +1185,13 @@ function withAdvertisedEfforts(
 ): ModelSpec<Api> {
 	if (advertised === undefined) return spec;
 	if (advertised.kind === "none") return withoutReasoning(spec, isAnthropic);
-	if (advertised.kind === "native") return { ...spec, reasoning: true };
+	if (advertised.kind === "native") {
+		if (advertised.requiresEffort !== true) return { ...spec, reasoning: true };
+		// Like `mapOpenRouterThinking`: keep the inherited or identity-derived ladder,
+		// but a thinking-off request must clamp to a tier instead of omitting it.
+		const ladder = spec.thinking ?? resolveModelPolicy({ ...spec, reasoning: true }).thinking;
+		return { ...spec, reasoning: true, thinking: ladder && { ...ladder, requiresEffort: true } };
+	}
 	// `defaultLevel` is not decoration: `pickInitialThinkingLevel` (sdk.ts) and
 	// the model switcher read it ahead of the user's `defaultThinkingLevel`
 	// setting, so pinning it to the ladder's first tier would start every gateway
