@@ -1,14 +1,13 @@
 /**
  * Unified mention source for past conversations / sessions (`session://<id>`).
  *
- * Uses a stale-while-revalidate per-cwd cache over {@link listSessionsForPicker}
- * (backed by SQLite `session_titles` in history.db), so returning matches takes
- * <1ms synchronously without reading session JSONL bodies on keystrokes.
+ * Warms from the title index. The first mention query fills in unindexed
+ * sessions and prompt text in the background, then matches from memory.
  */
-import * as fs from "node:fs/promises";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import {
 	isEmptySession,
+	listIndexedSessions,
 	listSessionsForPicker,
 	sessionDisplayName,
 	type SessionInfo,
@@ -45,7 +44,8 @@ interface SessionSummary {
 interface SessionSnapshot {
 	readonly cwd: string;
 	readonly entries: readonly SessionSummary[];
-	readonly loadedAt: number;
+	/** Only a full refresh is fresh; a title-only warm never suppresses it. */
+	readonly loadedAt?: number;
 }
 
 function formatAgeShort(ms: number): string {
@@ -128,15 +128,19 @@ export class SessionsMentionSource implements MentionSource {
 		this.#host = host;
 	}
 
-	warm(): void {
+	/** Publish indexed titles only; do not queue transcript reads before a query. */
+	async warm(): Promise<void> {
 		const cwd = this.#host.getCwd();
-		if (this.#isFresh(cwd)) return;
-		void this.#refresh(cwd);
+		if (this.#snapshot?.cwd === cwd || this.#inflight?.cwd === cwd) return;
+		const infos = await listIndexedSessions(sessionDirForCwd(cwd)).catch(() => undefined);
+		if (infos && this.#host.getCwd() === cwd && this.#snapshot?.cwd !== cwd && this.#inflight?.cwd !== cwd) {
+			this.#snapshot = { cwd, entries: toSummaries(infos) };
+		}
 	}
 
 	#isFresh(cwd: string): boolean {
 		const snap = this.#snapshot;
-		return snap !== undefined && snap.cwd === cwd && Date.now() - snap.loadedAt < CACHE_TTL_MS;
+		return snap?.cwd === cwd && snap.loadedAt !== undefined && Date.now() - snap.loadedAt < CACHE_TTL_MS;
 	}
 
 	#refresh(cwd: string): Promise<SessionSnapshot | undefined> {
@@ -146,17 +150,9 @@ export class SessionsMentionSource implements MentionSource {
 		void (async () => {
 			try {
 				const dir = sessionDirForCwd(cwd);
-				try {
-					await fs.access(dir);
-				} catch {
-					const empty: SessionSnapshot = { cwd, entries: [], loadedAt: Date.now() };
-					this.#snapshot = empty;
-					resolve(empty);
-					return;
-				}
 				const listing = await listSessionsForPicker(dir, new FileSessionStorage(), new Set());
-				if (listing.sessions.length > 0) {
-					this.#snapshot = { cwd, entries: toSummaries(listing.sessions), loadedAt: Date.now() };
+				if (listing.sessions.length > 0 && this.#inflight?.promise === promise) {
+					this.#snapshot = { cwd, entries: toSummaries(listing.sessions) };
 				}
 				const full = await listing.complete;
 				const snap: SessionSnapshot = {
@@ -164,10 +160,10 @@ export class SessionsMentionSource implements MentionSource {
 					entries: toSummaries(full.length > 0 ? full : listing.sessions),
 					loadedAt: Date.now(),
 				};
-				this.#snapshot = snap;
+				if (this.#inflight?.promise === promise) this.#snapshot = snap;
 				resolve(snap);
 			} catch {
-				resolve(this.#snapshot);
+				resolve(this.#snapshot?.cwd === cwd ? this.#snapshot : undefined);
 			} finally {
 				if (this.#inflight?.promise === promise) this.#inflight = undefined;
 			}

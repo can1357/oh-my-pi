@@ -18,7 +18,7 @@ struct Validator<'a, 'h, 'p> {
 impl Interp<'_> {
 	pub(super) fn validate(&mut self, p: &Program, hints: Hints, inherits_pad: bool) -> PResult<()> {
 		let bindings = if inherits_pad {
-			self.scopes.iter().flat_map(|scope| &scope.pad).map(|(id, _)| self.lexicals.spelling(*id).clone()).collect()
+			self.scopes[self.scope_base..].iter().flat_map(|scope| &scope.pad).map(|(id, _)| self.lexicals.spelling(*id).clone()).collect()
 		} else { Vec::new() };
 		let mut validator = Validator { interp: self, package: p.package.clone(), bindings, declarations: Vec::new(), hints, diagnostics: PStr::default(),
 			depth: 0, operands: Vec::new(), pending_captures: Vec::new(), captures: FxHashMap::default() };
@@ -101,7 +101,7 @@ impl<'p> Validator<'_, '_, 'p> {
 	fn stmt(&mut self, stmt: &'p Stmt) {
 		if self.depth >= 2048 { self.complain(&stmt.location, "Excessively nested expression"); return; }
 		self.depth += 1;
-		stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.stmt_inner(stmt));
+		crate::stack::guard(128 * 1024, || self.stmt_inner(stmt));
 		self.commit_declarations();
 		self.depth -= 1;
 	}
@@ -219,7 +219,7 @@ impl<'p> Validator<'_, '_, 'p> {
 	fn expr(&mut self, e: &'p Expr) {
 		if self.depth >= 2048 { self.complain(&e.location, "Excessively nested expression"); return; }
 		self.depth += 1;
-		stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || self.expr_inner(e));
+		crate::stack::guard(128 * 1024, || self.expr_inner(e));
 		self.depth -= 1;
 	}
 

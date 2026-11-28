@@ -21,8 +21,6 @@ mod value_write;
 mod window;
 
 #[cfg(target_os = "windows")]
-use enigo::Enigo;
-#[cfg(target_os = "windows")]
 use image::RgbaImage;
 
 #[cfg(target_os = "windows")]
@@ -49,9 +47,8 @@ use super::types::{
 
 #[cfg(target_os = "windows")]
 pub(crate) struct Win32Backend {
-	display:      DisplaySelector,
-	global_input: Enigo,
-	ax:           Win32Ax,
+	display: DisplaySelector,
+	ax:      Win32Ax,
 }
 
 #[cfg(target_os = "windows")]
@@ -60,9 +57,9 @@ impl Win32Backend {
 		// Initialize DPI awareness before xcap or input observes desktop
 		// geometry, keeping both APIs in the same per-monitor physical
 		// coordinate regime.
-		let global_input = input::create_global_input()?;
+		input::init_global_input()?;
 		let _ = capture::displays()?;
-		Ok(Self { display, global_input, ax: Win32Ax::new() })
+		Ok(Self { display, ax: Win32Ax::new() })
 	}
 }
 
@@ -136,7 +133,7 @@ impl Backend for Win32Backend {
 		token: &OperationToken,
 	) -> CoreResult<()> {
 		token.check()?;
-		input::pointer(&mut self.global_input, &mut self.ax, target, event, mode)
+		input::pointer(&mut self.ax, target, event, mode)
 	}
 
 	fn type_text(
@@ -158,7 +155,7 @@ impl Backend for Win32Backend {
 		token: &OperationToken,
 	) -> CoreResult<()> {
 		token.check()?;
-		input::key_chord(&mut self.global_input, target, keys, mode)
+		input::key_chord(target, keys, mode)
 	}
 
 	/// Background keys go straight to the element's own control window,
@@ -205,7 +202,7 @@ impl Backend for Win32Backend {
 		token: &OperationToken,
 	) -> CoreResult<()> {
 		token.check()?;
-		input::hold_keys(&mut self.global_input, target, keys, duration, mode)
+		input::hold_keys(target, keys, duration, mode)
 	}
 
 	fn menu_items(

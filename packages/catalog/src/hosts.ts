@@ -112,20 +112,42 @@ export function hostMatchesUrl(baseUrl: string | undefined, host: KnownHost): bo
 	return false;
 }
 
-/** Provider-or-URL host check — the canonical `provider === id || baseUrl.includes(marker)` idiom. */
-export function modelMatchesHost(model: { provider: string; baseUrl: string }, host: KnownHost): boolean {
-	const spec: HostClassSpec = KNOWN_HOSTS[host];
+function matchesProvider(id: string, spec: HostClassSpec): boolean {
 	if (spec.providers) {
 		for (const provider of spec.providers) {
-			if (model.provider === provider) return true;
+			if (id === provider) return true;
 		}
 	}
 	if (spec.providerPrefixes) {
 		for (const prefix of spec.providerPrefixes) {
-			if (model.provider.startsWith(prefix)) return true;
+			if (id.startsWith(prefix)) return true;
 		}
 	}
-	return hostMatchesUrl(model.baseUrl, host);
+	return false;
+}
+
+/** Provider-or-URL host check — the canonical `provider === id || baseUrl.includes(marker)` idiom. */
+export function modelMatchesHost(model: { provider: string; baseUrl: string }, host: KnownHost): boolean {
+	return matchesProvider(model.provider, KNOWN_HOSTS[host]) || hostMatchesUrl(model.baseUrl, host);
+}
+
+function classifyHostClasses<K extends KnownHost>(
+	classes: Record<K, HostClassSpec>,
+	provider: string,
+	baseUrl: string,
+) {
+	const url: Record<K, boolean> = Object.create(null);
+	const model: Record<K, boolean> = Object.create(null);
+	for (const host in classes) {
+		url[host] = hostMatchesUrl(baseUrl, host);
+		model[host] = url[host] || matchesProvider(provider, classes[host]);
+	}
+	return { url, model };
+}
+
+/** Resolve both forms of host classification together when building a provider's compatibility baseline. */
+export function classifyEndpointHosts(provider: string, baseUrl: string) {
+	return classifyHostClasses(KNOWN_HOSTS, provider, baseUrl);
 }
 
 function includesAsciiCaseInsensitive(value: string, lowerNeedle: string): boolean {

@@ -1,5 +1,8 @@
 //! `obash`: the omp-shell bash engine as a standalone shell, for differential
-//! testing against bash 5.3 and for benchmarks.
+//! testing against bash 5.3 and for benchmarks. As in pi's own shell, pi's
+//! extras (`awk`, `perl`, `sed`, `cat`, …) come before `PATH`; differential
+//! runs pass `--no-extras`, so every command bash does not build in is
+//! `PATH`'s.
 //!
 //! ```text
 //! obash [OBASH OPTIONS] [BASH OPTIONS] -c COMMAND [NAME [ARGS]]
@@ -7,6 +10,8 @@
 //! obash [OBASH OPTIONS] [BASH OPTIONS]  # script on stdin
 //!
 //! obash's own options (before bash's):
+//! --no-extras           no pi extras: every command bash does not build in
+//!                       comes from PATH
 //! --events=jsonl        write every event as a JSON line
 //! --events-out=PATH     write the events to PATH instead of stderr
 //! --trace=PATH          write the run trace (the `ShellTrace` JSON the bash
@@ -62,7 +67,7 @@ use omp_shell::{
 		Cx, Engine, EngineConfig, EventMask, EventSink, MemStore, ModeId, Origin, RestoreOpts,
 		Script, Shell, ir, syntax::Features, trace::RunTrace,
 	},
-	process::{self, Input, Launch, NativeHost, ProcessOptions, Start},
+	process::{self, ExtrasOrder, Input, Launch, NativeHost, ProcessOptions, Start},
 };
 
 /// The system allocator with counters for measurement.
@@ -104,10 +109,14 @@ struct Cli {
 	/// in conformance-harness vocabulary) and exit.
 	#[arg(long)]
 	supported:    bool,
+	/// Offer none of pi's extras: every command bash does not build in
+	/// comes from `PATH`.
+	#[arg(long)]
+	no_extras:    bool,
 }
 
 /// obash's own long options without a value.
-const OBASH_FLAGS: &[&str] = &["--ir", "--print", "--supported"];
+const OBASH_FLAGS: &[&str] = &["--ir", "--print", "--supported", "--no-extras"];
 
 /// obash's own long options that take a value (`--fault S:K` or
 /// `--fault=S:K`; `--fault-resume=STATE` is always passed with `=`).
@@ -219,8 +228,8 @@ fn obash() -> i32 {
 	#[cfg(feature = "alloc-stats")]
 	let _alloc_stats = alloc_stats::Report::from_env();
 	let (clap_args, argv) = split_args(std::env::args_os().collect());
-	// Without obash options (every benchmark and test run) the parse would
-	// only rebuild clap's command to arrive at the defaults.
+	// Without obash options (every benchmark run) the parse would only
+	// rebuild clap's command to arrive at the defaults.
 	let cli = if clap_args.len() == 1 {
 		Cli::default()
 	} else {
@@ -235,7 +244,10 @@ fn obash() -> i32 {
 	}
 	let modes = EnvModes::from_env();
 	if !cli.testing() && modes.as_ref().is_ok_and(|m| !m.testing()) {
-		return process::main(argv, ProcessOptions::default());
+		return process::main(argv, ProcessOptions {
+			extras: cli.extras(),
+			..ProcessOptions::default()
+		});
 	}
 	let whole_stdin = cli.print || cli.ir || cli.json.is_some();
 	let mut launch = match process::start(&argv, whole_stdin) {
@@ -322,6 +334,9 @@ fn run(cli: &Cli, launch: Launch, modes: EnvModes) -> Result<i32, Box<dyn std::e
 	let ignored = resume.map_or_else(process::ignored_on_entry, |r| r.ignored());
 	let clock_ns = resume.map_or(0, |r| r.clock_ns());
 	let mut host = NativeHost::new(sink, modes.pending_fs, inherited, ignored, clock_ns, false);
+	if let Some(order) = cli.extras() {
+		host.offer_extras(&env, order);
+	}
 	let cfg = EngineConfig::default();
 	let engine = Engine::new(cfg);
 	if let Some(resume) = &resume {
@@ -377,6 +392,9 @@ fn run(cli: &Cli, launch: Launch, modes: EnvModes) -> Result<i32, Box<dyn std::e
 /// re-executes (the rest of the shell travels in the image).
 fn own_args(cli: &Cli) -> Vec<OsString> {
 	let mut args = Vec::new();
+	if cli.no_extras {
+		args.push(OsString::from("--no-extras"));
+	}
 	if matches!(cli.events, Some(EventsFormat::Jsonl)) {
 		args.push(OsString::from("--events=jsonl"));
 	}
@@ -412,6 +430,12 @@ impl EnvModes {
 }
 
 impl Cli {
+	/// Where the shell offers pi's extras: before `PATH` unless
+	/// `--no-extras`.
+	fn extras(&self) -> Option<ExtrasOrder> {
+		(!self.no_extras).then_some(ExtrasOrder::BeforePath)
+	}
+
 	/// Whether an obash option asks for more than the plain shell.
 	const fn testing(&self) -> bool {
 		self.events.is_some()

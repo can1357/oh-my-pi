@@ -36,18 +36,13 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream, type EventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { context, SpanStatusCode, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
-import {
-	BasicTracerProvider,
-	InMemorySpanExporter,
-	type ReadableSpan,
-	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+import { InMemorySpanExporter, type ReadableSpan, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
 import { createUserMessage } from "./helpers";
 
 const MOCK_IDENT = { id: "mock-model", provider: "mock-provider" } as const;
 
 const exporter = new InMemorySpanExporter();
-let provider: BasicTracerProvider;
+let provider: TracerProvider;
 let contextManager: AsyncLocalStorageContextManager;
 
 beforeAll(() => {
@@ -55,7 +50,7 @@ beforeAll(() => {
 	context.disable();
 	contextManager = new AsyncLocalStorageContextManager().enable();
 	context.setGlobalContextManager(contextManager);
-	provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+	provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
 	trace.setGlobalTracerProvider(provider);
 });
 

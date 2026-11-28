@@ -16,7 +16,10 @@ use std::{
 use clap::{Arg, ArgAction, ArgMatches, Command};
 
 use super::{FdCli, Template, When};
-use crate::host::{Host, ShellCommand};
+use crate::{
+	exec_line::ExecLine,
+	host::{Host, ShellCommand},
+};
 
 /// fd's `-x` and `-X` as given, each occurrence's arguments kept apart.
 ///
@@ -244,8 +247,8 @@ struct Batch {
 	arg:     Template,
 	/// The fixed arguments after it.
 	tail:    Vec<OsString>,
-	/// The command being filled; `argmax` only sizes it, the shell runs it.
-	command: argmax::Command,
+	/// The command being filled, sized for one `exec`; the shell runs it.
+	command: ExecLine,
 	count:   usize,
 	/// `--batch-size`; 0 is no limit.
 	limit:   usize,
@@ -289,7 +292,9 @@ impl Batch {
 	/// Whether the batch must run before it can take `arg`.
 	fn is_full(&self, arg: &OsStr) -> bool {
 		(self.limit > 0 && self.count >= self.limit)
-			|| !self.command.args_would_fit(iter::once(arg).chain(self.tail.iter().map(OsString::as_os_str)))
+			|| !self
+				.command
+				.fits(iter::once(arg).chain(self.tail.iter().map(OsString::as_os_str)))
 	}
 
 	/// Adds `arg`.
@@ -317,18 +322,13 @@ impl Batch {
 		let mut command = std::mem::replace(&mut self.command, start_command(&self.head)?);
 		self.count = 0;
 		command.try_args(&self.tail)?;
-		Ok(Some(
-			iter::once(command.get_program())
-				.chain(command.get_args())
-				.map(OsStr::to_os_string)
-				.collect(),
-		))
+		Ok(Some(command.into_argv()))
 	}
 }
 
 /// A batch command holding the fixed arguments `head`, program first.
-fn start_command(head: &[OsString]) -> io::Result<argmax::Command> {
-	let mut command = argmax::Command::new(&head[0]);
+fn start_command(head: &[OsString]) -> io::Result<ExecLine> {
+	let mut command = ExecLine::new(&head[0]);
 	command.try_args(&head[1..])?;
 	Ok(command)
 }

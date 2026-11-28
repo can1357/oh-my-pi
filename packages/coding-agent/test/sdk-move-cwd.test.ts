@@ -6,7 +6,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { rebindMemoryBackendForCwd } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
+import { memoryBeforeCwdMove, rebindMemoryBackendForCwd } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
@@ -121,11 +121,12 @@ describe("createAgentSession cwd after /move", () => {
 				expect(sourcePrompt).toContain("SOURCE-MODEL-CANARY");
 
 				moved = true;
+				const before = await memoryBeforeCwdMove(session);
 				await sessionManager.moveTo(cwdB);
 				expect(sessionManager.getSessionDir().startsWith(`${agentDir}${path.sep}`)).toBe(true);
 				await settings.reloadForCwd(cwdB);
 				// Rebinding must clear memory without depending on a later skill/tool refresh.
-				await rebindMemoryBackendForCwd(session);
+				await rebindMemoryBackendForCwd(session, before);
 				expect(session.getHindsightSessionState()?.bankId).toBe(destinationBank);
 				const movedPrompt = session.agent.state.systemPrompt.join("\n");
 				await session.prompt("Summarize the destination project.");

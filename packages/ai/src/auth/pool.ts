@@ -245,9 +245,9 @@ export class CredentialPool implements CredentialsApi {
 		};
 	}
 
-	bump(reason: string): void {
+	bump(reason: string, localMutation = true): void {
 		this.#generation += 1;
-		this.#store.acknowledgeLocalChanges?.();
+		if (localMutation) this.#store.acknowledgeLocalChanges?.();
 		for (const listener of Array.from(this.#generationListeners)) {
 			try {
 				listener(this.#generation);
@@ -316,7 +316,7 @@ export class CredentialPool implements CredentialsApi {
 
 		const dedupedGrouped = new Map<string, StoredCredential[]>();
 		for (const [provider, entries] of grouped.entries()) {
-			const deduped = await this.pruneDuplicates(provider, entries);
+			const deduped = entries.length > 1 ? await this.pruneDuplicates(provider, entries) : entries;
 			this.#options.policies.validateFor(
 				provider,
 				deduped.map(entry => entry.credential),
@@ -326,13 +326,14 @@ export class CredentialPool implements CredentialsApi {
 			}
 		}
 
+		// Reload only adopts persisted rows. pruneDuplicates acknowledges its own deletes.
 		const removedProviders = new Set(this.#loaded.keys());
 		for (const [provider, entries] of dedupedGrouped) {
-			this.replace(provider, entries);
+			this.replace(provider, entries, false);
 			removedProviders.delete(provider);
 		}
 		for (const provider of removedProviders) {
-			this.replace(provider, []);
+			this.replace(provider, [], false);
 		}
 	}
 
@@ -356,13 +357,13 @@ export class CredentialPool implements CredentialsApi {
 	 * @param provider - Provider name (e.g., "anthropic", "openai")
 	 * @param stored - Array of stored credentials to cache
 	 */
-	replace(provider: string, stored: StoredCredential[]): void {
+	replace(provider: string, stored: StoredCredential[], localMutation = true): void {
 		if (stored.length === 0) {
 			this.#loaded.delete(provider);
 		} else {
 			this.#loaded.set(provider, stored);
 		}
-		this.#cache(provider, stored);
+		this.#cache(provider, stored, localMutation);
 	}
 
 	/**
@@ -378,7 +379,7 @@ export class CredentialPool implements CredentialsApi {
 	}
 
 	/** Caches `stored` for `provider` unless it is paused, bumping the generation on change. */
-	#cache(provider: string, stored: StoredCredential[]): void {
+	#cache(provider: string, stored: StoredCredential[], localMutation = true): void {
 		const credentials = providerPauseReason(provider) === undefined ? stored : [];
 		const current = this.#data.get(provider) ?? [];
 		if (storedCredentialArraysEqual(current, credentials)) return;
@@ -397,7 +398,7 @@ export class CredentialPool implements CredentialsApi {
 		} else {
 			this.#data.set(provider, credentials);
 		}
-		this.bump("credentials");
+		this.bump("credentials", localMutation);
 	}
 
 	noteBearer(provider: string, bearer: string, credentialId: number | undefined): void {
@@ -448,6 +449,7 @@ export class CredentialPool implements CredentialsApi {
 	}
 
 	async pruneDuplicates(provider: string, entries: StoredCredential[]): Promise<StoredCredential[]> {
+		if (entries.length < 2) return entries;
 		const seen = new Set<string>();
 		const kept: StoredCredential[] = [];
 		const removed: StoredCredential[] = [];
@@ -474,6 +476,7 @@ export class CredentialPool implements CredentialsApi {
 			for (const entry of removed) {
 				await this.#store.deleteAuthCredential(entry.id, "deduplicated duplicate credential");
 			}
+			this.#store.acknowledgeLocalChanges?.();
 			this.reset(provider);
 		}
 		return kept.reverse();

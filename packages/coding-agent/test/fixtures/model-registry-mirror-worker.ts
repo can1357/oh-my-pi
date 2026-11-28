@@ -48,6 +48,8 @@ export interface MirrorProbe {
 	resolveHeaders(registry: ModelRegistry, provider: string, id: string): Promise<Record<string, string> | undefined>;
 	/** `refreshRuntimeProviders` on the mirror (runs on main). */
 	refreshRuntimeProviders(registry: ModelRegistry): Promise<void>;
+	/** Read credential-scoped cache rows through the owner, adopting the roster before returning. */
+	hydrateCredentialScopedModelCaches(registry: ModelRegistry, providers?: readonly string[]): Promise<void>;
 	/** Register a provider on the mirror itself; returns whether the mirror then serves it. */
 	registerLocally(registry: ModelRegistry, provider: string): Promise<boolean>;
 }
@@ -134,6 +136,8 @@ const probe: MirrorProbe = {
 		return registry.resolveModelHeaders(model);
 	},
 	refreshRuntimeProviders: registry => registry.refreshRuntimeProviders("online"),
+	hydrateCredentialScopedModelCaches: (registry, providers) =>
+		registry.hydrateCredentialScopedModelCaches(providers === undefined ? undefined : new Set(providers)),
 	registerLocally: async (registry, provider) => {
 		registry.registerProvider(
 			provider,
