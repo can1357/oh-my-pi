@@ -270,17 +270,99 @@ function addUnpaired(
 	else unpaired.set(key, [message]);
 }
 
+function isWalkedContainer(value: object): boolean {
+	if (Array.isArray(value)) return Object.getPrototypeOf(value) === Array.prototype;
+	const proto = Object.getPrototypeOf(value);
+	return proto === Object.prototype || proto === null;
+}
+
+function ownEnumerableSymbols(value: object): symbol[] {
+	const symbols = Object.getOwnPropertySymbols(value);
+	if (symbols.length === 0) return symbols;
+	return symbols.filter(sym => Object.prototype.propertyIsEnumerable.call(value, sym));
+}
+
+/**
+ * Iterative strict deep equality: `Bun.deepEquals(a, b, true)` without growing the JS call stack on deeply nested
+ * plain objects and arrays, except that objects with different prototypes and arrays with different non-index keys
+ * are unequal, and cycles are equal when they unfold to equal trees. Other objects (Map, Set, Date, Error, typed
+ * arrays, …) are compared with `Bun.deepEquals(…, true)`.
+ */
+function strictDeepEquals(a: unknown, b: unknown): boolean {
+	if (Object.is(a, b)) return true;
+	if (typeof a !== "object" || a === null || typeof b !== "object" || b === null) return false;
+
+	const stack: Array<[unknown, unknown]> = [[a, b]];
+	let seen: WeakMap<object, WeakSet<object>> | undefined;
+	let steps = 0;
+
+	while (stack.length > 0) {
+		const pair = stack.pop()!;
+		const x = pair[0];
+		const y = pair[1];
+		if (Object.is(x, y)) continue;
+		if (typeof x !== "object" || x === null || typeof y !== "object" || y === null) return false;
+
+		if (Object.getPrototypeOf(x) !== Object.getPrototypeOf(y)) return false;
+		const xArray = Array.isArray(x);
+		if (xArray !== Array.isArray(y)) return false;
+
+		if (!isWalkedContainer(x)) {
+			if (!Bun.deepEquals(x, y, true)) return false;
+			continue;
+		}
+
+		steps++;
+		if (steps > 16) {
+			if (!seen) seen = new WeakMap();
+			let mates = seen.get(x);
+			if (mates?.has(y)) continue;
+			if (!mates) {
+				mates = new WeakSet();
+				seen.set(x, mates);
+			}
+			mates.add(y);
+		}
+
+		if (xArray && (x as unknown[]).length !== (y as unknown[]).length) return false;
+
+		const xKeys = Object.keys(x);
+		const yKeys = Object.keys(y);
+		if (xKeys.length !== yKeys.length) return false;
+
+		const xSyms = ownEnumerableSymbols(x);
+		const ySyms = ownEnumerableSymbols(y);
+		if (xSyms.length !== ySyms.length) return false;
+
+		const xRec = x as Record<PropertyKey, unknown>;
+		const yRec = y as Record<PropertyKey, unknown>;
+		for (let i = 0; i < xKeys.length; i++) {
+			const key = xKeys[i];
+			if (!Object.hasOwn(y, key) || !Object.prototype.propertyIsEnumerable.call(y, key)) return false;
+			stack.push([xRec[key], yRec[key]]);
+		}
+		for (let i = 0; i < xSyms.length; i++) {
+			const sym = xSyms[i];
+			if (!Object.hasOwn(y, sym) || !Object.prototype.propertyIsEnumerable.call(y, sym)) return false;
+			stack.push([xRec[sym], yRec[sym]]);
+		}
+	}
+
+	return true;
+}
+
 /**
  * One object for a message both mirrored lists hold: the object of `others` (the other list's unpaired messages)
  * equal to `message`, which then leaves `others`, else `message` itself, which joins `own` until the other list
- * brings its counterpart. Equal is the same {@link sessionMessagePersistenceKey} and `Bun.deepEquals` (strict), so
- * an entry shown with its secrets restored stays apart from its message; each object pairs with at most one other.
+ * brings its counterpart. Equal is the same {@link sessionMessagePersistenceKey} and {@link strictDeepEquals}
+ * (strict, iterative so deeply nested messages do not overflow the stack), so an entry shown with its secrets
+ * restored stays apart from its message; each object pairs with at most one other.
  */
 function share(message: AgentMessage, others: UnpairedMessages, own: UnpairedMessages): AgentMessage {
 	const key = sessionMessagePersistenceKey(message);
 	if (key === undefined) return message;
 	const candidates = others.get(key);
-	const at = candidates ? candidates.findIndex(candidate => Bun.deepEquals(candidate, message, true)) : -1;
+	const at = candidates ? candidates.findIndex(candidate => strictDeepEquals(candidate, message)) : -1;
 	const shared = at < 0 ? undefined : candidates?.[at];
 	if (shared && candidates) {
 		if (candidates.length === 1) others.delete(key);

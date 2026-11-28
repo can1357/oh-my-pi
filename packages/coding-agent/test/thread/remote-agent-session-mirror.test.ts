@@ -261,4 +261,52 @@ describe("worker session mirror: one object for a message both lists hold", () =
 			equalEntriesHoldMessages: [true, true],
 		});
 	});
+
+	it("deduplicates equal 50,000-deep messages and keeps unequal ones separate without overflowing the stack", () => {
+		// If this regresses, mirroring a worker subagent whose tool result holds deeply nested JSON throws
+		// RangeError: Maximum call stack size exceeded inside mirrored-message deduplication.
+		const DEPTH = 50_000;
+		const buildDeep = (leaf: string, kind: "object" | "array"): unknown => {
+			let node: unknown = { leaf };
+			for (let i = 0; i < DEPTH; i++) {
+				node = kind === "array" ? [node] : { nested: node };
+			}
+			return node;
+		};
+		const deepMessage = (index: number, leaf: string, kind: "object" | "array"): ToolResultMessage => ({
+			...toolResult(index),
+			details: { exitCode: 0, payload: buildDeep(leaf, kind) },
+		});
+
+		const remote = openMirror();
+		const eqObjMsg = deepMessage(0, "same", "object");
+		const eqObjEntry = deepMessage(0, "same", "object");
+		const neqObjMsg = deepMessage(1, "left", "object");
+		const neqObjEntry = deepMessage(1, "right", "object");
+		const eqArrMsg = deepMessage(2, "same", "array");
+		const eqArrEntry = deepMessage(2, "same", "array");
+		const neqArrMsg = deepMessage(3, "left", "array");
+		const neqArrEntry = deepMessage(3, "right", "array");
+
+		// Strict equality: an explicit `undefined` property must stay distinct from a missing key.
+		const undefKeyMsg: ToolResultMessage = { ...toolResult(4), details: { exitCode: 0, extra: undefined } };
+		const missingKeyEntry: ToolResultMessage = { ...toolResult(4), details: { exitCode: 0 } };
+
+		remote.applyMessages({
+			kind: "append",
+			messages: [eqObjMsg, neqObjMsg, eqArrMsg, neqArrMsg, undefKeyMsg],
+		});
+		remote.applyEntries({
+			kind: "append",
+			entries: [
+				messageEntry("e0", null, eqObjEntry),
+				messageEntry("e1", "e0", neqObjEntry),
+				messageEntry("e2", "e1", eqArrEntry),
+				messageEntry("e3", "e2", neqArrEntry),
+				messageEntry("e4", "e3", missingKeyEntry),
+			],
+		});
+
+		expect(sharedAt(remote)).toEqual([true, false, true, false, false]);
+	}, 30_000);
 });
