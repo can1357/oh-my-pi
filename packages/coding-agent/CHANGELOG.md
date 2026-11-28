@@ -131,6 +131,8 @@
 
 ### Fixed
 
+- Fixed `manage_skill` (and `learn`'s skill payload) writing a skill with two frontmatter blocks when the body led with its own `---` block: a leading frontmatter block is stripped, the explicit `name`/`description` win, and the block's `description` is only a fallback
+- `manage_skill` `update` now takes `description`, `body`, or both; an omitted field keeps its stored value, so a one-line change no longer resends the whole skill
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
