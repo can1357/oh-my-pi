@@ -398,8 +398,9 @@ pub enum CommandData {
 pub struct InputAction {
 	/// Next command to execute (rather than commands from start)
 	pub next_command: Option<Rc<RefCell<Command>>>,
-	/// Data to prepend to the read contents
-	pub prepend:      Vec<u8>,
+	/// Data to prepend to the read contents (`N`), or `None` where the read
+	/// line replaces the pattern space (`n`)
+	pub prepend:      Option<Vec<u8>>,
 	/// Whether the pending pattern space had a trailing separator.
 	pub terminated:   bool,
 }
@@ -7890,21 +7891,25 @@ fn match_address(
 
 		Address::Line(lineno) => Ok(context.line_number == *lineno),
 
-		// Recognize "$" as the last line of last file. This is consistent
-		// with the original 7th Research Edition implementation:
-		// https://github.com/dspinellis/unix-history-repo/blob/Research-V7/usr/src/cmd/sed/sed1.c#L665
-		// The FreeBSD version checked for subsequent empty files, but this
-		// can lead to destructive reads (e.g. from named pipes),
-		// and is probably an overkill.
-		Address::Last => {
-			let last_line = reader.last_line().map_err(|e| read_error(&context.input_name, &e))?;
-			// GNU looks past the following operands here, reading a directory as empty.
-			context.looked_past_input |= last_line;
-			Ok(last_line && (context.last_file || context.separate))
-		},
+		Address::Last => is_last_line(reader, context),
 
 		_ => panic!("invalid address type in match_address"),
 	}
+}
+
+/// Return true if the line read last is the last one: the line `$` matches,
+/// after which `n` has no line to read.
+fn is_last_line(reader: &mut LineReader, context: &mut ProcessingContext) -> SedResult<bool> {
+	// Recognize "$" as the last line of last file. This is consistent
+	// with the original 7th Research Edition implementation:
+	// https://github.com/dspinellis/unix-history-repo/blob/Research-V7/usr/src/cmd/sed/sed1.c#L665
+	// The FreeBSD version checked for subsequent empty files, but this
+	// can lead to destructive reads (e.g. from named pipes),
+	// and is probably an overkill.
+	let last_line = reader.last_line().map_err(|e| read_error(&context.input_name, &e))?;
+	// GNU looks past the following operands here, reading a directory as empty.
+	context.looked_past_input |= last_line;
+	Ok(last_line && (context.last_file || context.separate))
 }
 
 #[allow(dead_code)]
@@ -8312,12 +8317,12 @@ fn process_file(
 		// Set the script command from which to start.
 		let mut current: Option<Rc<RefCell<Command>>> =
 			if let Some(action) = context.input_action.take() {
-				// Continue processing the `N` command.
-				let mut combined_lines = action.prepend;
-				combined_lines.push(separator);
-				combined_lines.extend_from_slice(pattern.as_bytes());
-
-				pattern.set_bytes(combined_lines, pattern.is_terminated());
+				// Continue processing the `n` or `N` command.
+				if let Some(mut combined_lines) = action.prepend {
+					combined_lines.push(separator);
+					combined_lines.extend_from_slice(pattern.as_bytes());
+					pattern.set_bytes(combined_lines, pattern.is_terminated());
+				}
 				action.next_command
 			} else {
 				// Start from the script top.
@@ -8364,9 +8369,11 @@ fn process_file(
 				},
 				'c' => {
 					// At range end replace pattern space with text and
-					// start the next cycle.
+					// start the next cycle. As in GNU sed, a negated `c` and
+					// a `first~step` one write it on each line they run on.
 					pattern.clear();
-					let range_end = command.addr2.is_none()
+					let range_end = matches!(command.addr2, None | Some(Address::StepMatch(_)))
+						|| command.non_select
 						|| context.last_address
 						|| reader.last_line().map_err(|e| read_error(&context.input_name, &e))?;
 					if range_end {
@@ -8443,7 +8450,24 @@ fn process_file(
 					list(output, &pattern, width)?;
 				},
 				'n' => {
-					break;
+					// With no next line, end the script: the pattern space is
+					// printed as at the end of any cycle.
+					if is_last_line(reader, context)? {
+						break;
+					}
+					// Print the pattern space, and go on with the next command
+					// once the next line is read in its place, as for `N`.
+					if !context.quiet {
+						write_chunk(output, context, &pattern)?;
+					}
+					flush_appends(output, context)?;
+					context.input_action = Some(InputAction {
+						next_command: command.next.clone(),
+						terminated:   pattern.is_terminated(),
+						prepend:      None,
+					});
+					reader.recycle(pattern);
+					continue 'lines;
 				},
 				'N' => {
 					flush_appends(output, context)?;
@@ -8456,7 +8480,7 @@ fn process_file(
 					context.input_action = Some(InputAction {
 						next_command: command.next.clone(),
 						terminated:   pattern.is_terminated(),
-						prepend:      std::mem::take(pattern.fields_mut().0),
+						prepend:      Some(std::mem::take(pattern.fields_mut().0)),
 					});
 					continue 'lines;
 				},
@@ -8572,12 +8596,14 @@ fn process_file(
 	Ok(())
 }
 
-/// Finish a pending `N` when there is no next record.
+/// Finish a pending `N` when there is no next record; `n` printed its pattern
+/// space already.
 fn finish_pending_input(output: &mut OutputBuffer, context: &mut ProcessingContext) -> SedResult<()> {
 	if let Some(action) = context.input_action.take()
+		&& let Some(prepend) = action.prepend
 		&& !context.quiet
 	{
-		output.write_owned_content(&action.prepend, action.terminated)?;
+		output.write_owned_content(&prepend, action.terminated)?;
 	}
 
 	Ok(())
@@ -8672,6 +8698,8 @@ pub fn process_all_files(
 			first = false;
 			context.line_number = 0;
 			reset_latched_address_ranges(&mut context.range_commands);
+			// A range that ended in the file before ended there.
+			context.last_address = false;
 
 			// Reset hold space for separate file processing
 			context.hold.content.clear();
@@ -9485,7 +9513,8 @@ fn build_context(matches: &ArgMatches, paths: &ShellPaths) -> ProcessingContext 
 		length:           matches.get_one::<u32>("length").map_or(70, |v| *v as usize),
 		quiet:            matches.get_flag("quiet"),
 		posix:            matches.get_flag("posix"),
-		separate:         matches.get_flag("separate"),
+		// As in GNU sed, `-i` implies `-s`: each file is edited on its own.
+		separate:         matches.get_flag("separate") || matches.contains_id("in-place"),
 		sandbox:          matches.get_flag("sandbox"),
 		unbuffered:       matches.get_flag("unbuffered"),
 		null_data:        matches.get_flag("null-data"),
@@ -9985,6 +10014,85 @@ mod tests {
 		let (code, capture) = crate::host::run_util::<Sed>(&["1!G;h;$!d"], "a\nb\nc\n", "/");
 		assert_eq!(code, 0, "{}", capture.err());
 		assert_eq!(capture.out(), "c\nb\na\n");
+	}
+
+	#[test]
+	fn n_prints_and_reads_the_next_line() {
+		// As in GNU sed 4.9, `n` prints the pattern space, reads the next line
+		// in its place and goes on with the next command. With no next line it
+		// ends the script, and the pattern space is printed as at any end.
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("in"), "1\n2\n3\n").unwrap();
+		std::fs::create_dir(dir.path().join("d")).unwrap();
+		for (args, stdin, expected) in [
+			(&["n;d"][..], "a\nb\nc\n", "a\nc\n"),
+			(&["-n", "n;p"], "a\nb\nc\n", "b\n"),
+			(&["n;="], "a\nb\nc\n", "a\n2\nb\nc\n"),
+			(&["n;s/^/X/"], "a\nb", "a\nXb"),
+			// The text of `a` comes before the line `n` reads.
+			(&["-e", "1{a A", "-e", "n;s/^/Y/}", "-e", "s/^/X/"], "a\nb\nc\n", "a\nA\nXYb\nXc\n"),
+			// `n` reads on into the next file, but not under `-s`.
+			(&["n;n;n;s/^/X/", "in", "in"], "", "1\n2\n3\nX1\n2\n3\n"),
+			(&["-s", "n;n;n;s/^/X/", "in", "in"], "", "1\n2\n3\n1\n2\n3\n"),
+			// Looking for the next line, `n` reads a directory after the last
+			// line as empty, as `$` does.
+			(&["n", "in", "d"], "", "1\n2\n3\n"),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(args, stdin, dir.path());
+			let out = capture.out();
+			assert_eq!((code, out.as_str()), (0, expected), "{args:?}: {}", capture.err());
+		}
+	}
+
+	#[test]
+	fn in_place_edits_each_file_on_its_own() {
+		// As in GNU sed, `-i` implies `-s`: line numbers, `$`, `n` and `N` stop
+		// at the end of each file.
+		for (script, first, second) in [
+			("n;d", "a\n", "b\n"),
+			(r"N;s/\n/+/", "a\n", "b+c\n"),
+			("$s/$/!/", "a!\n", "b\nc!\n"),
+			("1s/^/>/", ">a\n", ">b\nc\n"),
+		] {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("f1"), "a\n").unwrap();
+			std::fs::write(dir.path().join("f2"), "b\nc\n").unwrap();
+			let (code, capture) =
+				crate::host::run_util::<Sed>(&["-i", script, "f1", "f2"], "", dir.path());
+			assert_eq!(code, 0, "{script}: {}", capture.err());
+			assert_eq!(std::fs::read_to_string(dir.path().join("f1")).unwrap(), first, "{script}");
+			assert_eq!(std::fs::read_to_string(dir.path().join("f2")).unwrap(), second, "{script}");
+		}
+		// A range to `$` ends in each file, where `c` writes its text once,
+		// under -s as under -i.
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("f1"), "a\nb\nc\n").unwrap();
+		std::fs::write(dir.path().join("f2"), "p\nq").unwrap();
+		let args = ["-s", "1,$c\\\nCH", "f1", "f2"];
+		let (code, capture) = crate::host::run_util::<Sed>(&args, "", dir.path());
+		assert_eq!((code, capture.out().as_str()), (0, "CH\nCH\n"), "{}", capture.err());
+		let args = ["-i", "1,$c\\\nCH", "f1", "f2"];
+		let (code, capture) = crate::host::run_util::<Sed>(&args, "", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(std::fs::read_to_string(dir.path().join("f1")).unwrap(), "CH\n");
+		assert_eq!(std::fs::read_to_string(dir.path().join("f2")).unwrap(), "CH\n");
+		// A negated `c` writes its text on each line it runs on, and so does a
+		// `first~step` one, in each file.
+		std::fs::write(dir.path().join("f1"), "a\nb\nc\n").unwrap();
+		std::fs::write(dir.path().join("f2"), "x\ny\n").unwrap();
+		std::fs::write(dir.path().join("f3"), "x\ny\nz\nw\n").unwrap();
+		for (args, expected) in [
+			(&["-s", "/a/,/c/!c\\\nCH", "f1", "f2"][..], "a\nb\nc\nCH\nCH\n"),
+			(&["-s", "/a/,/c/d;0~2c\\\nCH", "f1", "f3"], "x\nCH\nz\nCH\n"),
+		] {
+			let (code, capture) = crate::host::run_util::<Sed>(args, "", dir.path());
+			assert_eq!((code, capture.out().as_str()), (0, expected), "{args:?}: {}", capture.err());
+		}
+		let args = ["-i", "/a/,/c/!c\\\nCH", "f1", "f2"];
+		let (code, capture) = crate::host::run_util::<Sed>(&args, "", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(std::fs::read_to_string(dir.path().join("f1")).unwrap(), "a\nb\nc\n");
+		assert_eq!(std::fs::read_to_string(dir.path().join("f2")).unwrap(), "CH\nCH\n");
 	}
 
 	#[test]
