@@ -487,13 +487,15 @@ function collectDuplicateResults(
 	interface Occurrence {
 		index: number;
 		message: ToolResultMessage;
+		toolCall: AgentToolCall;
 		/** Entry index of the issuing assistant turn (-1: issued before `start`). */
 		turn: number;
-		protected: boolean;
 	}
-	// Bucket by call identity first, so content is serialized only for calls
-	// that actually repeat.
-	const byCall = new Map<string, Occurrence[]>();
+	// This pass runs every turn, so it buckets by a cheap shape key first (tool
+	// name, block types and text/image lengths). Identical calls with identical
+	// content always share a shape, so arguments are canonicalized and content
+	// serialized only for results whose shape repeats.
+	const byShape = new Map<string, Occurrence[]>();
 	let turn = -1;
 	for (let i = start; i < entries.length; i++) {
 		const entry = entries[i];
@@ -505,46 +507,76 @@ function collectDuplicateResults(
 		if (!message || message.prunedAt !== undefined || message.isError === true || exclude.has(message)) continue;
 		const toolCall = toolCalls.get(message.toolCallId);
 		if (!toolCall) continue;
-		const callKey = JSON.stringify([message.toolName, canonicalizeToolCallValue(toolCall.arguments)]);
-		let group = byCall.get(callKey);
-		if (!group) {
-			group = [];
-			byCall.set(callKey, group);
+		const shapeKey = contentShapeKey(message);
+		let bucket = byShape.get(shapeKey);
+		if (!bucket) {
+			bucket = [];
+			byShape.set(shapeKey, bucket);
 		}
-		const isProtected =
-			isProtectedToolResult(message, toolCall, protectedTools) ||
-			isArtifactRecoveryToolResult({ toolResult: message, toolCall });
-		group.push({ index: i, message, turn, protected: isProtected });
+		bucket.push({ index: i, message, toolCall, turn });
 	}
 
 	const candidates: SupersedeCandidate[] = [];
-	for (const group of byCall.values()) {
-		if (group.length < 2) continue;
-		// Newest → oldest: the first occurrence of each content is its reference.
-		const newestTurnByContent = new Map<string, number>();
-		for (let k = group.length - 1; k >= 0; k--) {
-			const occurrence = group[k];
-			const contentKey = JSON.stringify(occurrence.message.content);
-			const newerTurn = newestTurnByContent.get(contentKey);
-			if (newerTurn === undefined) {
-				newestTurnByContent.set(contentKey, occurrence.turn);
-				continue;
+	for (const bucket of byShape.values()) {
+		if (bucket.length < 2) continue;
+		// Exact identity inside the bucket: canonical call plus serialized content.
+		const byIdentity = new Map<string, Occurrence[]>();
+		for (const occurrence of bucket) {
+			const identity = JSON.stringify([
+				canonicalizeToolCallValue(occurrence.toolCall.arguments),
+				occurrence.message.content,
+			]);
+			let group = byIdentity.get(identity);
+			if (!group) {
+				group = [];
+				byIdentity.set(identity, group);
 			}
-			if (newerTurn === occurrence.turn || occurrence.protected) continue;
-			const tokens = tokenizer.countMessage(occurrence.message as AgentMessage);
-			if (tokens < MIN_DEDUPE_TOKENS) continue;
-			const notice = dedupedNotice(occurrence.message.toolName);
-			if (estimatePrunedSavings(tokens, notice) <= 0) continue;
-			candidates.push({
-				entry: entries[occurrence.index] as SessionMessageEntry,
-				message: occurrence.message,
-				index: occurrence.index,
-				tokens,
-				notice,
-			});
+			group.push(occurrence);
+		}
+		for (const group of byIdentity.values()) {
+			if (group.length < 2) continue;
+			// The newest copy is the reference for every older one.
+			const newestTurn = group[group.length - 1].turn;
+			for (let k = group.length - 2; k >= 0; k--) {
+				const occurrence = group[k];
+				if (occurrence.turn === newestTurn) continue;
+				const { message, toolCall } = occurrence;
+				if (
+					isProtectedToolResult(message, toolCall, protectedTools) ||
+					isArtifactRecoveryToolResult({ toolResult: message, toolCall })
+				) {
+					continue;
+				}
+				const tokens = tokenizer.countMessage(message as AgentMessage);
+				if (tokens < MIN_DEDUPE_TOKENS) continue;
+				const notice = dedupedNotice(message.toolName);
+				if (estimatePrunedSavings(tokens, notice) <= 0) continue;
+				candidates.push({
+					entry: entries[occurrence.index] as SessionMessageEntry,
+					message,
+					index: occurrence.index,
+					tokens,
+					notice,
+				});
+			}
 		}
 	}
 	return candidates.sort((a, b) => a.index - b.index);
+}
+
+/**
+ * Cheap bucketing key for {@link collectDuplicateResults}: tool name plus each
+ * content block's type and text or image-data length. Equal tool names and
+ * byte-identical content always produce equal keys; it serializes nothing
+ * beyond the tool name.
+ */
+function contentShapeKey(message: ToolResultMessage): string {
+	let key = message.toolName;
+	for (const block of message.content) {
+		const size = block.type === "text" ? block.text.length : block.type === "image" ? block.data.length : -1;
+		key += `\0${block.type}:${size}`;
+	}
+	return key;
 }
 
 /**

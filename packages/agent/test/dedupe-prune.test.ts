@@ -141,6 +141,16 @@ describe("pruneSupersededToolResults: identical-result dedupe", () => {
 		expect(text(second[1])).toBe(OTHER_OUTPUT);
 	});
 
+	test("a same-length changed result keeps both", () => {
+		const changed = STATUS_OUTPUT.replace("foo.ts", "bar.ts");
+		expect(changed.length).toBe(STATUS_OUTPUT.length);
+		const first = turn("bash", GIT_STATUS, STATUS_OUTPUT, T0);
+		const second = turn("bash", GIT_STATUS, changed, T0 + 1_000);
+
+		expect(dedupe([...first, ...second]).prunedCount).toBe(0);
+		expect(text(first[1])).toBe(STATUS_OUTPUT);
+	});
+
 	test("an older copy matching a non-adjacent newer copy is blanked; a changed middle copy is kept", () => {
 		const first = turn("bash", GIT_STATUS, STATUS_OUTPUT, T0);
 		const middle = turn("bash", GIT_STATUS, OTHER_OUTPUT, T0 + 1_000);
