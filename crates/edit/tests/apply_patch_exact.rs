@@ -9,6 +9,78 @@ fn update(body: &str) -> String {
 	format!("*** Begin Patch\n*** Update File: fixture.txt\n{body}\n*** End Patch")
 }
 
+/// A row starting with `-`/`+` is content even when it reads `--- x` /
+/// `+++ x`, with or without an `@@` line and wherever the row sits in the hunk.
+#[tokio::test]
+async fn diff_header_like_rows_are_hunk_content() {
+	const SQL: &str = "SELECT 1;\n-- old comment\nSELECT 2;\n";
+	const SQL_AFTER: &str = "SELECT 1;\n-- new comment\nSELECT 2;\n";
+	for (before, body, after) in [
+		(SQL, "@@\n SELECT 1;\n--- old comment\n+-- new comment\n SELECT 2;", SQL_AFTER),
+		(SQL, " SELECT 1;\n--- old comment\n+-- new comment\n SELECT 2;", SQL_AFTER),
+		(SQL, "--- old comment\n+-- new comment\n SELECT 2;", SQL_AFTER),
+		("int i;\ni++;\n", "@@\n int i;\n+++ i;\n i++;", "int i;\n++ i;\ni++;\n"),
+		("int i;\ni++;\n", " int i;\n+++ i;\n i++;", "int i;\n++ i;\ni++;\n"),
+		(
+			"head\n-- removed\n- \nold\nend\n",
+			"@@\n head\n--- removed\n-- \n-old\n+new\n end",
+			"head\nnew\nend\n",
+		),
+		(
+			"head\n-- old\n++ old\nend\n",
+			"@@\n head\n--- old\n-++ old\n+-- new\n+++ new\n end",
+			"head\n-- new\n++ new\nend\n",
+		),
+		// A header-less first hunk before a bare or context `@@` is content, not
+		// a file header.
+		(
+			"-- drop me\nSELECT 1;\nx\nSELECT 2;\n",
+			"--- drop me\n@@\n SELECT 1;\n-x\n+y\n SELECT 2;",
+			"SELECT 1;\ny\nSELECT 2;\n",
+		),
+		(
+			"-- drop me\nSELECT 1;\nx\nSELECT 2;\n",
+			"--- drop me\n+++ added\n@@ SELECT 1;\n-x\n+y\n SELECT 2;",
+			"++ added\nSELECT 1;\ny\nSELECT 2;\n",
+		),
+	] {
+		let workspace = common::Workspace::new(EditMode::ApplyPatch);
+		workspace.write("fixture.txt", before);
+		workspace
+			.apply_raw(&update(body), &common::DiskWriter::default())
+			.await
+			.unwrap_or_else(|error| panic!("{body:?}: {error}"));
+		assert_eq!(workspace.read("fixture.txt").as_deref(), Some(after), "{body:?}");
+	}
+}
+
+/// A unified-diff file header opening the body right before an `@@` row is
+/// recognized and dropped, also after blank rows, so a `git diff`-shaped update
+/// still applies.
+#[tokio::test]
+async fn leading_unified_file_header_is_dropped() {
+	const HUNK: &str = "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c";
+	for header in [
+		"--- a/fixture.txt\n+++ b/fixture.txt\n",
+		"diff --git a/fixture.txt b/fixture.txt\nindex 1234567..89abcde 100644\n--- \
+		 a/fixture.txt\n+++ b/fixture.txt\n",
+		"--- a/fixture.txt\n",
+		"+++ b/fixture.txt\n",
+		"\n--- a/fixture.txt\n+++ b/fixture.txt\n",
+		"diff --git a/fixture.txt b/fixture.txt\n\nindex 1234567..89abcde 100644\n\n--- \
+		 a/fixture.txt\n+++ b/fixture.txt\n",
+	] {
+		let workspace = common::Workspace::new(EditMode::ApplyPatch);
+		workspace.write("fixture.txt", "a\nb\nc\n");
+		let body = format!("{header}{HUNK}");
+		workspace
+			.apply_raw(&update(&body), &common::DiskWriter::default())
+			.await
+			.unwrap_or_else(|error| panic!("{body:?}: {error}"));
+		assert_eq!(workspace.read("fixture.txt").as_deref(), Some("a\nB\nc\n"), "{body:?}");
+	}
+}
+
 #[tokio::test]
 async fn rejects_materially_unmatched_lines_without_writes() {
 	for (before, body) in [

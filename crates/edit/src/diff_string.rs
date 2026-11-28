@@ -823,6 +823,52 @@ fn is_patch_wrapper_line(line: &str) -> bool {
 
 /// Strip wrapper/metadata lines and trailing blank rows from a diff body.
 pub fn normalize_diff(diff: &str) -> String {
+	normalize_diff_body(diff, HunkDialect::Json)
+}
+
+/// Hunk syntax a diff body is parsed as.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HunkDialect {
+	/// JSON-patch `diff`: unified-diff metadata anywhere is skipped, and
+	/// numbered `read` output is recovered.
+	Json,
+	/// Codex `apply_patch` update body: a row starting with `-` or `+` is hunk
+	/// content even when it reads `--- x` or `+++ x`, except a unified-diff file
+	/// header opening the body right before a unified range header
+	/// (`@@ -l,s +l,s @@`). Numeric prefixes stay literal.
+	ApplyPatch,
+}
+
+const fn is_signed_row(line: &str) -> bool {
+	matches!(line.as_bytes().first(), Some(b'+' | b'-'))
+}
+
+/// Range of a unified-diff file header (`--- a`, `+++ b`, either or both)
+/// opening an `apply_patch` body after any unsigned metadata or blank rows.
+/// Only a header right before a unified range header (`@@ -l,s +l,s @@`)
+/// counts: Codex hunk headers never take that form, so before a bare or
+/// context `@@` the rows are a header-less first hunk's content.
+fn leading_file_header(lines: &[&str]) -> Option<std::ops::Range<usize>> {
+	let start = lines.iter().position(|line| {
+		let trimmed = line.trim();
+		is_signed_row(line)
+			|| !(trimmed.is_empty() || matches_trimmed_prefix(trimmed, &DIFF_METADATA_PREFIXES))
+	})?;
+	let mut end = start;
+	if lines.get(end).is_some_and(|line| line.starts_with("--- ")) {
+		end += 1;
+	}
+	if lines.get(end).is_some_and(|line| line.starts_with("+++ ")) {
+		end += 1;
+	}
+	(end > start
+		&& lines
+			.get(end)
+			.is_some_and(|line| parse_unified_hunk_header(line.trim_end()).is_some()))
+	.then_some(start..end)
+}
+
+fn normalize_diff_body(diff: &str, dialect: HunkDialect) -> String {
 	let mut lines = diff.split('\n').collect::<Vec<_>>();
 	while lines
 		.pop_if(|line| line.is_empty() || (line.trim().is_empty() && !is_diff_content_line(line)))
@@ -835,8 +881,15 @@ pub fn normalize_diff(diff: &str) -> String {
 		lines.remove(0);
 	}
 	lines.pop_if(|line| is_patch_wrapper_line(line.trim()));
+	if dialect == HunkDialect::ApplyPatch
+		&& let Some(header) = leading_file_header(&lines)
+	{
+		lines.drain(header);
+	}
 	lines.retain(|line| {
-		is_diff_content_line(line) || !matches_trimmed_prefix(line.trim(), &DIFF_METADATA_PREFIXES)
+		is_diff_content_line(line)
+			|| (dialect == HunkDialect::ApplyPatch && is_signed_row(line))
+			|| !matches_trimmed_prefix(line.trim(), &DIFF_METADATA_PREFIXES)
 	});
 	lines.join("\n")
 }
@@ -986,7 +1039,7 @@ fn parse_one_hunk(
 	lines: &[&str],
 	line_number: u32,
 	allow_missing_context: bool,
-	recover_line_numbers: bool,
+	dialect: HunkDialect,
 ) -> Result<ParseHunkResult, EditError> {
 	if lines.is_empty() {
 		return Err(parse_error("Diff does not contain any lines", line_number));
@@ -1156,7 +1209,7 @@ fn parse_one_hunk(
 			line_number + u32::try_from(start_index).unwrap_or(u32::MAX),
 		));
 	}
-	if recover_line_numbers {
+	if dialect == HunkDialect::Json {
 		strip_line_number_prefixes(&mut hunk);
 	}
 	Ok(ParseHunkResult { hunk, lines_consumed: parsed_lines + start_index })
@@ -1218,15 +1271,15 @@ fn is_unified_diff_metadata_line(line: &str) -> bool {
 
 /// Parse JSON patch hunks, recovering numbered read output when present.
 pub fn parse_diff_hunks(diff: &str) -> Result<Vec<DiffHunk>, EditError> {
-	parse_hunks(diff, true)
+	parse_hunks(diff, HunkDialect::Json)
 }
 
 /// Codex `apply_patch` preserves numeric prefixes as literal content.
 pub(crate) fn parse_apply_patch_hunks(diff: &str) -> Result<Vec<DiffHunk>, EditError> {
-	parse_hunks(diff, false)
+	parse_hunks(diff, HunkDialect::ApplyPatch)
 }
 
-fn parse_hunks(diff: &str, recover_line_numbers: bool) -> Result<Vec<DiffHunk>, EditError> {
+fn parse_hunks(diff: &str, dialect: HunkDialect) -> Result<Vec<DiffHunk>, EditError> {
 	let multi_file_count = count_multi_file_markers(diff);
 	if multi_file_count > 1 {
 		return Err(EditError::Apply(format!(
@@ -1234,7 +1287,7 @@ fn parse_hunks(diff: &str, recover_line_numbers: bool) -> Result<Vec<DiffHunk>, 
 			 multi-file markers."
 		)));
 	}
-	let normalized_diff = normalize_diff(diff);
+	let normalized_diff = normalize_diff_body(diff, dialect);
 	let lines = normalized_diff.split('\n').collect::<Vec<_>>();
 	let mut hunks = Vec::new();
 	let mut index = 0_usize;
@@ -1257,7 +1310,7 @@ fn parse_hunks(diff: &str, recover_line_numbers: bool) -> Result<Vec<DiffHunk>, 
 			&lines[index..],
 			u32::try_from(index + 1).unwrap_or(u32::MAX),
 			true,
-			recover_line_numbers,
+			dialect,
 		)?;
 		hunks.push(parsed.hunk);
 		index += parsed.lines_consumed;

@@ -165,6 +165,12 @@ fuzzy settings for other modes. Repeated context binds to the first match at
 or after the previous hunk; unmatched context rejects the entire envelope
 before any writes. Numeric prefixes in old and new lines remain literal text,
 not recovered line-number annotations.
+Hunk rows are content after exactly one leading space, `-`, or `+`, even when
+the remaining text resembles a diff header. The one exception is a unified-diff
+file header (`--- a/…` and/or `+++ b/…`, after any `diff --git`/`index` rows)
+that opens the update body directly before a unified range header
+(`@@ -l,s +l,s @@`); it is dropped. Before a bare or context `@@`, such rows
+are a header-less first hunk.
 
 An `*** Update File` followed only by `*** Move to:` renames a UTF-8 file
 without changing its bytes or permissions. An empty update without a move
