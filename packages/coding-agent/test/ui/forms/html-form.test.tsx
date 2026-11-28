@@ -282,6 +282,32 @@ test("inverts the whole grapheme under a wrapped option note's caret", () => {
 	}
 });
 
+test("shows the caret on a pasted carriage return without changing the saved option note", () => {
+	const model = new HtmlFormModel(
+		parseHtmlForm(`<form><label><input type="radio" name="r" value="keep" checked> Keep</label></form>`),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 24} /> }), {
+		columns: 42,
+		rows: 24,
+		theme: loadThemeSync("dark"),
+	});
+	try {
+		term.focus(term.surface.dock()[0]!);
+		term.press("n");
+		term.paste("a\rb");
+		term.press("left");
+		term.press("left");
+		expect(term.screen().some(row => row.includes("a b"))).toBe(true);
+		expect(highlighted(term.rows())).toEqual([" "]);
+
+		term.press("enter");
+		expect(model.notes()).toEqual([expect.objectContaining({ value: "keep", text: "a\rb" })]);
+	} finally {
+		term.dispose();
+	}
+});
+
 test("keeps a long ordinary input visible and editable at both ends", () => {
 	const onSubmit = vi.fn();
 	const model = new HtmlFormModel(parseHtmlForm(`<form><label>Route <input name="route"></label></form>`), {
@@ -367,6 +393,51 @@ test("wraps a long note on a dropdown option too", () => {
 		expect(term.screen().join("\n")).toContain("the map.▏");
 		term.press("home");
 		expect(term.screen().join("\n")).toContain("Use the marked trail");
+	} finally {
+		term.dispose();
+	}
+});
+
+test("shows which parts of an oversized dropdown note are offscreen and saves the full note", () => {
+	const model = new HtmlFormModel(
+		parseHtmlForm(
+			`<form><label>Region <select name="region"><option value="us" selected>US</option><option value="eu">EU</option></select></label></form>`,
+		),
+		{ onSubmit: () => {}, onCancel: () => {} },
+	);
+	const term = createTestTerminal(() => ({ dock: <HtmlFormDialog model={model} terminalRows={() => 40} /> }), {
+		columns: 120,
+		rows: 40,
+		theme: loadThemeSync("dark"),
+	});
+	try {
+		const titleRow = () => term.screen().find(row => row.startsWith("╭"));
+		const family = "👨‍👩‍👧‍👦";
+		const draft = `BEGIN ${"x".repeat(5000)} MIDDLE ${"y".repeat(5000)} TAIL ${family}!`;
+		term.focus(term.surface.dock()[0]!);
+		term.press("space");
+		term.press("alt+n");
+		term.paste(draft);
+		term.press("end");
+		expect(term.screen().some(row => row.includes(`TAIL ${family}!▏`))).toBe(true);
+		expect(titleRow()).toContain("‹ Ask");
+
+		term.press("home");
+		expect(term.screen().some(row => row.includes("BEGIN"))).toBe(true);
+		expect(titleRow()).toContain("› Ask");
+
+		term.press("ctrl+right");
+		term.press("ctrl+right");
+		expect(term.screen().some(row => row.includes("MIDDLE"))).toBe(true);
+		expect(titleRow()).toContain("‹› Ask");
+
+		term.press("end");
+		term.press("left");
+		term.press("left");
+		expect(highlighted(term.rows())).toEqual([family]);
+		term.press("enter");
+		expect(model.notes()).toEqual([expect.objectContaining({ value: "us", text: draft })]);
+		expect(titleRow()).toStartWith("╭─ Ask");
 	} finally {
 		term.dispose();
 	}

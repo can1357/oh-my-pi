@@ -111,14 +111,15 @@ const DROPDOWN_RIGHT_MARGIN = 2;
 /** A text block of at most this many rows right before a field is its caption: no blank row parts them. */
 const CAPTION_MAX_ROWS = 4;
 
+const NOTE_LAYOUT_LIMIT = 2048;
+type NoteDisplayLine = LineState & { readonly omittedBefore: boolean; readonly omittedAfter: boolean };
+
 /** What the column shows: which field is open and where its highlight is. */
 interface View {
 	readonly active: Active;
 	readonly row: number;
 	readonly dropdown: number | undefined;
-	readonly note:
-		| { readonly field: number; readonly option: number; readonly text: string; readonly cursor: number }
-		| undefined;
+	readonly note: (NoteDisplayLine & { readonly field: number; readonly option: number }) | undefined;
 	readonly focused: boolean;
 }
 
@@ -642,15 +643,37 @@ function buildColumn(
 	return column;
 }
 
+/** Prepare a caret-relative excerpt once per paint, without changing the draft or its offsets. */
+function noteDisplayLine({ text, cursor }: LineState): NoteDisplayLine {
+	// A raw CR is stripped by the terminal writer; a space keeps its caret cell and UTF-16 offset.
+	if (text.length <= NOTE_LAYOUT_LIMIT)
+		return { text: text.replaceAll("\r", " "), cursor, omittedBefore: false, omittedAfter: false };
+
+	// Keep the excerpt fixed as the caret moves within a page.
+	const stride = NOTE_LAYOUT_LIMIT / 2;
+	const start = Math.max(0, Math.floor(cursor / stride) * stride - stride / 2);
+	const end = Math.min(text.length, start + NOTE_LAYOUT_LIMIT);
+	const omittedBefore = start > 0;
+	const omittedAfter = end < text.length;
+	const sample = text.slice(start, end);
+	const at = cursor - start;
+	const segments = segmentGraphemes(sample);
+	// Drop possibly clipped graphemes; if that would lose the caret, give it a visible cell.
+	const from = omittedBefore ? segments.containing(0)!.segment.length : 0;
+	const to = omittedAfter ? segments.containing(sample.length - 1)!.index : sample.length;
+	if (from >= to || at < from || (omittedAfter && at >= to))
+		return { text: "…", cursor: 0, omittedBefore, omittedAfter };
+
+	return { text: sample.slice(from, to).replaceAll("\r", " "), cursor: at - from, omittedBefore, omittedAfter };
+}
+
 function currentView(model: HtmlFormModel): View {
 	const note = model.note();
 	return {
 		active: model.active(),
 		row: model.row(),
 		dropdown: model.dropdown(),
-		note: note
-			? { field: note.field, option: note.option, text: note.line.text, cursor: note.line.cursor }
-			: undefined,
+		note: note ? { field: note.field, option: note.option, ...noteDisplayLine(note.line) } : undefined,
 		focused: model.focused(),
 	};
 }
@@ -748,7 +771,9 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 		}
 	}
 	content.push(...skip);
-	return { rows: boxRows(theme, title(look), content, cx.width) };
+	const omissions = `${view.note?.omittedBefore ? "‹" : ""}${view.note?.omittedAfter ? "›" : ""}`;
+	const head = title(look);
+	return { rows: boxRows(theme, omissions ? `${omissions} ${head}` : head, content, cx.width) };
 }
 
 defineAskCardLook("omp.html-form", paintHtmlForm);
