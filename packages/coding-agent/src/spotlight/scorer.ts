@@ -3,7 +3,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { SpotlightClient, SpotlightRequest } from "./client";
 import { SpotlightError } from "./client";
 import { SHAPE_PROBE } from "./shape";
-import type { CallContext, Scorer, SpotlightThinking } from "./types";
+import type { CallContext, Scorer, ScorerUsage, SpotlightThinking } from "./types";
 
 /** Prompt tokens one request may spend on its items; Spotlight takes ≤32,768 per question, state included. */
 const REQUEST_ITEM_TOKENS = 28_000;
@@ -17,23 +17,8 @@ const REQUEST_BODY_CHARS = 512 * 1024;
 /** The score-free coin's scorer: answers null without asking Spotlight, so the no-score rules decide the cut. */
 export const SCORE_FREE_SCORER: Scorer = { scoreFree: true, score: async () => null };
 
-/** What a {@link RecordingScorer} spent, for the session journal. */
-export interface ScorerUsage {
-	/** Requests sent. */
-	calls: number;
-	/** Requests that failed (no credential, timeout, HTTP error); the caller fell back to unranked rules. */
-	failures: number;
-	/**
-	 * Failed requests by cause: the error code Spotlight or the client gave (`no_credential`, `timeout`, `transport`,
-	 * `bad_reply`, `rate_limited`, …), else `http_<status>`; absent while none failed.
-	 */
-	failureCauses?: Record<string, number>;
-	/** Wall time of the requests, summed. */
-	ms: number;
-	/** Prompt tokens Spotlight billed. */
-	tokens: number;
-	costUsd: number;
-}
+/** Re-exported for callers that keep the scoring surface next to its implementation. */
+export type { ScorerUsage } from "./types";
 
 /**
  * A {@link Scorer} over {@link SpotlightClient} for one tool result: scores every item's relevance, splits

@@ -9,6 +9,7 @@
 
 ### Added
 
+- Added `JudgmentResult.cached`, set when every answer came from an answer cache and no provider request was made ([#19907](https://github.com/can1357/oh-my-pi/pull/19907) by [@Xytronix](https://github.com/Xytronix))
 - Added encryption at rest to `SqliteAuthCredentialStore`: with `open(path, { encrypt: true })` (or `unlock({ encrypt: true })`) new credential rows are sealed with AES-256-GCM under a master key kept in the OS credential vault, each with its own salt; `encrypt: "auto"` keeps a store's current mode and encrypts a fresh one only when the vault answers without prompting; macOS processes without a Team ID signature (ad-hoc local builds) never touch the vault; `encrypt: false` decrypts rows sealed earlier so later opens never read the vault; `openLocalAuthCredentialStore()` opens this machine's `agent.db` with `"auto"` unless `auth.encrypt`/`OMP_AUTH_ENCRYPT` forces it
 - `omp usage` shows Venice USD and DIEM balances, bundled credits when available, and the DIEM epoch reset with a regular API key ([#20701](https://github.com/can1357/oh-my-pi/pull/20701) by [@dagurval](https://github.com/dagurval)).
 - Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))

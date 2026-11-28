@@ -127,6 +127,8 @@ export interface JudgmentResult<Q extends Questions = Questions> {
 	model: string;
 	answers: { [K in keyof Q]: AnswerFor<Q[K]> };
 	usage: Usage;
+	/** Every answer came from an answer cache: no provider request was made. */
+	cached?: boolean;
 }
 
 export interface JudgeOptions {

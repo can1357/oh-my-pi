@@ -26,7 +26,7 @@ import { formatOutputNotice, type OutputMeta } from "../tools/output-meta-format
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
 import { buildCallContext, callSummary } from "./context";
-import { RecordingScorer, SCORE_FREE_SCORER } from "./scorer";
+import { SCORE_FREE_SCORER } from "./scorer";
 import { SpotlightExperiment } from "./session";
 import { countTokens, noteCall, type ShapedBlock, shapeBlock, syncSeen, traceUnchanged } from "./shape";
 import {
@@ -156,7 +156,7 @@ export async function shapeToolBlocks(
 	experiment.claimCall(toolCallId);
 	// Drawn before shaping, so held-out and score-free results are random shares of the results shaping would cut.
 	const coins = experiment.drawCoins();
-	const scorer = new RecordingScorer(experiment.client, experiment.thinking);
+	const scorer = experiment.makeScorer(session);
 	const state = experiment.shapeState;
 	const started = performance.now();
 	const single = blocks.length === 1;
@@ -255,6 +255,7 @@ export async function shapeToolBlocks(
 		outTokens,
 		ms: Math.round(performance.now() - started),
 		spotlight: { ...scorer.usage, costUsd: Number(scorer.usage.costUsd.toFixed(8)) },
+		ranker: experiment.ranker,
 		stats,
 		plainChars: plainText.length,
 		plainTokens: plainTokensOrIn,

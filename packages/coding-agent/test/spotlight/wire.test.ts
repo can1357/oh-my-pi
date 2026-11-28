@@ -158,6 +158,41 @@ const LONG_LOG = Array.from({ length: 400 }, (_, i) =>
 		: `step ${i + 1}: worker-${i % 7} synced ${(i * 37) % 1000} rows from shard-${i % 5} in ${(i * 13) % 90}ms`,
 ).join("\n");
 
+describe("spotlight ranker", () => {
+	it("journals the ranker it shaped with and asks no Spotlight client under the judge ranker", async () => {
+		const { session, manager } = await toolSession(
+			{},
+			manager => new SpotlightExperiment(undefined, "low", manager, { ranker: "judge" }),
+		);
+		const experiment = session.spotlight as SpotlightExperiment;
+		expect(experiment.sessionEntry()).toMatchObject({ ranker: "judge", model: "", urlHost: "" });
+
+		vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(bashOutput(LONG_LOG));
+		await new BashTool(session).execute("b1", { command: "cat fixture.ts" });
+
+		// No judge candidate in this fixture session, so shaping keeps its unranked rules and says why.
+		const [entry] = entries(manager, SPOTLIGHT_ENTRY.shape);
+		expect(entry).toMatchObject({ tool: "bash", ranker: "judge" });
+		expect((entry!.spotlight as Record<string, unknown>).failureCauses).toMatchObject({
+			no_judge: expect.any(Number),
+		});
+	});
+
+	it("starts no client and warms nothing when the ranker is the judge role", () => {
+		const settings = Settings.isolated({ "spotlight.experiment.enabled": true, "spotlight.ranker": "judge" });
+		const manager = SessionManager.inMemory("/nonexistent");
+		const experiment = startSpotlightExperiment(settings, manager);
+		expect(experiment?.client).toBeUndefined();
+		expect(entries(manager, SPOTLIGHT_ENTRY.session)[0]).toMatchObject({ ranker: "judge", urlHost: "", model: "" });
+	});
+
+	it("keeps the Spotlight client under the default ranker", async () => {
+		const { session } = await experimentSession();
+		expect(session.spotlight?.ranker).toBe("spotlight");
+		expect(session.spotlight?.client).toBeDefined();
+	});
+});
+
 describe("spotlight shaping hooks", () => {
 	const SOURCE =
 		"export function alpha(value: string): string {\n\tconst clean = value.trim();\n\treturn clean.toUpperCase();\n}\n\nexport function beta(): number {\n\tconst one = 1;\n\treturn one + 1;\n}\n";
@@ -1228,7 +1263,7 @@ describe("spotlight session entry", () => {
 		);
 		expect(experiment).toBeDefined();
 		await expect(
-			experiment!.client.rank({
+			experiment!.client!.rank({
 				state: { task: "find files" },
 				source: "search",
 				items: ["one"],
@@ -1236,7 +1271,7 @@ describe("spotlight session entry", () => {
 			}),
 		).rejects.toThrow("disabled by model policy");
 		expect(fetchSpy).not.toHaveBeenCalled();
-		experiment!.client.close();
+		experiment!.client?.close();
 	});
 	it("journals the session entry on a session change only when the journal's last one differs", async () => {
 		const manager = SessionManager.inMemory(await tmpDir());
