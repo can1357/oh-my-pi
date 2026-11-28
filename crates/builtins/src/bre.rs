@@ -29,6 +29,17 @@ pub(crate) enum StackedRepeats {
 	Refused,
 }
 
+/// How the locale writes a character outside ASCII: as one character, in a
+/// UTF-8 locale, or as the bytes of its UTF-8, each a character, in the C
+/// locale, where GNU grep refuses a collating symbol or an equivalence class
+/// of such a character (`[[.é.]]`, `[[=é=]]`) as several collating elements.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code, reason = "each variant is used by a different utility feature")]
+pub(crate) enum Encoding {
+	Utf8,
+	Bytes,
+}
+
 /// A pattern the BRE dialect cannot express.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(
@@ -116,7 +127,14 @@ impl BreError {
 /// Malformed patterns are refused with glibc's error, as GNU grep and sed do:
 /// unbalanced `\(`/`\)`, an unclosed or malformed `\{…\}`, a back-reference
 /// to a group not yet closed, a trailing `\`, and bad bracket expressions.
-pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs, stacked: StackedRepeats) -> Result<String, BreError> {
+/// `encoding` says how the locale writes a character outside ASCII
+/// ([`Encoding`]).
+pub(crate) fn bre_to_ere(
+	pattern: &str,
+	backrefs: Backrefs,
+	stacked: StackedRepeats,
+	encoding: Encoding,
+) -> Result<String, BreError> {
 	let mut result = String::with_capacity(pattern.len());
 	let mut chars = pattern.chars().peekable();
 	// Numbers of the groups still open, how many were opened, and a bit per
@@ -143,7 +161,7 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs, stacked: StackedRepe
 	// Whether the previous token was a repetition operator, for `stacked`.
 	let mut after_repeat = false;
 	while let Some(c) = chars.next() {
-		let token_start = result.len();
+		let mut token_start = result.len();
 		let was_repeat = after_repeat;
 		let stacking = was_repeat && stacked == StackedRepeats::Refused;
 		after_repeat = false;
@@ -262,7 +280,7 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs, stacked: StackedRepe
 		} else {
 			match c {
 				'[' => {
-					push_bracket_expression(&mut result, &mut chars)?;
+					push_bracket_expression(&mut result, &mut chars, encoding)?;
 					has_atom = true;
 				},
 				'+' | '?' | '{' | '}' | '|' | '(' | ')' => {
@@ -323,7 +341,7 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs, stacked: StackedRepe
 					not_atom = true;
 				},
 				_ => {
-					result.push(c);
+					token_start = push_literal(&mut result, c, encoding);
 					has_atom = true;
 				},
 			}
@@ -347,6 +365,24 @@ fn group_stacked(result: &mut String, start: usize, stacked: bool) {
 		result.insert_str(start, "(?:");
 		result.push(')');
 	}
+}
+
+/// Appends the literal `c` and returns where its piece starts. In
+/// `Encoding::Bytes` a character outside ASCII is the `\x` escapes of its
+/// UTF-8 bytes, each a character, so a quantifier, stacked or not, repeats
+/// only the last byte, as GNU grep reads it in the C locale.
+fn push_literal(result: &mut String, c: char, encoding: Encoding) -> usize {
+	if encoding == Encoding::Utf8 || c.is_ascii() {
+		let start = result.len();
+		result.push(c);
+		return start;
+	}
+	let mut start = result.len();
+	for byte in c.encode_utf8(&mut [0; 4]).bytes() {
+		start = result.len();
+		result.push_str(&format!(r"\x{byte:02X}"));
+	}
+	start
 }
 
 /// Append a BRE interval as an ERE `{min,max}`; the `\{` is already consumed.
@@ -421,8 +457,14 @@ fn ends_branch(chars: &Peekable<Chars<'_>>) -> bool {
 }
 
 /// Append one POSIX bracket expression. The opening `[` is already consumed.
-/// An unterminated bracket is refused with glibc's error.
-fn push_bracket_expression(result: &mut String, chars: &mut Peekable<Chars<'_>>) -> Result<(), BreError> {
+/// An unterminated bracket is refused with glibc's error, and so is a
+/// collating symbol or equivalence class of several collating elements, as
+/// `encoding` counts them.
+fn push_bracket_expression(
+	result: &mut String,
+	chars: &mut Peekable<Chars<'_>>,
+	encoding: Encoding,
+) -> Result<(), BreError> {
 	let mut probe = chars.clone();
 	let start = result.len();
 	result.push('[');
@@ -483,9 +525,11 @@ fn push_bracket_expression(result: &mut String, chars: &mut Peekable<Chars<'_>>)
 				// In the default byte-order collation, a single character is
 				// its own collating symbol/equivalence class. Do not hand
 				// locale-specific multi-character elements to Rust as sets.
+				// In the C locale a character outside ASCII is several bytes,
+				// so several elements.
 				let mut body = result[body_start + 2..].chars();
 				let symbol = body.next().ok_or(BreError::InvalidCollation)?;
-				if body.next().is_some() {
+				if body.next().is_some() || (encoding == Encoding::Bytes && !symbol.is_ascii()) {
 					return Err(BreError::InvalidCollation);
 				}
 				result.truncate(body_start);
@@ -528,8 +572,10 @@ fn push_class_literal(result: &mut String, c: char) {
 /// operand and the other patterns glibc refuses. Both tools read a
 /// non-interval `{` as a literal; grep also reads an unopened `)` as one,
 /// where sed rejects it.
+/// `encoding` says how the locale writes a character outside ASCII
+/// ([`Encoding`]).
 #[cfg(any(feature = "util.grep", feature = "util.sed"))]
-pub(crate) fn ere_to_rust(pattern: &str, grep: bool) -> Result<Cow<'_, str>, BreError> {
+pub(crate) fn ere_to_rust(pattern: &str, grep: bool, encoding: Encoding) -> Result<Cow<'_, str>, BreError> {
 	let mut result = String::with_capacity(pattern.len());
 	let mut chars = pattern.chars().peekable();
 	let mut has_atom = false;
@@ -566,7 +612,7 @@ pub(crate) fn ere_to_rust(pattern: &str, grep: bool) -> Result<Cow<'_, str>, Bre
 				continue;
 			},
 			'[' => {
-				push_bracket_expression(&mut result, &mut chars)?;
+				push_bracket_expression(&mut result, &mut chars, encoding)?;
 				has_atom = true;
 				piece_start = token_start;
 				continue;
@@ -631,8 +677,9 @@ pub(crate) fn ere_to_rust(pattern: &str, grep: bool) -> Result<Cow<'_, str>, Bre
 				},
 			},
 			_ => {
+				piece_start = push_literal(&mut result, c, encoding);
 				has_atom = true;
-				piece_start = token_start;
+				continue;
 			},
 		}
 		result.push(c);
@@ -695,11 +742,11 @@ mod tests {
 	use super::*;
 
 	fn ere(pattern: &str) -> String {
-		bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Allowed).expect("translatable")
+		bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Allowed, Encoding::Utf8).expect("translatable")
 	}
 
 	fn ere_err(pattern: &str) -> Option<BreError> {
-		bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Allowed).err()
+		bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Allowed, Encoding::Utf8).err()
 	}
 
 	// Relocated from `sed`, which owned this translation before `grep` shared it.
@@ -754,7 +801,7 @@ mod tests {
 			};
 			check(&ere(pattern));
 			#[cfg(any(feature = "util.grep", feature = "util.sed"))]
-			check(&ere_to_rust(pattern, false).unwrap());
+			check(&ere_to_rust(pattern, false, Encoding::Utf8).unwrap());
 		}
 	}
 
@@ -772,7 +819,7 @@ mod tests {
 		assert_eq!(ere(r"x\(ab\)*\+"), "x(?:(ab)*)+");
 		assert_eq!(ere(r"[ab]\{2\}*\?"), "(?:(?:[ab]{2})*)?");
 		assert_eq!(ere(r"^**"), r"^\**");
-		let sed = |pattern| bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Refused);
+		let sed = |pattern| bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Refused, Encoding::Utf8);
 		assert_eq!(sed(r"a**"), Err(BreError::RepetitionOperandMissing));
 		assert_eq!(sed(r"a\?\{2\}"), Err(BreError::RepetitionOperandMissing));
 		assert_eq!(sed(r"a*\+").as_deref(), Ok("(?:a*)+"));
@@ -783,7 +830,7 @@ mod tests {
 	#[test]
 	fn stacked_ere_quantifiers_group_the_piece_before_them() {
 		for (pattern, rust) in [("a*?", "(?:a*)?"), ("a+*", "(?:a+)*"), ("(ab)?+", "(?:(ab)?)+"), ("a{2}*", "(?:a{2})*")] {
-			assert_eq!(ere_to_rust(pattern, true).as_deref(), Ok(rust), "{pattern}");
+			assert_eq!(ere_to_rust(pattern, true, Encoding::Utf8).as_deref(), Ok(rust), "{pattern}");
 		}
 	}
 
@@ -818,7 +865,7 @@ mod tests {
 		// happened before this module existed. The behaviour is unchanged by
 		// the refactor; it is not an endorsement of matching `\1` literally.
 		assert_eq!(
-			bre_to_ere(r"\(a\)\1", Backrefs::Unsupported, StackedRepeats::Allowed).expect("translatable"),
+			bre_to_ere(r"\(a\)\1", Backrefs::Unsupported, StackedRepeats::Allowed, Encoding::Utf8).expect("translatable"),
 			r"(a)\1"
 		);
 		// The grouping exists only for engines that support them, where a
@@ -916,7 +963,7 @@ mod tests {
 	#[test]
 	fn ere_rejects_repetition_with_no_operand() {
 		for pattern in ["^+", "^*", "^?", "^{2}", "*x", "+", "(+)", "a|+b", "(|+)"] {
-			assert_eq!(ere_to_rust(pattern, true), Err(BreError::RepetitionOperandMissing), "{pattern}");
+			assert_eq!(ere_to_rust(pattern, true, Encoding::Utf8), Err(BreError::RepetitionOperandMissing), "{pattern}");
 		}
 	}
 
@@ -947,7 +994,7 @@ mod tests {
 			"^{}",
 			"{1a}",
 		] {
-			assert!(ere_to_rust(pattern, true).is_ok(), "should accept {pattern}");
+			assert!(ere_to_rust(pattern, true, Encoding::Utf8).is_ok(), "should accept {pattern}");
 		}
 	}
 
@@ -963,16 +1010,16 @@ mod tests {
 			("{1}", BreError::RepetitionOperandMissing),
 			(r"(a)\2", BreError::InvalidBackReference),
 		] {
-			assert_eq!(ere_to_rust(pattern, false), Err(error), "{pattern}");
+			assert_eq!(ere_to_rust(pattern, false, Encoding::Utf8), Err(error), "{pattern}");
 		}
-		assert!(ere_to_rust("(a)+{1}|b**", false).is_ok());
+		assert!(ere_to_rust("(a)+{1}|b**", false, Encoding::Utf8).is_ok());
 	}
 
 	#[cfg(feature = "util.grep")]
 	#[test]
 	fn ere_rejects_only_intervals_that_really_open() {
 		for pattern in ["{1}", "^{2}", "{3,}", "{4,5}", "(|{6})", "{,5}"] {
-			assert_eq!(ere_to_rust(pattern, true), Err(BreError::RepetitionOperandMissing), "{pattern}");
+			assert_eq!(ere_to_rust(pattern, true, Encoding::Utf8), Err(BreError::RepetitionOperandMissing), "{pattern}");
 		}
 	}
 }
