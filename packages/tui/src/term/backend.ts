@@ -422,8 +422,8 @@ export class TermBackend {
 	readonly #emitted = new Map<UiNode, Emitted>();
 	/** Main nodes with rows of their own in terminal history: a separator alone does not count. */
 	readonly #withContent = new Set<UiNode>();
-	/** The height each covering dock node was last composed at (`undefined`: its natural height). */
-	readonly #dockFit = new WeakMap<UiNode, number | undefined>();
+	/** Covering dock nodes composed at a fixed height while the dock overflowed, with the block composed (absent: natural). */
+	readonly #dockFit = new WeakMap<UiNode, { readonly height: number; readonly block: Block }>();
 	/** The next frame is the shutdown flush (see {@link flush}). */
 	#flushing = false;
 	/**
@@ -795,26 +795,36 @@ export class TermBackend {
 	}
 
 	/**
-	 * The dock's blocks at `width`, first painted at their remembered fit heights. Each covering
-	 * block gets the rows every other block actually takes, so earlier covers shrink first. A
-	 * changed budget repaints its subtree so its last paint describes the block composed on screen.
+	 * The dock's blocks at `width`, first painted at their remembered heights. A covering block keeps
+	 * its natural height while the dock fits; when it would not, the block gets the rows every other
+	 * block actually takes (a fixed `cx.height`), so earlier covers shrink first. A fitted block whose
+	 * room or contents changed is measured at its natural height again. Every height change repaints
+	 * the subtree, so the painter's last run is the block composed on screen.
 	 */
 	#paintDock(width: number, height: number): Block[] {
 		const nodes = this.#surface.dock();
-		const blocks = nodes.map(node => this.#paint(node, width, this.#dockFit.get(node)));
+		const blocks = nodes.map(node => this.#paint(node, width, this.#dockFit.get(node)?.height));
 		let total = blocks.reduce((sum, block) => sum + block.rows.length, 0);
 		for (let i = 0; i < blocks.length; i++) {
 			const node = nodes[i]!;
 			const block = blocks[i]!;
 			if (!block.covering) continue;
-			const budget = Math.max(1, height - (total - block.rows.length));
-			if (budget !== this.#dockFit.get(node)) {
+			const room = Math.max(1, height - (total - block.rows.length));
+			const fit = this.#dockFit.get(node);
+			if (fit === undefined ? block.rows.length <= room : room === fit.height && block === fit.block) continue;
+			let next = block;
+			if (fit !== undefined) {
 				releasePaintTree(node);
-				const fitted = this.#paint(node, width, budget);
-				total += fitted.rows.length - block.rows.length;
-				blocks[i] = fitted;
-				this.#dockFit.set(node, budget);
+				next = this.#paint(node, width);
+				this.#dockFit.delete(node);
 			}
+			if (next.rows.length > room) {
+				releasePaintTree(node);
+				next = this.#paint(node, width, room);
+				this.#dockFit.set(node, { height: room, block: next });
+			}
+			total += next.rows.length - block.rows.length;
+			blocks[i] = next;
 		}
 		return blocks;
 	}

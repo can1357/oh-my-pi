@@ -484,10 +484,11 @@ describe("TermBackend main surface", () => {
 			expect(driver.viewport.slice(-driver.rows)).toEqual([...lines("c", 3), ...lines("d", 3)]);
 			expect(heights.at(-1)).toBe(3);
 
+			// Room for the whole cover: its natural height, not a fixed one.
 			dock.set(lines("d", 1));
 			backend.renderNow();
 			expect(driver.viewport.slice(-(cover.length + 1))).toEqual([...cover, "d0"]);
-			expect(heights.at(-1)).toBe(5);
+			expect(heights.at(-1)).toBeUndefined();
 
 			dock.set(lines("d", 3));
 			backend.renderNow();
@@ -544,6 +545,43 @@ describe("TermBackend main surface", () => {
 			backend.renderNow();
 			expect(driver.viewport.slice(-driver.rows)).toEqual([...lines("c", 3), "p0", "p1", ">"]);
 			expect(driver.viewport.length).toBe(driver.rows);
+		} finally {
+			backend.stop();
+		}
+	});
+
+	it("gives a cover a fixed height only while the dock overflows, and its natural height once it fits again", () => {
+		// A painter that fills whatever height it is given, as `cx.height` allows.
+		const heights: (number | undefined)[] = [];
+		defineRolePainter("rows", "test.cover", (node, cx) => {
+			heights.push(cx.height);
+			const own = (node.props() as { lines: readonly string[] }).lines;
+			const rows = cx.height === undefined ? own : Array.from({ length: cx.height }, (_, i) => own[i] ?? "~");
+			return { rows, covering: rows.length };
+		});
+		const driver = new FakeDriver();
+		const cover = signal(["c0"]);
+		const surface = createSurface(() => ({
+			dock: () => [<rows key="cover" role="test.cover" lines={cover()} />, <rows key="composer" lines={[">"]} />],
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		backend.start();
+		const dock = () => driver.viewport.slice(-driver.rows).filter(row => row !== "");
+		try {
+			backend.renderNow();
+			expect(dock()).toEqual(["c0", ">"]);
+			cover.set(lines("c", 8));
+			backend.renderNow();
+			expect(dock()).toEqual([...lines("c", 5), ">"]);
+			expect(heights.at(-1)).toBe(5);
+			cover.set(["c0"]);
+			backend.renderNow();
+			expect(dock()).toEqual(["c0", ">"]);
+			expect(heights.at(-1)).toBeUndefined();
+			const runs = heights.length;
+			backend.renderNow();
+			expect(dock()).toEqual(["c0", ">"]);
+			expect(heights.length).toBe(runs);
 		} finally {
 			backend.stop();
 		}
