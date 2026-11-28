@@ -14,6 +14,7 @@ import { sliceCells, truncate, truncateMiddle, visibleWidth, wrap } from "@oh-my
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import { colorLuma, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils/color";
 import { sanitizeDisplayLine } from "../../../extensibility/inventory/display-text";
+import { formatAiuCredits } from "../../../session/aiu-billing";
 import {
 	activityErrorDetail,
 	activityTotals,
@@ -26,6 +27,7 @@ import {
 	pressureTone,
 	type UsageDashboardModel,
 } from "../../overlays/panels/usage-dashboard-model";
+import { hangingWrap } from "../tools/frame";
 import { bindingGlyph, boxRows, keyGlyph, selectNavGlyphs, termOf } from "./common";
 
 const CARD_MIN_WIDTH = 32;
@@ -116,7 +118,8 @@ function cardLines(
 			const reset = row.resetMs === undefined ? "" : formatDuration(row.resetMs);
 			text = `${bar}${pct}${geometry.resetWidth > 0 ? ` ${theme.fg("dim", reset.padStart(geometry.resetWidth))}` : ""}`;
 		}
-		for (const line of wrap(`${prefix}${text}`, content)) lines.push(`  ${line}`);
+		const hang = " ".repeat(visibleWidth(prefix));
+		for (const line of hangingWrap(prefix, hang, text, content)) lines.push(`  ${line}`);
 	}
 	const hidden = card.windows.length - CARD_MAX_WINDOWS;
 	if (hidden > 0) lines.push(`  ${theme.fg("dim", `+${hidden} more`)}`);
@@ -124,13 +127,20 @@ function cardLines(
 }
 
 function cardsGrid(theme: Theme, model: UsageDashboardModel, inner: number): string[] {
-	if (model.cards.length === 0) return [theme.fg("dim", "No usage data available.")];
+	const lines: string[] = [];
+	const sessionAiu = model.options.sessionAiu;
+	if (sessionAiu) {
+		lines.push(`${theme.fg("muted", "Session AI Credits")}: ${theme.fg("text", formatAiuCredits(sessionAiu, 4))}`);
+		if (sessionAiu.unknownCalls > 0)
+			lines.push(theme.fg("dim", `${sessionAiu.unknownCalls.toLocaleString()} calls without billing frame`));
+		lines.push("");
+	}
+	if (model.cards.length === 0) return [...lines, theme.fg("dim", "No usage data available.")];
 	const active = model.cards.filter(card => !card.idle);
 	const idle = model.cards.filter(card => card.idle);
 	const columns = Math.max(1, Math.floor((inner + CARD_GUTTER) / (CARD_MIN_WIDTH + CARD_GUTTER)));
 	const cardWidth = Math.floor((inner - (columns - 1) * CARD_GUTTER) / columns);
 	const content = Math.max(1, cardWidth - 2);
-	const lines: string[] = [];
 	for (let start = 0; start < active.length; start += columns) {
 		const cards = active.slice(start, start + columns);
 		const windows = cards.map(card => card.windows.slice(0, CARD_MAX_WINDOWS));

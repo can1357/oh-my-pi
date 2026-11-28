@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { Api, Context, Model } from "@oh-my-pi/pi-ai";
+import { type Api, AuthStorage, type Context, type Model, type OAuthCredential } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	hashProviderFileContent,
@@ -7,6 +7,7 @@ import {
 	type ProviderFileClient,
 	type ProviderFileHandle,
 } from "@oh-my-pi/pi-coding-agent/blob-broker/provider-file-types";
+import { resolveProviderFileCredential } from "@oh-my-pi/pi-coding-agent/blob-broker/provider-file-credential";
 import {
 	type ProviderFileClientFactory,
 	ProviderFileManager,
@@ -41,6 +42,37 @@ const openAIModel = testModel("openai-responses", "openai", "https://api.openai.
 const anthropicModel = testModel("anthropic-messages", "anthropic", "https://api.anthropic.com");
 const geminiModel = testModel("google-generative-ai", "google", "https://generativelanguage.googleapis.com/v1beta");
 const unsupportedModel = testModel("openai-responses", "openrouter", "https://openrouter.ai/api/v1");
+
+describe("resolveProviderFileCredential", () => {
+	test("keeps a 1-year Anthropic grant off the Files API but not a regular login", async () => {
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			const login = (access: string, email: string, scope: string): OAuthCredential => ({
+				type: "oauth",
+				access,
+				refresh: "",
+				expires: Date.now() + 3_600_000,
+				accountId: email,
+				email,
+				orgId: `org-${email}`,
+				scope,
+			});
+			await authStorage.credentials.set("anthropic", [
+				login("sk-ant-oat01-regular", "a@example.test", "user:inference user:profile user:file_upload"),
+				login("sk-ant-oat01-year", "b@example.test", "user:inference user:profile"),
+			]);
+			const resolve = (key: string) =>
+				resolveProviderFileCredential({ authStorage, getApiKey: async () => key }, anthropicModel);
+
+			expect(await resolve("sk-ant-oat01-regular")).toBe("sk-ant-oat01-regular");
+			expect(await resolve("sk-ant-oat01-year")).toBeUndefined();
+			// API keys match no stored grant and keep uploading.
+			expect(await resolve("sk-ant-api03-key")).toBe("sk-ant-api03-key");
+		} finally {
+			authStorage.close();
+		}
+	});
+});
 
 function scriptedFetch(responses: readonly Response[]): {
 	readonly fetch: FetchImpl;

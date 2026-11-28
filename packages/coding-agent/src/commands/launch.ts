@@ -3,6 +3,7 @@
  */
 
 import { Command } from "@oh-my-pi/pi-utils/cli";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import { type Args as ParsedArgs, parseArgs, reportCliUsageError } from "../cli/args";
 import { prepareAcpTerminalAuthArgs } from "../modes/acp/terminal-auth";
 import { launchHelp } from "./launch-help";
@@ -35,7 +36,8 @@ export default class Index extends Command {
 			}
 			throw error;
 		}
-		const runRootCommand = await loadRunRootCommand();
+		if (process.env.PI_TIMING) logger.startTiming();
+		const runRootCommand = await logger.time("loadRootCommand", loadRunRootCommand);
 		try {
 			await runRootCommand(parsed, args);
 		} catch (error) {

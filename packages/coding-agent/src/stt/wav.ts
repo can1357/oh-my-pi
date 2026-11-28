@@ -1,3 +1,15 @@
+/** The loudness of float PCM `samples` as their RMS, clamped to 0–1 (0 for no samples or non-finite input). */
+export function rmsLevel(samples: Float32Array): number {
+	if (samples.length === 0) return 0;
+	let sumSquares = 0;
+	for (let index = 0; index < samples.length; index++) {
+		const sample = samples[index] ?? 0;
+		sumSquares += sample * sample;
+	}
+	const level = Math.sqrt(sumSquares / samples.length);
+	return Number.isFinite(level) && level > 0 ? Math.min(1, level) : 0;
+}
+
 /** Convert float PCM (`[-1, 1]`) to 16-bit PCM samples, clamping out-of-range input. */
 export function floatToPcm16(samples: Float32Array, target = new Int16Array(samples.length)): Int16Array {
 	for (let index = 0; index < samples.length; index++) {

@@ -12,17 +12,15 @@ const COPILOT_PREMIUM_MULTIPLIERS: Record<string, number> = {
 import * as path from "node:path";
 import { parseArgs } from "node:util";
 import { discoverAuthStorage } from "@oh-my-pi/pi-ai/auth-broker/discover";
-import type { OAuthAccess } from "@oh-my-pi/pi-ai/auth-storage";
-import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import { getGitLabDuoModels } from "@oh-my-pi/pi-ai/providers/gitlab-duo";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { $env } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../src/build";
-import { isRetiredProvider } from "../src/compat/behavior";
+import { isExcludedModel, isRetiredProvider } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
-import { providerEntries, providerEntry, seedModels } from "../src/compat/providers";
+import { isKimiCodeEndpoint } from "../src/compat/kimi-code";
+import { providerBaseUrl, providerEntries, providerEntry, seedModels } from "../src/compat/providers";
 import type { CompiledProvider } from "../src/compat/types";
-import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { encodeModelCatalog } from "../src/model-catalog-format";
 import { createModelManager } from "../src/model-manager";
 import { resolveModelTokenizer } from "../src/model-tokenizer";
@@ -91,7 +89,7 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
  * runtime discovery is authoritative per credential (mirrors the GitLab Duo
  * fallback-only policy below).
  */
-const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "sambanova", "otari", "modal"]);
+const CREDENTIAL_SCOPED_PROVIDERS = new Set(["arkanecloud", "devin", "sambanova", "otari", "modal", "refuseless"]);
 /**
  * Providers whose authored seed is the complete documented fallback
  * catalog: their previous-snapshot rows are never resurrected, so an id
@@ -147,7 +145,8 @@ function seededProviders(precedence: "upstream" | "seed"): CompiledProvider[] {
 
 /**
  * Restores unfetched rows from a previous generated catalog while pruning
- * providers whose snapshots are no longer valid.
+ * providers whose snapshots are no longer valid and ids `exclude-models` now
+ * drops. The current regen re-adds authored seed rows itself.
  */
 export function mergePreviousSnapshotModels(
 	models: readonly ModelSpec[],
@@ -166,7 +165,8 @@ export function mergePreviousSnapshotModels(
 				!CREDENTIAL_SCOPED_PROVIDERS.has(model.provider) &&
 				!STATIC_SEED_COMPLETE_PROVIDERS.has(model.provider) &&
 				!isRetiredProvider(model.provider) &&
-				!excludedProviders.has(model.provider)
+				!excludedProviders.has(model.provider) &&
+				!isExcludedModel(model.provider, model.id)
 			) {
 				merged.push(model);
 			}
@@ -438,10 +438,29 @@ function applyCodexPricingFallback(models: readonly ModelSpec[]): ModelSpec[] {
  */
 function applyKimiCodeMaxTokens(models: readonly ModelSpec[]): ModelSpec[] {
 	return models.map(model => {
-		if (model.provider !== "kimi-code") return model;
-		const capped = kimiCodeMaxTokens(model.id, model.maxTokens);
+		if (!isKimiCodeEndpoint(model)) return model;
+		const capped = kimiCodeMaxTokens(model.provider, model.id, model.maxTokens);
 		return capped === model.maxTokens ? model : { ...model, maxTokens: capped };
 	});
+}
+
+/**
+ * Both Kimi Code regions serve the same roster from region-scoped hosts, and
+ * generation usually holds a credential for at most one of them. When the
+ * global provider was not discovered live, mirror the mainland `kimi-code`
+ * rows onto the global host so `kimi-code-global` still ships a usable bundled
+ * roster. A live global `/models` snapshot is authoritative and is kept as-is.
+ */
+function projectKimiCodeGlobalModels(models: ModelSpec[]): ModelSpec[] {
+	// The global host is rule-owned (`base-url` node in providers/kimi-code-global.kdl).
+	const globalBaseUrl = providerBaseUrl("kimi-code-global");
+	if (!globalBaseUrl) {
+		throw new Error("kimi-code-global declares no managed base URL (`base-url` in providers/kimi-code-global.kdl)");
+	}
+	const projected = models
+		.filter(model => model.provider === "kimi-code")
+		.map(model => ({ ...model, provider: "kimi-code-global", baseUrl: globalBaseUrl }));
+	return [...models, ...projected];
 }
 
 /**
@@ -455,72 +474,6 @@ function applyFireworksDeepSeekReasoningShape(models: readonly ModelSpec[]): Mod
 		// `.api` equality doesn't narrow the generic; the guard makes this cast sound.
 		return stripFireworksDeepSeekThinkingToggle(model as ModelSpec<"openai-completions">, model.id);
 	});
-}
-
-function normalizeAntigravityEndpoint(models: readonly ModelSpec[]): ModelSpec[] {
-	return models.map(model => {
-		if (model.provider === "google-antigravity" && model.baseUrl) {
-			return { ...model, baseUrl: ANTIGRAVITY_PRIMARY_ENDPOINT };
-		}
-		return model;
-	});
-}
-
-const ANTIGRAVITY_ENDPOINT = ANTIGRAVITY_PRIMARY_ENDPOINT;
-
-async function getOAuthAccessFromStorage(provider: OAuthProvider): Promise<OAuthAccess | null> {
-	try {
-		const authStorage = await discoverAuthStorage();
-		try {
-			// `getOAuthAccess` runs the full AuthStorage refresh pipeline so an
-			// expired-but-refreshable credential gets rotated before discovery,
-			// and identity metadata (accountId/projectId/email) flows through
-			// for Codex/Antigravity downstream calls.
-			return (await authStorage.oauth.access(provider)) ?? null;
-		} finally {
-			authStorage.close();
-		}
-	} catch (err) {
-		console.warn(
-			`Warning: Failed to retrieve credentials for ${provider}:`,
-			err instanceof Error ? err.message : String(err),
-		);
-		return null;
-	}
-}
-
-/**
- * Fetch available Antigravity models from the API using the discovery module.
- * Returns empty array if no auth is available (previous models used as fallback).
- */
-async function fetchAntigravityModels(): Promise<ModelSpec<"google-gemini-cli">[]> {
-	const access = await getOAuthAccessFromStorage("google-antigravity");
-	if (!access) {
-		console.log("No Antigravity credentials found, will use previous models.");
-		console.log("Tip: If you are logged in under a specific profile, run with OMP_PROFILE=<name>.");
-		return [];
-	}
-	try {
-		console.log("Fetching models from Antigravity API...");
-		const discovered = await fetchAntigravityDiscoveryModels({
-			token: access.accessToken,
-			projectId: access.projectId,
-			endpoint: ANTIGRAVITY_ENDPOINT,
-		});
-		if (discovered === null || discovered.rejectedStatus !== undefined) {
-			console.warn("Antigravity API fetch failed, will use previous models");
-			return [];
-		}
-		if (discovered.models.length > 0) {
-			console.log(`Fetched ${discovered.models.length} models from Antigravity API`);
-			return discovered.models;
-		}
-		console.warn("Antigravity API returned no models, will use previous models");
-		return [];
-	} catch (error) {
-		console.error("Failed to fetch Antigravity models:", error);
-		return [];
-	}
 }
 
 /**
@@ -614,8 +567,11 @@ async function generateModels(selectedProvider?: string) {
 	const gitLabDuoModels = getGitLabDuoModels().map(model => toModelSpec(model));
 	// Combine models. stencil.so has priority unless a provider's successful endpoint
 	// discovery is authoritative; those endpoint snapshots replace stencil.so rows.
+	// `exclude-models` filters upstream rows as they enter (here, special
+	// discovery, previous snapshot); authored seed rows never pass through it, so
+	// a family exclusion cannot drop a provider's own seeded row.
 	let allModels = applyGlobalModelsDevFallback(
-		[...bundledModelsDevModels, ...catalogProviderModels, ...gitLabDuoModels],
+		filterModelsDevCatalogRows([...bundledModelsDevModels, ...catalogProviderModels, ...gitLabDuoModels]),
 		modelsDevModels,
 	);
 
@@ -632,7 +588,6 @@ async function generateModels(selectedProvider?: string) {
 	allModels.push(...buildFireworksFastSeed());
 
 	const specialDiscoverySources = [
-		{ label: "Antigravity", providerId: "google-antigravity", authoritative: false, fetch: fetchAntigravityModels },
 		{ label: "Codex", providerId: "openai-codex", authoritative: true, fetch: fetchCodexDiscoveryModels },
 	] as const;
 	const specialDiscoveries = await Promise.all(
@@ -649,7 +604,7 @@ async function generateModels(selectedProvider?: string) {
 	for (const discovery of specialDiscoveries) {
 		if (discovery.models.length > 0) {
 			console.log(`Added ${discovery.models.length} models from ${discovery.label} discovery`);
-			allModels.push(...discovery.models);
+			allModels.push(...filterModelsDevCatalogRows(discovery.models));
 			if (discovery.authoritative) {
 				authoritativeSpecialDiscoveryProviders.add(discovery.providerId);
 			}
@@ -672,12 +627,20 @@ async function generateModels(selectedProvider?: string) {
 		...authoritativeSpecialDiscoveryProviders,
 		...modelsDevSnapshotExcludedProviders,
 		"firepass",
+		// Live-discovered or re-projected from `kimi-code` below; never resurrected from the previous snapshot.
+		"kimi-code-global",
 	]);
 
 	// Previous-snapshot entries may carry an older ThinkingConfig vocabulary;
 	// applyGeneratedModelPolicies re-bakes `thinking` for every model, so the
 	// inbound shape is irrelevant beyond identity/pricing/compat fields.
 	allModels = mergePreviousSnapshotModels(allModels, prevModelsJson, previousSnapshotExcludedProviders);
+	const kimiCodeGlobalDiscovered = catalogProviderModelBatches.some(
+		batch => batch.descriptor.providerId === "kimi-code-global" && batch.succeeded && batch.models.length > 0,
+	);
+	if (!kimiCodeGlobalDiscovered) {
+		allModels = projectKimiCodeGlobalModels(allModels);
+	}
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
 	// Previous-snapshot fallbacks can retain a retired client fingerprint. Force
 	// every bundled Copilot model onto the same identity used by live discovery.
@@ -696,8 +659,6 @@ async function generateModels(selectedProvider?: string) {
 	allModels = applyPricingPeerFallback(allModels);
 	allModels = applyKimiCodeMaxTokens(allModels);
 	allModels = applyFireworksDeepSeekReasoningShape(allModels);
-	allModels = filterModelsDevCatalogRows(allModels);
-	allModels = normalizeAntigravityEndpoint(allModels);
 	// Previous-snapshot fallbacks keep their old baseUrl; re-base every OpenCode
 	// Go row so retained rows follow gateway endpoint moves (#15722). System One
 	// judge rows are not served by the Go gateway; they keep their seeded endpoint.
@@ -707,7 +668,7 @@ async function generateModels(selectedProvider?: string) {
 			: model,
 	);
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
-	// markers ("(latest)"), provider attribution ("(Antigravity)"), and
+	// markers ("(latest)"), and
 	// price/promo tags are model-extrinsic — strip them from the bundle.
 	allModels = allModels.map(model => {
 		const name = cleanModelName(model.name);

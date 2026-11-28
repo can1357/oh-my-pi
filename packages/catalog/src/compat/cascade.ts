@@ -454,11 +454,42 @@ const resolveCache = new LRUCache<string, ResolvedAxes>({ max: 16384 });
 /** Runtime rule per provider id, in registration order ({@link setRuntimeProviderRule}). */
 const runtimeRules = new Map<string, CompiledRule>();
 const rulesChangeListeners: Array<() => void> = [];
+let rulesRevision = 0;
+const catalogAxisScopes = new Map<string, ReadonlySet<string> | null>();
+
+/** Identity of the current rules for consumers caching a resolved model reference. */
+export function cascadeRulesRevision(): number {
+	return rulesRevision;
+}
+
+/** Possible target providers for a catalog axis, or null if a rule is not provider-scoped. */
+export function catalogAxisProviders(axis: string): ReadonlySet<string> | null {
+	const cached = catalogAxisScopes.get(axis);
+	if (cached !== undefined) return cached;
+	const providers = new Set<string>();
+	for (const source of [rules.cascade.rules, runtimeRules.values()]) {
+		for (const rule of source) {
+			if (rule.catalog?.[axis] === undefined) continue;
+			if (!rule.providers) {
+				catalogAxisScopes.set(axis, null);
+				return null;
+			}
+			for (const provider of rule.providers) providers.add(provider);
+		}
+	}
+	catalogAxisScopes.set(axis, providers);
+	return providers;
+}
+
+/** Runtime rules are process-local and must never be baked into a cross-launch catalog. */
+export function hasRuntimeProviderRules(): boolean {
+	return runtimeRules.size !== 0;
+}
 
 /**
  * Adds, replaces, or (with `undefined`) removes the runtime rule assigning
  * `directives` to every model of `provider`: what a KDL `provider "<id>" { … }`
- * block's axis lines would set, keyed by directive (`{ "prompt-perturbation": true }`).
+ * block's axis lines would set, keyed by directive (`{ "requires-native-tools": true }`).
  * The rule ranks as a provider-scoped rule in the runtime layer, so it
  * overrides bundled provider-wide assignments but not model-scoped ones.
  * Clears every memo derived from rule resolution.
@@ -483,6 +514,8 @@ export function setRuntimeProviderRule(
 	}
 	ruleIndex = undefined;
 	resolveCache.clear();
+	rulesRevision++;
+	catalogAxisScopes.clear();
 	for (const listener of rulesChangeListeners) listener();
 }
 
@@ -538,19 +571,29 @@ function cloneAxes(axes: ResolvedAxes): ResolvedAxes {
  * @throws AmbiguousOverlapError when equal-rank rules contest one axis.
  */
 export function resolveCascade(target: ResolveTarget): ResolvedAxes {
-	if (cascadeMemoBypassDepth > 0) {
-		return cloneAxes(resolveRanked(target, rankRelevantRules(getRuleIndex(), prepareTarget(target))));
-	}
+	return cloneAxes(canonicalAxes(target));
+}
+
+/** Caller-owned catalog assignments without copying wire or thinking policy. */
+export function resolveCascadeCatalog(target: ResolveTarget): Record<string, unknown> {
+	return cloneAxisRecord(canonicalAxes(target).catalog);
+}
+
+/** One caller-owned catalog assignment, without cloning unrelated policy. */
+export function resolveCascadeCatalogAxis(target: ResolveTarget, axis: string): unknown {
+	return cloneAxisValue(canonicalAxes(target).catalog[axis]);
+}
+
+/** The cached canonical graph is private; every public lookup copies the part it exposes. */
+function canonicalAxes(target: ResolveTarget): ResolvedAxes {
+	if (cascadeMemoBypassDepth > 0)
+		return resolveRanked(target, rankRelevantRules(getRuleIndex(), prepareTarget(target)));
 	const key = targetKey(target);
 	const cached = resolveCache.get(key);
-	if (cached) {
-		// Nested rule values are applied to mutable compat records; the cached
-		// canonical graph must never escape to those consumers.
-		return cloneAxes(cached);
-	}
+	if (cached) return cached;
 	const resolved = resolveRanked(target, rankPlannedRules(getRuleIndex(), prepareTarget(target)));
 	resolveCache.set(key, resolved);
-	return cloneAxes(resolved);
+	return resolved;
 }
 
 /**

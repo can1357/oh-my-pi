@@ -18,6 +18,7 @@ import type { ShellVizPresentation } from "@oh-my-pi/pi-wire";
 import type { BashStat, BashTerm } from "../../tools/bash";
 import { resultPictures, withoutDrawnPlaceholders } from "./file-common";
 import {
+	bracketed,
 	capLines,
 	frameInner,
 	frameRows,
@@ -66,7 +67,7 @@ export function commandLines(theme: Theme, command: string, prefix: string, lang
 
 function statText(theme: Theme, stat: BashStat): string {
 	const icon = stat.icon ? (stat.icon.includes(".") ? theme.symbols.symbol(stat.icon) : stat.icon) : "";
-	const text = icon ? `${icon} ${stat.text}` : stat.text;
+	const text = icon ? `${icon}${stat.iconSeparator ?? " "}${stat.text}` : stat.text;
 	return theme.fg(stat.color ?? "dim", text);
 }
 
@@ -98,7 +99,7 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 	let header: string | undefined;
 	if (term.header) {
 		const glyph = !term.result
-			? statusIcon(cx, cx.reduceMotion ? "pending" : "running")
+			? statusIcon(cx, cx.spinnerInterval === 0 ? "pending" : "running")
 			: outcome === "success"
 				? theme.fg("accent", theme.symbols.symbol("tool.bash"))
 				: statusIcon(cx, outcome === "running" ? "pending" : outcome === "warning" ? "warning" : "error");
@@ -106,6 +107,13 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 		header = statusLine(theme, line);
 	} else if (term.intent) header = statusLine(theme, { title: term.intent, titleColor: "muted" });
 
+	// Rows naming the call when the frame is cut (headAndTail): the titled edge, else the bare edge and the command.
+	const tags: (string | undefined)[] = [];
+	const named = (rows: string[]): Block => ({
+		rows,
+		heading: header === undefined ? Math.max(1, tags.lastIndexOf("command") + 1) : 1,
+	});
+	const command = { lines: inputRows, tags: inputRows.map(() => "command") };
 	if (!term.result) {
 		// A call sealed while running keeps the time it ran.
 		const elapsed =
@@ -114,15 +122,14 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 			elapsed === undefined || elapsed < 1000
 				? undefined
 				: theme.fg("dim", `elapsed ${clockText(Math.floor(elapsed / 1000) * 1000)}`);
-		return {
-			rows: frameRows(theme, width, {
-				head: header,
-				sections: [{ lines: inputRows }],
-				foot,
-				border: "accent",
-				bg: "toolPendingBg",
-			}),
-		};
+		return named(
+			frameRows(
+				theme,
+				width,
+				{ head: header, sections: [command], foot, border: "accent", bg: "toolPendingBg" },
+				tags,
+			),
+		);
 	}
 
 	const run = node.children()[0];
@@ -137,7 +144,7 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 	const outputLines = output.trim().length > 0 ? ansiLines(output).map(line => theme.fg("toolOutput", line)) : [];
 	const limit = Math.min(term.previewLines ?? PREVIEW_WINDOW_ROWS, PREVIEW_WINDOW_ROWS);
 	const shown = expanded ? outputLines : tailRows(theme, outputLines, limit, frameInner(width));
-	if (term.warning) shown.push(theme.fg("warning", `⟦${term.warning}⟧`));
+	if (term.warning) shown.push(theme.fg("warning", bracketed(theme, term.warning)));
 	const stats = (term.stats ?? []).map(stat => statText(theme, stat));
 	if (term.liveClock) {
 		const seconds = Math.floor(runningMs(props, cx) / 1000);
@@ -146,20 +153,25 @@ function paintBash(node: UiNode, cx: PaintContext): Block {
 	}
 	const border =
 		outcome === "error" ? "error" : outcome === "warning" ? "warning" : outcome === "running" ? "accent" : "dim";
-	return {
-		rows: frameRows(theme, width, {
-			head: header,
-			sections: [
-				{ lines: inputRows },
-				...(cards.length > 0 ? [{ lines: cards }] : []),
-				...((term.sole || printed.trim().length > 0) && shown.length === 0
-					? []
-					: [{ label: theme.fg("toolTitle", "Output"), lines: shown }]),
-			],
-			foot: stats.length > 0 ? stats.join(theme.fg("dim", theme.symbols.symbol("sep.dot"))) : undefined,
-			border,
-		}),
-	};
+	return named(
+		frameRows(
+			theme,
+			width,
+			{
+				head: header,
+				sections: [
+					command,
+					...(cards.length > 0 ? [{ lines: cards }] : []),
+					...((term.sole || printed.trim().length > 0) && shown.length === 0
+						? []
+						: [{ label: theme.fg("toolTitle", "Output"), lines: shown }]),
+				],
+				foot: stats.length > 0 ? stats.join(theme.fg("dim", theme.symbols.symbol("sep.dot"))) : undefined,
+				border,
+			},
+			tags,
+		),
+	);
 }
 
 defineToolLook("bash", { paint: paintBash, margin: true });

@@ -1,8 +1,9 @@
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { MCPProgress } from "../mcp-progress";
 import type { OutputMeta } from "../output-meta-format";
+import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
 import { visibleWidth } from "@oh-my-pi/pi-tui/text/width";
-import { flattenLine, shortenEmbeddedPaths } from "../../utils/render-utils";
+import { shortenEmbeddedPaths } from "../../utils/render-utils";
 import { truncateToWidth } from "../../utils/text-width";
 
 /** Content types in tool results */

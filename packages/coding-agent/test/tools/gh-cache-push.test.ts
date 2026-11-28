@@ -67,7 +67,7 @@ function bash(): BashTool {
 
 async function run(command: string, options: { exitCode?: number; cwd?: string } = {}): Promise<void> {
 	vi.spyOn(bashExecutor, "executeBash").mockResolvedValue(exited(options.exitCode ?? 0));
-	await bash().execute("push", { command, cwd: options.cwd });
+	await bash().execute("push", { command: options.cwd ? `cd ${options.cwd} && ${command}` : command });
 }
 
 beforeEach(async () => {

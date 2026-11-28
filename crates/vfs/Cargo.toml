@@ -18,7 +18,7 @@ tokio-util.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
-xattr = "1.6"
+xattr = "1.7"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [

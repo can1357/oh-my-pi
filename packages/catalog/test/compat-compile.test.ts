@@ -370,6 +370,27 @@ describe("auth grammar", () => {
 		).toThrow(/auth\/x\.kdl:3/);
 	});
 
+	test("connected-name and active-notice compile into auth policy; blank text is rejected", () => {
+		const compiled = compileAuth([
+			{
+				file: "auth/x.kdl",
+				text: 'auth "x" {\n\tname "Sign in to X"\n\tconnected-name "X plan"\n\tactive-notice "Using your X plan"\n}',
+			},
+			order(),
+		]);
+		expect(compiled.providers[0]).toMatchObject({
+			name: "Sign in to X",
+			connectedName: "X plan",
+			activeNotice: "Using your X plan",
+		});
+		expect(() =>
+			compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tconnected-name " "\n}' }, order()]),
+		).toThrow(/auth\/x\.kdl:3/);
+		expect(() =>
+			compileAuth([{ file: "auth/x.kdl", text: 'auth "x" {\n\tname "X"\n\tactive-notice ""\n}' }, order()]),
+		).toThrow(/auth\/x\.kdl:3/);
+	});
+
 	test("auth identity and OAuth env policy preserve explicit false and reject empty token lists", () => {
 		const compiled = compileAuth([
 			{
@@ -480,6 +501,29 @@ describe("provider catalog grammar", () => {
 		expect(() => compileProviders(src(provider("p", ['\tenv "P_KEY"'])))).toThrow(
 			/providers\/p\.kdl:1.*has catalog nodes but no default-model/,
 		);
+	});
+
+	test("provider base-url compiles with an optional environment override", () => {
+		const compiled = compileProviders([
+			{
+				file: "providers/p.kdl",
+				text: provider("p", [
+					'\tdefault-model "m"',
+					'\tbase-url "https://api.example/v1" {\n\t\tenv "P_BASE_URL"\n\t}',
+				]),
+			},
+			{
+				file: "providers/q.kdl",
+				text: provider("q", ['\tdefault-model "m"', '\tbase-url "https://other.example/v1"']),
+			},
+		]);
+
+		expect(compiled.p).toMatchObject({
+			baseUrl: "https://api.example/v1",
+			baseUrlEnv: "P_BASE_URL",
+		});
+		expect(compiled.q).toMatchObject({ baseUrl: "https://other.example/v1" });
+		expect(compiled.q.baseUrlEnv).toBeUndefined();
 	});
 
 	test("runner seeds and per-kind APIs compile without entering the cascade", () => {
@@ -638,6 +682,8 @@ describe("committed rules.json", () => {
 	test("matches a fresh compile of rules/ (run `bun run gen:compat` after editing KDL)", async () => {
 		const fresh = await compileCompatRules(RULES_DIR);
 		expect(fresh).toEqual(committed);
+		const { hash, priceChanges: _dates, ...policy } = fresh;
+		expect(hash).toBe(Bun.hash(JSON.stringify(policy)).toString(36));
 		expect(await Bun.file(AUTH_IDS_PATH).text()).toBe(renderAuthIds(fresh.auth));
 	});
 });

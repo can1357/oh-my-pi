@@ -19,7 +19,9 @@ use crate::sys;
 /// This trait is defined **unconditionally** (in every build, regardless of the
 /// `napi8` feature) so that generic `where T: TypeTag` bounds always type-check.
 /// The actual stamping/checking is performed by [`tag_object`] /
-/// [`validate_type_tag`], which only do real work under the `napi8` feature.
+/// [`validate_type_tag`], which only do real work under the `napi8` feature on
+/// native targets. Other builds check the Rust class recorded when the runtime
+/// wrapped the instance instead (`class_identity.rs`).
 ///
 /// # Opting into a crate-unique salt: `#[napi(type_tag = "…")]`
 ///
@@ -139,9 +141,10 @@ impl<T> MaybeTypeTag for T {}
 /// Tagging is a **no-op on wasm**. The content-derived tag itself would be valid
 /// on wasm (it keys on `crate@version::module_path::ClassName`, not a
 /// linear-memory offset), but Node-API type-tag support on wasm/emnapi is
-/// host-dependent (the `napi_type_tag_object` extern may be unresolved), so the
-/// binding keeps its pre-tag behavior on wasm (blind cast, or `instanceof` under
-/// `strict`) — no worse than before this feature, and no unresolved-symbol risk.
+/// host-dependent (the `napi_type_tag_object` extern may be unresolved), so no
+/// tag is used on wasm (no unresolved-symbol risk). There, and on builds without
+/// `napi8`, the runtime checks the Rust class recorded when it wrapped the
+/// instance instead (`class_identity.rs`).
 #[cfg(all(feature = "napi8", not(target_family = "wasm")))]
 pub unsafe fn tag_object(
   env: sys::napi_env,
@@ -178,9 +181,10 @@ pub unsafe fn tag_object(
 ///
 /// The tag stamp is a **no-op** on builds without `napi8` and on **all** wasm
 /// targets (same story as [`tag_object`]); on those targets this is exactly a
-/// bare `napi_wrap`. Passes `None` as the finalizer, so the JS engine never owns
-/// `native` — the caller owns its cleanup in every case (on success, later via
-/// `napi_remove_wrap`; on error, immediately).
+/// bare `napi_wrap`, and the runtime class check accepts the object because the
+/// runtime did not wrap it. Passes `None` as the finalizer, so the JS engine
+/// never owns `native` — the caller owns its cleanup in every case (on success,
+/// later via `napi_remove_wrap`; on error, immediately).
 ///
 /// The wrap + tag are **atomic**: if tagging fails after the wrap succeeded, the
 /// wrap is rolled back (`napi_remove_wrap`) before returning the error, so
@@ -238,16 +242,17 @@ pub unsafe fn wrap_and_tag<T: TypeTag>(
 /// [`tag_object`]: it is invoked from derive-generated code (param `&T` /
 /// `&mut T` checks) that expands in the consumer crate, so the feature gate
 /// must live inside napi. On builds without `napi8` this is a no-op that
-/// returns `Ok(())`, preserving today's behavior (blind cast, or `instanceof`
-/// under `strict`).
+/// returns `Ok(())`; the runtime checks the Rust class recorded at wrap time
+/// instead (`class_identity.rs`, reached from generated code through
+/// `register_native_borrow_with_value` and the other unwrap helpers) and
+/// returns the same error.
 ///
 /// # Note on wasm
 ///
 /// The check is a **no-op on wasm** for the same reason stamping is (see
 /// [`tag_object`]): Node-API type-tag support on wasm/emnapi is host-dependent
 /// (the `napi_check_object_type_tag` extern may be unresolved). On wasm the
-/// binding keeps its pre-tag behavior (blind cast, or `instanceof` under
-/// `strict`).
+/// runtime checks the recorded Rust class instead, as on builds without `napi8`.
 #[cfg(all(feature = "napi8", not(target_family = "wasm")))]
 pub unsafe fn validate_type_tag(
   env: sys::napi_env,
@@ -263,10 +268,7 @@ pub unsafe fn validate_type_tag(
   if matches {
     Ok(())
   } else {
-    Err(crate::Error::new(
-      crate::Status::InvalidArg,
-      format!("Value is not an instance of class `{class_name}`"),
-    ))
+    Err(super::class_identity::wrong_class_error(class_name))
   }
 }
 

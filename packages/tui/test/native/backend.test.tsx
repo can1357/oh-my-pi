@@ -329,6 +329,32 @@ describe("native reconciler", () => {
 		expect(h.ops()).toEqual([["set", "main/0/0", { title: "two" }]]);
 	});
 
+	it("morphs a re-created node that moved up since it was first described", async () => {
+		const before = signal(["x", "y", "z"]);
+		const text = signal("a");
+		const h = await mount(() => ({
+			main: (
+				<>
+					<For each={before}>{t => <text text={t} />}</For>
+					{() => (
+						<col>
+							<text text={text()} />
+						</col>
+					)}
+				</>
+			),
+		}));
+		// The col leaves index 3 for index 2, whose id `main/2` the block after `x` still holds.
+		before.set(["y", "z"]);
+		h.settle();
+		expect(h.ops()).toEqual([["del", "main/0"]]);
+		for (const next of ["ab", "abc"]) {
+			text.set(next);
+			h.settle();
+			expect(h.ops()).toEqual([["text", "main/3/0", "append", next.slice(-1)]]);
+		}
+	});
+
 	it("re-adds a node whose kind changed under a fresh id, deleting the old one last", async () => {
 		const code = signal(false);
 		const h = await mount(() => ({
@@ -611,7 +637,9 @@ describe("native reconciler", () => {
 	});
 
 	it("sends a canvas as rows painted at the surface width, repainting on resize", async () => {
-		const h = await mount(() => ({ main: <canvas paint={width => ["=".repeat(width)]} /> }), { cols: 6 });
+		const h = await mount(() => ({ main: <canvas paint={width => ["=".repeat(width)]} onMouse={() => true} /> }), {
+			cols: 6,
+		});
 		expect(h.tern.doc("s:t").tree("main/0")).toEqual({ id: "main/0", k: "rows", p: { cols: 6, lines: ["======"] } });
 		h.tern.event({ ev: "resize", cols: 3 });
 		h.settle();
@@ -979,6 +1007,320 @@ describe("native pacing and transport", () => {
 		h.clock.advance(1);
 		expect(h.tern.frames.length).toBe(sent + 1);
 		expect(h.tern.doc("s:t").tree("main/0").p).toEqual({ text: "ab" });
+	});
+
+	it("lets a keystroke echo overdraw stalled credits while transcript changes still wait", async () => {
+		const transcript = signal("");
+		const text = signal("");
+		let field: UiNode | undefined;
+		const h = await mount(
+			() => ({
+				main: <text>{transcript}</text>,
+				dock: (
+					<editor
+						ref={n => (field = n)}
+						text={text}
+						onEdit={e => {
+							if (e.type === "edit") text.set(text().slice(0, e.from) + e.text + text().slice(e.to));
+						}}
+					/>
+				),
+			}),
+			{ credits: 1, autoAck: false },
+		);
+		h.surface.focus(field!);
+		for (let i = 0; i < 2; i++) {
+			h.tern.ackAll();
+			h.settle();
+		}
+		const type = (ch: string) => {
+			h.tern.input({ type: "key", key: { id: ch, text: ch, kind: "press", raw: ch } });
+			h.settle();
+		};
+		// A streaming transcript spends the only credit, and Tern stops acknowledging.
+		transcript.set("one");
+		h.settle();
+		const sent = h.tern.frames.length;
+		transcript.set("one two");
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent);
+		// The echo goes out at once, carrying the held transcript change with it.
+		type("h");
+		expect(h.tern.frames.length).toBe(sent + 1);
+		expect(h.tern.doc("s:t").shape("dock")).toEqual([{ k: "editor", p: { text: "h" } }]);
+		expect(h.tern.doc("s:t").tree("main/0").p).toEqual({ text: "one two" });
+		// A transcript change alone still waits for an ack.
+		transcript.set("one two three");
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 1);
+		// Echoes run two frames past the credit, then wait until the oldest stops counting (250 ms), not 5 s.
+		type("i");
+		expect(h.tern.frames.length).toBe(sent + 2);
+		type("!");
+		expect(h.tern.frames.length).toBe(sent + 2);
+		h.clock.advance(249);
+		expect(h.tern.frames.length).toBe(sent + 2);
+		h.clock.advance(1);
+		expect(h.tern.frames.length).toBe(sent + 3);
+		expect(h.tern.doc("s:t").shape("dock")).toEqual([{ k: "editor", p: { text: "hi!" } }]);
+	});
+
+	it("lets the echo of a Tern edit overdraw stalled credits", async () => {
+		const text = signal("");
+		let field: UiNode | undefined;
+		const h = await mount(
+			() => ({
+				main: <text>streaming</text>,
+				dock: (
+					<editor
+						ref={n => (field = n)}
+						text={text}
+						onEdit={e => {
+							if (e.type === "edit") text.set(text().slice(0, e.from) + e.text + text().slice(e.to));
+						}}
+					/>
+				),
+			}),
+			{ credits: 1, autoAck: false },
+		);
+		// The first frame holds the only credit and is never acknowledged.
+		const sent = h.tern.frames.length;
+		h.tern.event({
+			ev: "edit",
+			sf: "s:t",
+			id: h.backend.idOf(field!)!,
+			from: 0,
+			to: 0,
+			text: "h",
+			cursor: 1,
+			len: 0,
+		});
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 1);
+		expect(h.tern.doc("s:t").shape("dock")).toEqual([{ k: "editor", p: { text: "h" } }]);
+	});
+
+	it("lets the echo of a click overdraw stalled credits, so a form it closes leaves Tern at once", async () => {
+		const open = signal(true);
+		const h = await mount(
+			() => ({
+				main: [
+					<text>streaming</text>,
+					<Show when={open}>
+						<col key="form">
+							<row key="actions">
+								<button key="submit" text="Submit" onAction={() => open.set(false)} />
+							</row>
+						</col>
+					</Show>,
+				],
+			}),
+			{ credits: 1, autoAck: false },
+		);
+		// The first frame holds the only credit and is never acknowledged.
+		const doc = h.tern.doc("s:t");
+		expect(doc.nodes.has("main/form/actions/submit")).toBe(true);
+		h.tern.event({ ev: "action", sf: "s:t", id: "main/form/actions/submit", act: "click" });
+		h.settle();
+		// Held behind the credit, the form would stay on screen: every further click would name a node
+		// the program already let go of.
+		expect(doc.nodes.has("main/form")).toBe(false);
+	});
+
+	it("lends no overdraft to a transcript change after input that changed nothing", async () => {
+		const transcript = signal("");
+		const text = signal("");
+		let field: UiNode | undefined;
+		const h = await mount(
+			() => ({
+				main: <text>{transcript}</text>,
+				dock: (
+					<editor
+						ref={n => (field = n)}
+						text={text}
+						onEdit={e => {
+							if (e.type === "edit") text.set(text().slice(0, e.from) + e.text + text().slice(e.to));
+						}}
+					/>
+				),
+			}),
+			{ credits: 1, autoAck: false },
+		);
+		h.surface.focus(field!);
+		for (let i = 0; i < 2; i++) {
+			h.tern.ackAll();
+			h.settle();
+		}
+		const left = () => {
+			h.tern.input({ type: "key", key: { id: "left", kind: "press", raw: "\x1b[D" } });
+			h.settle();
+		};
+		// A streaming transcript spends the only credit, and Tern stops acknowledging.
+		transcript.set("one");
+		h.settle();
+		const sent = h.tern.frames.length;
+		// Left at the start of an empty editor, and a Tern caret move to where the caret is, change nothing.
+		left();
+		h.tern.event({ ev: "edit", sf: "s:t", id: h.backend.idOf(field!)!, from: 0, to: 0, text: "", cursor: 0, len: 0 });
+		h.settle();
+		transcript.set("one two");
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent);
+		// Nor does a no-op key typed while that transcript change is held.
+		left();
+		transcript.set("one two three");
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent);
+		// A key that changes the editor still echoes at once, carrying the held transcript with it.
+		h.tern.input({ type: "key", key: { id: "h", text: "h", kind: "press", raw: "h" } });
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 1);
+		expect(h.tern.doc("s:t").tree("main/0").p).toEqual({ text: "one two three" });
+	});
+
+	it("echoes a key typed while a split redraw is in flight once the split is out", async () => {
+		const replace = signal(false);
+		const block = "界".repeat(3 * 1024 * 1024);
+		const text = signal("");
+		let field: UiNode | undefined;
+		const h = await mount(
+			() => {
+				const a = <text key="a">{block}</text>;
+				const b = <text key="b">{block}</text>;
+				const c = <text key="c">{block}</text>;
+				return {
+					main: () => (replace() ? [a, b, c] : []),
+					dock: (
+						<editor
+							ref={n => (field = n)}
+							text={text}
+							onEdit={e => {
+								if (e.type === "edit") text.set(text().slice(0, e.from) + e.text + text().slice(e.to));
+							}}
+						/>
+					),
+				};
+			},
+			{ credits: 1, autoAck: false },
+		);
+		h.surface.focus(field!);
+		for (let i = 0; i < 2; i++) {
+			h.tern.ackAll();
+			h.settle();
+		}
+		const sent = h.tern.frames.length;
+		// A redraw over the frame limit goes out in two frames; the second waits for the first's ack.
+		replace.set(true);
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 1);
+		// A key typed meanwhile waits behind the split.
+		h.tern.input({ type: "key", key: { id: "h", text: "h", kind: "press", raw: "h" } });
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 1);
+		// The ack releases the rest of the split, and the echo follows it without waiting for another ack.
+		h.tern.ackAll();
+		h.settle();
+		expect(h.tern.frames.length).toBe(sent + 3);
+		expect(h.tern.doc("s:t").shape("dock")).toEqual([{ k: "editor", p: { text: "h" } }]);
+	});
+
+	it("reopens a lost surface and redraws it, ignoring late errors for frames from the old surface", async () => {
+		const text = signal("before");
+		const h = await mount(() => ({ main: <text>{text}</text> }));
+		h.tern.docs.delete("s:t");
+		text.set("after");
+		h.settle();
+		const error = { ev: "error", sf: "s:t", s: h.tern.frames.at(-1)!.s, msg: "unknown surface s:t" } as const;
+		h.tern.event(error);
+		h.settle();
+		const recovered = h.tern.doc("s:t");
+		expect(recovered.shape("main")).toEqual([{ k: "text", p: { text: "after" } }]);
+		h.tern.event(error);
+		text.set("later");
+		h.settle();
+		expect(recovered.shape("main")).toEqual([{ k: "text", p: { text: "later" } }]);
+	});
+
+	it("stops sending after a rejected reopen, even across credit resets, until a new surface is requested", async () => {
+		const text = signal("before");
+		const h = await mount(() => ({ main: <text>{text}</text> }), { credits: 1, autoAck: false });
+		h.tern.ackAll();
+		h.settle();
+		h.tern.docs.delete("s:t");
+		text.set("lost");
+		h.settle();
+		const rejected = h.tern.frames.at(-1)!.s;
+		h.tern.event({ ev: "error", sf: "s:t", s: rejected, msg: "unknown surface s:t" });
+		h.settle();
+		const retry = h.tern.frames.at(-1)!.s;
+		expect(retry).toBeGreaterThan(rejected);
+
+		h.tern.docs.delete("s:t");
+		h.tern.event({ ev: "ack", sf: "s:t", s: rejected });
+		h.tern.event({ ev: "error", sf: "s:t", s: retry, msg: "unknown surface s:t" });
+		h.settle();
+		for (const value of ["while blocked", "latest"]) {
+			text.set(value);
+			h.clock.advance(5000);
+			h.settle();
+		}
+		expect(h.tern.frames.at(-1)!.s).toBe(retry);
+		expect(h.tern.docs.has("s:t")).toBe(false);
+
+		h.tern.event({ ev: "gone", ids: ["s:t"] });
+		h.settle();
+		expect(regions(h, "main")).toEqual([{ k: "text", p: { text: "latest" } }]);
+	});
+
+	it("redraws a large replacement transcript in UTF-8-bounded frames", async () => {
+		const replace = signal(false);
+		const block = "界".repeat(3 * 1024 * 1024);
+		const h = await mount(
+			() => {
+				const old = (
+					<card key="old" ref={settle}>
+						<text>Old chat</text>
+					</card>
+				);
+				const removed = (
+					<text key="removed" ref={settle}>
+						Removed from the new view
+					</text>
+				);
+				const a = <text key="a">{block}</text>;
+				const b = <text key="b">{block}</text>;
+				const c = <text key="c">{block}</text>;
+				return { main: () => (replace() ? [a, old, b, c] : [removed, old]) };
+			},
+			{ credits: 3, autoAck: false },
+		);
+		const start = h.tern.received.length;
+		h.tern.ackAll();
+		replace.set(true);
+		h.settle();
+		const frameSizes = () =>
+			h.tern.received
+				.slice(start)
+				.filter(m => m.verb === "f")
+				.map(m => Buffer.byteLength(m.body));
+		expect(Math.max(...frameSizes())).toBeLessThanOrEqual(24 * 1024 * 1024);
+		expect(frameSizes()).toHaveLength(1);
+
+		// Retention can remove both a queued insertion anchor and a row about to be deleted.
+		const doc = h.tern.doc("s:t");
+		expect(
+			doc.apply([
+				["del", "main/old"],
+				["del", "main/removed"],
+			]),
+		).toEqual([]);
+		h.tern.event({ ev: "gone", sf: "s:t", ids: ["main/old", "main/removed"] });
+		h.tern.ackAll();
+		h.settle();
+		expect(frameSizes()).toHaveLength(2);
+		expect(Math.max(...frameSizes())).toBeLessThanOrEqual(24 * 1024 * 1024);
+		expect(doc.tree("main").c?.map(node => node.id)).toEqual(["main/a", "main/b", "main/c"]);
+		expect(h.tern.errors).toEqual([]);
 	});
 
 	it("chunks frames over the negotiated APC limit", async () => {

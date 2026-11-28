@@ -6,6 +6,7 @@ import { __resetDirsFromEnvForTests, getCustomThemesDir, removeWithRetries, setA
 import { createRoot, effect } from "@oh-my-pi/pi-tui";
 import {
 	builtinThemes,
+	CONSERVATIVE_EMOJI,
 	currentTheme,
 	loadThemeSync,
 	type ResolvedTheme,
@@ -13,9 +14,9 @@ import {
 	ThemeController,
 } from "@oh-my-pi/pi-tui/theme/index";
 
-const TRUECOLOR_DARK = { truecolor: true, colors: 16_777_216, dark: true } as const;
-const TRUECOLOR_LIGHT = { truecolor: true, colors: 16_777_216, dark: false } as const;
-const PALETTE_DARK = { truecolor: false, colors: 256, dark: true } as const;
+const TRUECOLOR_DARK = { truecolor: true, colors: 16_777_216, dark: true, emoji: CONSERVATIVE_EMOJI } as const;
+const TRUECOLOR_LIGHT = { truecolor: true, colors: 16_777_216, dark: false, emoji: CONSERVATIVE_EMOJI } as const;
+const PALETTE_DARK = { truecolor: false, colors: 256, dark: true, emoji: CONSERVATIVE_EMOJI } as const;
 
 const originalAgentDirEnv = process.env.PI_CODING_AGENT_DIR;
 let tempAgentDir: string;
@@ -82,6 +83,18 @@ describe("ThemeController", () => {
 		expect(published).toHaveLength(2);
 	});
 
+	it("re-resolves symbols when the terminal's emoji support changes", async () => {
+		const themes = controller();
+		themes.initSync(TRUECOLOR_DARK);
+		expect(published.at(-1)!.symbols.symbol("status.warning")).toBe("▲");
+		await themes.applyCapabilities({ ...TRUECOLOR_DARK, emoji: { vs16Wide: true, bareFits: true } });
+		expect(published.at(-1)!.symbols.symbol("status.warning")).toBe("⚠");
+		expect(published.at(-1)!.symbols.symbol("tool.irc")).toBe("✉\uFE0F");
+		// An equal support value publishes nothing.
+		await themes.applyCapabilities({ ...TRUECOLOR_DARK, emoji: { vs16Wide: true, bareFits: true } });
+		expect(published).toHaveLength(2);
+	});
+
 	it("leaves auto mode on an explicit switch and returns on enableAuto", async () => {
 		const themes = controller();
 		themes.initSync(TRUECOLOR_DARK);
@@ -132,7 +145,7 @@ describe("ThemeController", () => {
 		expect(published[0]!.name).toBe("dark");
 	});
 
-	// Real file-system events: the watcher reacts to the OS, which fake timers cannot drive.
+	// Real stat polls: they run on real timers, which fake timers cannot drive.
 	it("reloads a watched custom theme file", async () => {
 		const file = path.join(getCustomThemesDir(), "live.json");
 		await fs.mkdir(getCustomThemesDir(), { recursive: true });
@@ -147,8 +160,8 @@ describe("ThemeController", () => {
 			const reloaded = Promise.withResolvers<ResolvedTheme>();
 			onPublish = reloaded.resolve;
 			json.colors.accent = "#010203";
-			// File-system notifications can be dropped or coalesced under load (and on network mounts):
-			// rewrite until the watcher reports the change, as an editor saving again would.
+			// A write that lands before the poll's first stat becomes its baseline:
+			// rewrite until the poll reports the change, as an editor saving again would.
 			let published: ResolvedTheme | undefined;
 			void reloaded.promise.then(theme => {
 				published = theme;

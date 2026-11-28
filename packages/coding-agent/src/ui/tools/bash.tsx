@@ -13,6 +13,7 @@ import { replaceTabs } from "@oh-my-pi/pi-tui/text/width";
 import type { ShellVizPresentation } from "@oh-my-pi/pi-wire";
 import type { OutputMeta } from "../../tools/output-meta-format";
 import { stripOutputNotice, stripTrailingNotice } from "../../tools/output-meta-format";
+import { formatExitCodeNotice, formatWallTimeNotice } from "../../tools/details/bash";
 import { resultText } from "./default";
 import type { ToolHead, ToolPresenter, ToolResult, ToolView, ToolViewState } from "./contract";
 import { registerToolPresenter } from "./registry";
@@ -99,6 +100,8 @@ function isSoleInvocation(command: string | undefined, tool: string): boolean {
 /** A footer fact of the terminal look: an icon (symbol key) and text, dim unless `color`. */
 export interface BashStat {
 	readonly icon?: string;
+	/** Separator between the icon and text; defaults to a space. */
+	readonly iconSeparator?: string;
 	readonly text: string;
 	readonly color?: string;
 }
@@ -239,15 +242,14 @@ function stripNotices(raw: string, details: BashDetails | undefined): { text: st
 	let text =
 		job?.state === "running"
 			? stripTrailingNotice(raw, line => {
-					const prefix = `Backgrounded as job ${job.jobId}`;
-					return line.startsWith(prefix) && (line[prefix.length] === ";" || line[prefix.length] === " ");
+					const prefix = `[backgrounded as ${job.jobId}`;
+					return line.startsWith(prefix) && (line[prefix.length] === "," || line[prefix.length] === " ");
 				})
 			: raw;
 	text = stripOutputNotice(text, details?.meta);
-	if (details?.exitCode !== undefined)
-		text = stripTrailingNotice(text, `Command exited with code ${details.exitCode}`);
+	if (details?.exitCode !== undefined) text = stripTrailingNotice(text, formatExitCodeNotice(details.exitCode));
 	if (details?.wallTimeMs !== undefined && details.wallTimeNoticeEmitted !== false)
-		text = stripTrailingNotice(text, `Wall time: ${(details.wallTimeMs / 1000).toFixed(2)} seconds`);
+		text = stripTrailingNotice(text, formatWallTimeNotice(details.wallTimeMs));
 	return stripRawOutputNotice(text);
 }
 
@@ -313,7 +315,7 @@ function footerStats(
 					? { icon: "status.warning", text: "ready timed out" }
 					: { icon: "status.error", text: "not ready" },
 		);
-		if (service.pid !== undefined) stats.push({ text: `#${service.pid}` });
+		if (service.pid !== undefined) stats.push({ icon: "icon.pid", iconSeparator: "", text: String(service.pid) });
 	}
 	const timeoutDisabled = details?.timeoutDisabled === true || contextTimeout === 0;
 	const timeoutSeconds = timeoutDisabled ? undefined : (details?.timeoutSeconds ?? contextTimeout);
@@ -564,7 +566,6 @@ export function shellPresenter<TArgs>(config: ShellConfig<TArgs>): ToolPresenter
 /** Shell args of the `bash` tool. */
 export interface BashArgs {
 	readonly command?: string;
-	readonly cwd?: string;
 	readonly env?: Record<string, unknown>;
 	readonly timeout?: number;
 	readonly name?: string;
@@ -573,7 +574,6 @@ export interface BashArgs {
 export const bashPresenter = shellPresenter<BashArgs>({
 	title: args => (args?.name ? `Bash · ${String(args.name)}` : "Bash"),
 	command: args => args?.command,
-	cwd: args => args?.cwd,
 	env: args => args?.env,
 	header: false,
 });

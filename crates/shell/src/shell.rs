@@ -11,7 +11,7 @@ use std::{
 	path::Path,
 	sync::{
 		Arc,
-		atomic::{AtomicBool, Ordering},
+		atomic::{AtomicBool, AtomicU64, Ordering},
 	},
 	time::Duration,
 };
@@ -70,20 +70,40 @@ impl ShellSessionCore {
 	}
 }
 
+/// The abort token of the run that holds the session, tagged with that run's
+/// id: a run's cleanup runs after it released the session, so by then a
+/// queued run may have published its own token, which the cleanup must keep.
 #[derive(Clone, Default)]
-struct ShellAbortState(Arc<TokioMutex<Option<AbortToken>>>);
+struct ShellAbortState {
+	next_run: Arc<AtomicU64>,
+	current:  Arc<TokioMutex<Option<(u64, AbortToken)>>>,
+}
 
 impl ShellAbortState {
-	async fn set(&self, abort_token: AbortToken) {
-		*self.0.lock().await = Some(abort_token);
+	/// A fresh id to publish and clear a run's token under.
+	fn next_run(&self) -> u64 {
+		self.next_run.fetch_add(1, Ordering::Relaxed)
 	}
 
-	async fn clear(&self) {
-		*self.0.lock().await = None;
+	async fn set(&self, run: u64, abort_token: AbortToken) {
+		*self.current.lock().await = Some((run, abort_token));
+	}
+
+	/// Drop `run`'s token, unless another run's has replaced it.
+	async fn clear(&self, run: u64) {
+		let mut current = self.current.lock().await;
+		if current.as_ref().is_some_and(|(owner, _)| *owner == run) {
+			*current = None;
+		}
 	}
 
 	async fn abort(&self) {
-		let abort_token = self.0.lock().await.clone();
+		let abort_token = self
+			.current
+			.lock()
+			.await
+			.as_ref()
+			.map(|(_, token)| token.clone());
 		if let Some(abort_token) = abort_token {
 			abort_token.abort(AbortReason::Signal);
 		}
@@ -443,6 +463,20 @@ impl Shell {
 			.map_or_else(Vec::new, |active| active.children.pids())
 	}
 
+	/// Every live external the session holds, in or between runs, with
+	/// whether it runs in a detached (`nohup`) tree
+	/// ([`crate::session::Children::held`]): the background jobs earlier runs
+	/// left running included. Empty once the session is gone. Never blocks on
+	/// the session lock held by a running command.
+	#[must_use]
+	pub fn held_processes(&self) -> Vec<(i32, bool)> {
+		self
+			.active
+			.lock()
+			.as_ref()
+			.map_or_else(Vec::new, |active| active.children.held())
+	}
+
 	/// Number of live external background jobs tracked by the persistent
 	/// session. The host retains a per-call shell while this is nonzero, since
 	/// dropping it would kill its children. Exited children are reaped
@@ -625,6 +659,7 @@ async fn run_shell_session(
 	ct: &mut CancelToken,
 ) -> Result<ShellRunResult> {
 	let tokio_cancel = CancellationToken::new();
+	let run = abort_state.next_run();
 	let mut run_task = tokio::spawn({
 		let session = session.clone();
 		let abort_state = abort_state.clone();
@@ -640,7 +675,7 @@ async fn run_shell_session(
 				*active.lock() = Some(SessionHandles::of(&core.session));
 				session_guard.insert(core)
 			};
-			abort_state.set(at).await;
+			abort_state.set(run, at).await;
 			if process {
 				run_process_command(core, &run_config, tokio_cancel).await
 			} else {
@@ -664,7 +699,7 @@ async fn run_shell_session(
 				run_task.abort();
 				let _ = run_task.await;
 			}
-			abort_state.clear().await;
+			abort_state.clear(run).await;
 			// Use try_lock to avoid deadlocking if another task holds the session.
 			// If we can't acquire the lock, the session will be cleaned up when the
 			// holding task finishes.
@@ -677,7 +712,7 @@ async fn run_shell_session(
 	};
 	let res =
 		res.unwrap_or_else(|err| Err(Error::msg(format!("Shell execution task failed: {err}"))));
-	abort_state.clear().await;
+	abort_state.clear(run).await;
 
 	// `exit`, errexit, or a stray top-level `return`/`break` ends this command,
 	// not the session: the next run keeps the variables, functions, and options
@@ -2230,7 +2265,9 @@ async fn read_output_buffered(
 #[cfg(unix)]
 fn register_nonblocking_pipe(reader: fs::File) -> io::Result<tokio::io::unix::AsyncFd<fs::File>> {
 	set_nonblocking(&reader)?;
-	tokio::io::unix::AsyncFd::new(reader)
+	// SAFETY: the `File` keeps its descriptor open and unchanged for the
+	// `AsyncFd`'s lifetime.
+	Ok(unsafe { tokio::io::unix::AsyncFd::register(reader) }?)
 }
 
 #[cfg(unix)]

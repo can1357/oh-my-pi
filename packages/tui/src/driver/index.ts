@@ -37,12 +37,14 @@ export interface TerminalDriverOptions extends ProcessInputOptions {
 	readonly sink?: OutputSink | StreamSink;
 	/** Retained history after a settled resize. Default: `PI_TUI_RESIZE_SCROLLBACK`, else `preserve`. */
 	readonly resizeScrollback?: ResizeScrollback;
-	/** Repaint in place after resizes. Default: `PI_TUI_RESIZE_IN_PLACE`, else Warp outside multiplexers/ConPTY. */
+	/** Repaint in place after resizes. Default: `PI_TUI_RESIZE_IN_PLACE`, else Warp outside multiplexers/ConPTY, or Herdr (see #8433: an alt-screen switch toggles Herdr's scrollbar gutter and width, looping the resize). */
 	readonly inPlaceResize?: boolean;
 	/** Quiet window ending a resize burst, in ms. */
 	readonly resizeSettleMs?: number;
 	/** Images drawn at once (see `TerminalImages`). */
 	readonly imageBudget?: number;
+	/** A fullscreen row session will not use the shell's cursor until it first writes inline. */
+	readonly deferShellLine?: () => boolean;
 	/** The input half (tests). Default: {@link createProcessInput}. */
 	readonly input?: (port: TerminalPort) => TerminalInput;
 }
@@ -58,7 +60,9 @@ export interface ProcessTerminalDriver extends TerminalDriver, Pick<TerminalInpu
 	 * `replay` batch with the complete ledger at the current width under a fresh id.
 	 */
 	onReplay(listener: () => void): () => void;
-	setMouse(tracking: MouseTracking): void;
+	/** Change the retained-history policy for resizes that settle from now on (`tui.resizeScrollback` edits). */
+	setResizeScrollback(mode: ResizeScrollback): void;
+	setMouse(tracking: MouseTracking, reportFocus?: boolean): void;
 	refreshAppearance(): void;
 	/** `sequence` wrapped so it reaches the outer terminal through a multiplexer. */
 	passthrough(sequence: string): string;
@@ -140,13 +144,16 @@ export function createTerminalDriver(
 	const capabilities: Signal<TerminalCapabilities> = signal(terminal.capabilities);
 	const replayListeners = new Set<() => void>();
 	const inputListeners = new Set<(event: InputEvent) => void>();
+	// DOM dispatch semantics: a listener subscribed while an event is delivered waits for the next
+	// one, and one unsubscribed before its turn is skipped. A key that opens a page (Esc Esc's
+	// rewind) starts that page's backend mid-dispatch; a live Set would hand it the same key.
 	const deliver = (event: InputEvent): void => {
-		for (const listener of inputListeners) listener(event);
+		for (const listener of Array.from(inputListeners)) if (inputListeners.has(listener)) listener(event);
 	};
 	terminal.onInput(deliver);
 	const resizeListeners = new Set<(columns: number, rows: number) => void>();
 
-	const resizeScrollback =
+	let resizeScrollback =
 		options.resizeScrollback ?? SCROLLBACK_MODES[env.PI_TUI_RESIZE_SCROLLBACK ?? ""] ?? "preserve";
 	const forcedInPlace = options.inPlaceResize ?? envFlag(env.PI_TUI_RESIZE_IN_PLACE);
 	const multiplexed = (): boolean => terminal.identity.multiplexer !== null;
@@ -154,11 +161,13 @@ export function createTerminalDriver(
 
 	const kittyReady = signal(true);
 	let cancelKittyHold: (() => void) | undefined;
+	const screenRows = signal(terminal.rows);
 	const images = new TerminalImages({
 		capabilities,
 		placeholders: () => kittyPlaceholdersSupported(terminal.identity.id, env),
 		budget: options.imageBudget,
 		kittyReady,
+		screenRows,
 	});
 	const tmux = (): boolean => terminal.identity.multiplexer === "tmux";
 	const disconnectListeners = new Set<(reason: string) => void>();
@@ -201,14 +210,14 @@ export function createTerminalDriver(
 		stallPoll = undefined;
 		watchdog.reset();
 	};
-	const sampleStall = (): void => {
-		if (!stream || dead) return;
-		if (watchdog.sample(stream.pending(), performance.now())) {
+	const sampleStall = (pending: number): void => {
+		if (dead) return;
+		if (watchdog.sample(pending, performance.now())) {
 			disconnected("output stalled");
 			return;
 		}
 		if (watchdog.armed && !stallPoll) {
-			stallPoll = setInterval(sampleStall, STALL_POLL_MS);
+			stallPoll = setInterval(() => sampleStall(stream!.pending()), STALL_POLL_MS);
 			stallPoll.unref?.();
 		} else if (!watchdog.armed && stallPoll) {
 			stopStallPoll();
@@ -218,8 +227,9 @@ export function createTerminalDriver(
 	let deferred = false;
 	const backlogged = (): boolean => {
 		if (!stream) return false;
-		sampleStall();
-		if (stream.pending() <= BACKLOG_DEFER_BYTES) return false;
+		const pending = stream.pending();
+		sampleStall(pending);
+		if (pending <= BACKLOG_DEFER_BYTES) return false;
 		if (!deferred) {
 			deferred = true;
 			stream.onDrain(() => {
@@ -242,7 +252,11 @@ export function createTerminalDriver(
 		// Inside a multiplexer the mux, not conhost, owns the grid and answers the cursor report.
 		hostOwnsGrid: () => terminal.identity.conpty && !multiplexed(),
 		warp,
-		inPlaceResize: () => forcedInPlace ?? (warp() && !multiplexed() && !terminal.identity.conpty),
+		// Herdr: an alt-screen switch toggles its scrollbar gutter (#8433), changing pane width by one
+		// column and looping resize -> ?1049h/l -> SIGWINCH. Repaint in place like Warp outside muxes.
+		inPlaceResize: () =>
+			forcedInPlace ??
+			((warp() && !multiplexed() && !terminal.identity.conpty) || terminal.identity.multiplexer === "herdr"),
 		resizeAvoidsAlternate: () =>
 			forcedInPlace !== false &&
 			resizeScrollback === "rebuild" &&
@@ -263,6 +277,7 @@ export function createTerminalDriver(
 	});
 
 	terminal.onResize((columns, rows) => {
+		screenRows.set(rows);
 		writer.resize(columns, rows);
 		for (const listener of resizeListeners) listener(columns, rows);
 	});
@@ -272,11 +287,11 @@ export function createTerminalDriver(
 
 	let running = false;
 	let stopping: Promise<void> | undefined;
-	const stopWriter = (): void => {
+	const stopWriter = (emergency = false): void => {
 		cancelKittyHold?.();
 		kittyReady.set(true);
 		stopStallPoll();
-		writer.stop();
+		writer.stop(emergency);
 	};
 	const release = (): void => {
 		try {
@@ -289,9 +304,9 @@ export function createTerminalDriver(
 			}
 		}
 	};
-	const handBack = async (): Promise<void> => {
+	const handBack = async (emergency: boolean): Promise<void> => {
 		try {
-			stopWriter();
+			stopWriter(emergency);
 		} finally {
 			try {
 				if (terminal.drainInput) await terminal.drainInput(() => sink.flush());
@@ -301,11 +316,18 @@ export function createTerminalDriver(
 			if (!terminal.drainInput) await sink.flush();
 		}
 	};
+	const stop = (emergency: boolean): Promise<void> => {
+		if (stopping) return stopping;
+		if (!running) return Promise.resolve();
+		running = false;
+		stopping = handBack(emergency);
+		return stopping;
+	};
 	const restoreOwner = async (): Promise<void> => {
 		try {
 			stopRenderer?.();
 		} finally {
-			await driver.stop();
+			await stop(true);
 		}
 	};
 
@@ -342,17 +364,15 @@ export function createTerminalDriver(
 				const timer = setTimeout(() => kittyReady.set(true), GHOSTTY_IMAGE_DELAY_MS);
 				cancelKittyHold = () => clearTimeout(timer);
 			}
+			screenRows.set(terminal.rows);
 			writer.resize(terminal.columns, terminal.rows);
 			const cursor = await terminal.queryCursor();
-			if (running) writer.start(cursor);
+			if (running) {
+				const defer = !terminal.tspExpected && !terminal.capabilities.tsp && options.deferShellLine?.();
+				writer.start(cursor, defer);
+			}
 		},
-		stop() {
-			if (stopping) return stopping;
-			if (!running) return Promise.resolve();
-			running = false;
-			stopping = handBack();
-			return stopping;
-		},
+		stop: () => stop(false),
 		restoreNow() {
 			if (!running && !stopping) return;
 			try {
@@ -360,7 +380,7 @@ export function createTerminalDriver(
 			} finally {
 				running = false;
 				try {
-					stopWriter();
+					stopWriter(true);
 				} finally {
 					release();
 				}
@@ -391,6 +411,10 @@ export function createTerminalDriver(
 			replayListeners.add(listener);
 			return () => replayListeners.delete(listener);
 		},
+		setResizeScrollback(mode) {
+			resizeScrollback = mode;
+			writer.setResizeScrollback(mode);
+		},
 		resetDisplay() {
 			images.reset();
 			writer.resetDisplay();
@@ -406,7 +430,7 @@ export function createTerminalDriver(
 			return terminal.tspExpected;
 		},
 		onHelloSettled: listener => terminal.onHelloSettled(listener),
-		setMouse: tracking => terminal.setMouse(tracking),
+		setMouse: (tracking, reportFocus) => terminal.setMouse(tracking, reportFocus),
 		refreshAppearance: () => terminal.refreshAppearance(),
 		passthrough: sequence => terminal.passthrough(sequence),
 		notify(message) {

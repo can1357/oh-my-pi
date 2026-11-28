@@ -40,6 +40,13 @@ describe("copyToClipboard OSC 52 routing", () => {
 		expect(harness.direct.join("")).not.toContain("\x1b]52;");
 	});
 
+	it("writes only to the terminal for a remote transcript selection", async () => {
+		harness = await startActiveTerminal();
+		await copyToClipboard("remote selection", { terminalOnly: true });
+		expect(harness.routed).toEqual([osc52("remote selection")]);
+		expect(natives.copyToClipboard).not.toHaveBeenCalled();
+	});
+
 	it("writes OSC 52 straight to stdout once the terminal has stopped", async () => {
 		harness = await startActiveTerminal();
 		await harness.stop();

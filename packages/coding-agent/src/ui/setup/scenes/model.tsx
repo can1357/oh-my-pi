@@ -7,6 +7,7 @@
  */
 import { batch, computed, type KeyEvent, signal, untrack } from "@oh-my-pi/pi-tui";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
+import { errorMessage } from "@oh-my-pi/pi-utils";
 import type { TspPickerAction, TspText } from "@oh-my-pi/pi-wire";
 import {
 	buildBrowserItems,
@@ -32,10 +33,6 @@ type Discovery =
 	| { readonly kind: "idle" }
 	| { readonly kind: "running" }
 	| { readonly kind: "failed"; readonly message: string };
-
-function messageOf(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
 
 export const modelScene: SetupScene = {
 	id: "model",
@@ -92,7 +89,7 @@ export const modelScene: SetupScene = {
 					discovery.set({ kind: "idle" });
 				});
 			} catch (error) {
-				discovery.set({ kind: "failed", message: messageOf(error) });
+				discovery.set({ kind: "failed", message: errorMessage(error) });
 			}
 		};
 		const save = async (): Promise<void> => {
@@ -109,7 +106,7 @@ export const modelScene: SetupScene = {
 			} catch (error) {
 				batch(() => {
 					saving.set(undefined);
-					saveError.set(messageOf(error));
+					saveError.set(errorMessage(error));
 				});
 			}
 		};

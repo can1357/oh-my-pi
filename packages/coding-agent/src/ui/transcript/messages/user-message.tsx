@@ -6,7 +6,7 @@
  * - Composer tokens stay chips (`📷 #1`, `⬢ model`, `✦ skill`): `md` marks
  *   natively, composer colors in the terminal.
  * - With a host that handles transcript actions, a quiet tools row offers
- *   Copy and Rewind (and the time sent); a phone's long press lists the
+ *   Copy and Edit (and the time sent); a phone's long press lists the
  *   turn's actions.
  * - The live-steering marker and the agent's reaction are badges at the
  *   bottom-right natively; the terminal draws them in the bubble's top
@@ -49,9 +49,11 @@ export interface UserMessageModel {
 	readonly reaction?: Reactive<string | undefined>;
 	/** Whether a host handles transcript actions (controls are only shown when one does). */
 	readonly actions?: Reactive<boolean>;
-	/** Mark the bubble as a shell prompt zone (OSC 133) in the terminal. */
+	/** Whether the terminal may mark this prompt (OSC 133) when it enters scrollback. */
 	readonly promptZones?: Reactive<boolean>;
-	/** Copy (`copy-message`), rewind (`rewind`) and turn hold-menu actions. */
+	/** The message identity, shared by new views of the same prompt after a transcript rebuild. */
+	readonly promptZoneKey?: object;
+	/** Copy (`copy-message`), Edit & resend (`edit-turn`) and turn hold-menu actions. */
 	readonly onAction?: (act: string) => void;
 }
 
@@ -67,7 +69,7 @@ function timeOf(at: number, hour12: boolean | undefined): { short: string; full:
 	};
 }
 
-/** The tools row: Copy, Rewind and the time sent. */
+/** The tools row: Copy, Edit & resend (rewinds to before the prompt and puts it in the composer) and the time sent. */
 function UserTools(props: { model: UserMessageModel }): JSXNode {
 	const { model } = props;
 	return (
@@ -81,12 +83,12 @@ function UserTools(props: { model: UserMessageModel }): JSXNode {
 				actions={{ click: "copy-message" }}
 			/>
 			<icon
-				key="rewind"
-				name="rewind"
+				key="edit"
+				name="edit"
 				role="omp.user.tool"
-				title="Rewind the conversation to an earlier message"
-				aria="Rewind"
-				actions={{ click: "rewind" }}
+				title="Edit & resend: rewind to before this message and put it in the composer"
+				aria="Edit & resend"
+				actions={{ click: "edit-turn" }}
 			/>
 			{model.timestamp !== undefined && [
 				<text key="dot" text="·" />,
@@ -203,6 +205,7 @@ export function UserMessage(props: { model: UserMessageModel }): JSXNode {
 			}
 			term={() => ({
 				zones: read(model.promptZones) !== false,
+				zoneKey: model.promptZoneKey,
 				steered: model.liveSteered === true,
 				reaction: read(model.reaction),
 			})}

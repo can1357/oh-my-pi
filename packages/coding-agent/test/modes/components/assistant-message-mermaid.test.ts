@@ -10,6 +10,8 @@ import {
 	AssistantMessageBlock,
 	type AssistantMessageModel,
 } from "../../../src/ui/transcript/messages/assistant-message";
+import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/render";
+import { setMarkdownLook } from "@oh-my-pi/pi-tui/text/markdown/look";
 import { currentTheme, setCurrentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 
 const restoreTheme = currentTheme();
@@ -84,6 +86,29 @@ describe("assistant message mermaid markdown", () => {
 		const rendered = render(createAssistantMessage("```mermaid\nthis is not mermaid\n```"));
 
 		expect(rendered).toContain("this is not mermaid");
+	});
+});
+
+describe("assistant message markdown look", () => {
+	afterEach(() => setMarkdownLook({ colorful: true, mermaid: true, linkUrls: true }));
+
+	it("draws headings in mdHeading when colorful Markdown is off", () => {
+		setMarkdownLook({ colorful: false, mermaid: true, linkUrls: true });
+		const message = createAssistantMessage("# Title\n\nbody");
+		const rows = printRows(
+			() => AssistantMessageBlock({ model: { message: signal(message), finalized: signal(true) } }),
+			40,
+		);
+		const heading = rows.find(row => Bun.stripANSI(row).includes("Title"))!;
+		const headingOf = (colorful: boolean): string =>
+			renderMarkdown("# Title", 40, { theme: currentTheme(), colorful })[0]!.trim();
+		expect(headingOf(false)).not.toBe(headingOf(true));
+		expect(heading).toContain(headingOf(false));
+	});
+
+	it("keeps mermaid fences as code when mermaid rendering is off", () => {
+		setMarkdownLook({ colorful: true, mermaid: false, linkUrls: true });
+		expect(render(createAssistantMessage("```mermaid\nflowchart TD\n  Start-->Stop\n```"))).toContain("flowchart TD");
 	});
 });
 

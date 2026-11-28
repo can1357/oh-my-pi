@@ -23,6 +23,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { cfgMagicKeyword, cfgMagicKeywordsEnabled } from "@oh-my-pi/pi-coding-agent/modes/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -168,6 +169,38 @@ describe("AgentSession queued steer delivery", () => {
 		expect(await entryAppended).toBe("guest steer at yield");
 		expect(mock.calls.length).toBe(2);
 		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("delivers an extension follow-up as the first idle turn after a custom message", async () => {
+		const { session, mock } = await createSession([{ content: ["ready"] }, { content: ["awake"] }]);
+		await session.prompt("Warm up");
+		await session.sendCustomMessage({ customType: "digest", content: "DIGEST", display: true });
+
+		await session.sendUserMessage("WAKE", { deliverAs: "followUp" });
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(mock.calls[1].context.messages.slice(-2)).toMatchObject([
+			{ role: "developer", content: [{ type: "text", text: "DIGEST" }] },
+			{ role: "user", content: [{ type: "text", text: "WAKE" }] },
+		]);
+		expect(session.getQueuedMessages().followUp).toEqual([]);
+	});
+
+	it("delivers an idle follow-up when compaction left only its summary in context", async () => {
+		const { session, sessionManager, mock } = await createSession([{ content: ["awake"] }]);
+		sessionManager.appendCompaction("The build is ready.", undefined, "", 1_000);
+		session.agent.replaceMessages(sessionManager.buildSessionContext().messages);
+
+		await session.sendUserMessage("Run the tests.", { deliverAs: "followUp" });
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(mock.calls[0].context.messages.slice(-2)).toMatchObject([
+			{ role: "user", content: [{ type: "text", text: expect.stringContaining("The build is ready.") }] },
+			{ role: "user", content: [{ type: "text", text: "Run the tests." }] },
+		]);
+		expect(session.getQueuedMessages().followUp).toEqual([]);
 	});
 
 	// `.`/`c` on a running turn interrupts it and continues. A host driving the
@@ -344,6 +377,41 @@ describe("AgentSession queued steer delivery", () => {
 
 		expect(mock.calls.length).toBe(2);
 		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("rewinds a streaming prompt without delivering its queued input to the edited turn", async () => {
+		const started = Promise.withResolvers<void>();
+		const { session, sessionManager, mock } = await createSession([
+			() => {
+				started.resolve();
+				return { content: ["abandoned answer"], delayMs: 60_000 };
+			},
+			{ content: ["new answer"] },
+		]);
+		const pending = { text: "original", submittedAt: Date.now() - 100, started: true, cancelled: false };
+		const ctx = createInteractiveModeContext({
+			session,
+			sessionManager,
+			eventController: { resetTranscriptAnchors: () => {} },
+			cancelPendingSubmission: () => false,
+			cancelGoalContinuation: () => {},
+		});
+		const run = session.prompt(pending.text, { submittedAt: pending.submittedAt });
+		await started.promise;
+		await session.steer("abandoned steer");
+		await session.followUp("abandoned follow-up");
+
+		await new SelectorController(ctx).runTurnAction("edit", { role: "user", at: pending.submittedAt }, pending);
+		await run;
+		expect(ctx.composer.text()).toBe("original");
+		expect(sessionManager.getBranch().filter(e => e.type === "message" && e.message.role === "user")).toEqual([]);
+		expect(mock.calls).toHaveLength(1);
+
+		await session.prompt("replacement");
+		expect(mock.calls).toHaveLength(2);
+		expect(mock.calls[1]!.context.messages.filter(m => m.role === "user").map(m => m.content)).toEqual([
+			[{ type: "text", text: "replacement" }],
+		]);
 	});
 
 	it("drains steering left after aborting an auto-continued queued turn", async () => {
@@ -854,7 +922,9 @@ describe("AgentSession queued steer delivery", () => {
 				]);
 				expect(removed).toBe(true);
 				expect(remaining).toEqual(queued.slice(2));
-				expect(pendingAtFirstRecord).toEqual([]);
+				// The claimed message stays listed until the transcript records it (its companion
+				// comes first), but removal can no longer reach it.
+				expect(pendingAtFirstRecord).toEqual([chip("keep B")]);
 				expect(removedAfterClaim).toBe(false);
 				const notices = session.messages.filter(
 					(message): message is CustomMessage =>

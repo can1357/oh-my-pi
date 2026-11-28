@@ -16,7 +16,7 @@ import { getCodingAgentApi } from "../host-api";
 import * as typebox from "../legacy-typebox";
 import { assertBunCanImport } from "../module-path";
 import { GreenCommand } from "./bundled/ci-green";
-import { AnnotateCommand } from "./bundled/annotate";
+import { AnnotateCommand } from "./bundled/annotate/command";
 import { ReviewCommand } from "./bundled/review";
 import type {
 	CustomCommand,

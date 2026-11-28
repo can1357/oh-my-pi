@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import * as path from "node:path";
 import {
 	ensureRuntimeInstalled,
+	errorMessage,
 	getTinyModelsCacheDir,
 	installRuntimeModuleResolver,
 	resolveRuntimeModule,
@@ -26,7 +27,7 @@ import type { ProgressInfo } from "./transformers-types";
 
 export const TRANSFORMERS_PACKAGE = "@huggingface/transformers";
 /** Exact Transformers.js version installed on first use by the speech and tiny workers. */
-export const TRANSFORMERS_VERSION = "4.3.0";
+export const TRANSFORMERS_VERSION = "4.3.2";
 const ONNX_RUNTIME_NODE_PACKAGE = "onnxruntime-node";
 const ONNX_RUNTIME_CUDA_INSTALL = "cuda12";
 const ONNX_RUNTIME_CUDA_PROVIDER_FILES = [
@@ -40,10 +41,6 @@ const LINUX_X64_ONNX_RUNTIME_CUDA_PROVIDER_DIR = path.join("bin", "napi-v6", "li
 
 export function errorText(error: unknown): string {
 	return error instanceof Error ? (error.stack ?? error.message) : String(error);
-}
-
-export function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
 }
 
 // ── Structured logging ──────────────────────────────────────────────

@@ -9,21 +9,13 @@
  */
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
-import { replaceTabs, wrap } from "@oh-my-pi/pi-tui/text/width";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { displayLines } from "@oh-my-pi/pi-tui/text/sanitize";
+import { wrap } from "@oh-my-pi/pi-tui/text/width";
 import { formatFullOutputReference } from "../../../tools/output-meta-format";
 import type { ReadUrlTerm } from "../../tools/read-url";
 import { webLink } from "./file-common";
 import { expandHint, frameRows, outcomeBg, statusIcon, statusLine } from "./frame";
 import { defineToolLook, isExpanded, toolProps } from "./look";
-
-/** Display lines of untrusted text: CR progress collapsed to its last segment, tabs expanded. */
-function displayLines(text: string): string[] {
-	return text.split(/\r?\n/).map(line => {
-		const at = line.lastIndexOf("\r");
-		return replaceTabs(sanitizeText(at < 0 ? line : line.slice(at + 1)));
-	});
-}
 
 function paintReadUrl(node: UiNode, cx: PaintContext): Block {
 	const props = toolProps(node);

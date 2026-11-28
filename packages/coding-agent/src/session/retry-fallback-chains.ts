@@ -549,9 +549,9 @@ export function resolveRetryFallbackChainKey(
 
 /**
  * Parse one configured chain entry. A `provider/*` entry keeps the failing
- * model's id and swaps the provider (google-antigravity/x → google/x); an
+ * model's id and swaps the provider (openrouter/x → google/x); an
  * id-prefixed `provider/prefix/*` entry re-prefixes the failing model's
- * bare id instead (openrouter/google/* : google-antigravity/x →
+ * bare id instead (openrouter/google/* : google-vertex/x →
  * openrouter/google/x). Ids the target provider lacks are skipped by the
  * candidate loop's registry lookup.
  */

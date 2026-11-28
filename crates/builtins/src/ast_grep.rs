@@ -19,11 +19,6 @@ use ast_grep_config::{
 };
 use ast_grep_core::tree_sitter::LanguageExt;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-use codespan_reporting::{
-	diagnostic::{Diagnostic, Label as CodeLabel, Severity as CodeSeverity},
-	files::SimpleFile,
-	term::{self as codespan, DisplayStyle},
-};
 use futures::StreamExt;
 use omp_ast::{
 	SupportLang, debug, ops,
@@ -37,8 +32,15 @@ use omp_xfs::glob::Selector;
 use omp_diff::{HunkLine, diff_line_tokens, line_tokens_str, structured_patch_hunk_rows};
 use tokio_util::sync::CancellationToken;
 
-use crate::host::{AsyncUtility, Host};
+use crate::{
+	host::{AsyncUtility, Host},
+	root_guard,
+};
 
+/// ast-grep's spelling of the [`root_guard`] escape hatch; it has no depth cap.
+const ROOT_FLAGS: root_guard::Flags = root_guard::Flags { allow: "--allow-root", depth: None };
+
+mod report;
 mod scaffold;
 mod verify;
 
@@ -295,6 +297,10 @@ struct Input {
 	/// Set the approximate number of threads to use.
 	#[arg(short = 'j', long, default_value = "0", value_name = "NUM")]
 	threads: usize,
+
+	/// Permit searching a filesystem root such as /.
+	#[arg(long)]
+	allow_root: bool,
 }
 
 /// ast-grep's `--debug-query` formats.
@@ -875,6 +881,12 @@ impl Input {
 	/// `Some(lang)` also keeps names that map to none, skipping other
 	/// languages' files (ast-grep's `walk_lang`).
 	async fn walk(&self, host: &mut Host, lang: Option<SupportLang>, hidden: bool) -> Result<Vec<Candidate>, i32> {
+		if !self.allow_root
+			&& let Err(refusal) = root_guard::check(self.paths.iter().map(|path| host.resolve(path)), None, ROOT_FLAGS)
+		{
+			let _ = writeln!(host.stderr, "ERROR: {refusal}");
+			return Err(2);
+		}
 		let (include, exclude) = match glob_selectors(&self.globs) {
 			Ok(selectors) => selectors,
 			Err(error) => {
@@ -1882,50 +1894,46 @@ impl Scan {
 			}
 			return;
 		}
-		let file = SimpleFile::new(path.to_owned(), source);
 		let (before, after) = self.context();
-		let mut config = codespan::Config {
-			display_style: match self.report_style {
-				ReportStyle::Rich => DisplayStyle::Rich,
-				ReportStyle::Medium => DisplayStyle::Medium,
-				ReportStyle::Short => DisplayStyle::Short,
-			},
-			..codespan::Config::default()
+		let display_style = match self.report_style {
+			ReportStyle::Rich => report::DisplayStyle::Rich,
+			ReportStyle::Medium => report::DisplayStyle::Medium,
+			ReportStyle::Short => report::DisplayStyle::Short,
 		};
-		config.start_context_lines = before;
-		config.end_context_lines = after;
 		let mut fixed_until = 0;
 		for finding in findings {
 			let rule = finding.rule;
 			let note = rule.note.as_deref();
 			let Some(change) = &finding.change else {
 				let severity = match rule.severity {
-					Severity::Error => CodeSeverity::Error,
-					Severity::Warning => CodeSeverity::Warning,
-					Severity::Info => CodeSeverity::Note,
-					Severity::Hint | Severity::Off => CodeSeverity::Help,
+					Severity::Error => report::Severity::Error,
+					Severity::Warning => report::Severity::Warning,
+					Severity::Info => report::Severity::Note,
+					Severity::Hint | Severity::Off => report::Severity::Help,
 				};
-				let labels = finding
+				let labels: Vec<report::Label> = finding
 					.labels
 					.iter()
-					.map(|(range, primary, message)| {
-						let label = if *primary {
-							CodeLabel::primary((), range.clone())
-						} else {
-							CodeLabel::secondary((), range.clone())
-						};
-						match message {
-							Some(message) => label.with_message(message),
-							None => label,
-						}
+					.map(|(range, primary, message)| report::Label {
+						range: range.clone(),
+						primary: *primary,
+						message: message.clone().unwrap_or_default(),
 					})
 					.collect();
-				let diagnostic = Diagnostic::new(severity)
-					.with_code(&rule.id)
-					.with_message(&finding.message)
-					.with_notes(note.into_iter().map(str::to_owned).collect())
-					.with_labels(labels);
-				let _ = codespan::emit_to_io_write(out, &config, &file, &diagnostic);
+				let notes: Vec<String> = note.into_iter().map(str::to_owned).collect();
+				let diagnostic = report::Report {
+					file_name: path,
+					source,
+					severity,
+					code: &rule.id,
+					message: &finding.message,
+					notes: &notes,
+					labels: &labels,
+					display_style,
+					start_context_lines: before,
+					end_context_lines: after,
+				};
+				let _ = report::emit(out, &diagnostic);
 				continue;
 			};
 			// A rule with a fix shows the fix as a diff (ast-grep's `print_rule_diffs`).
@@ -2497,6 +2505,16 @@ mod tests {
 	async fn run(tree: &tempfile::TempDir, args: &[&str]) -> (i32, String, String) {
 		let (code, capture) = run_async_util::<AstGrep>(args, "", tree.path()).await;
 		(code, capture.out(), capture.err())
+	}
+
+	/// Failure mode: `ast-grep run -p X /` walked the whole disk for hours.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn refuses_to_search_the_filesystem_root() {
+		let tree = tree();
+		let (code, out, err) = run(&tree, &["run", "-p", "foo($A)", "/"]).await;
+		assert_eq!((code, out.as_str()), (2, ""));
+		assert!(err.starts_with("ERROR: refusing") && err.contains("--allow-root"), "stderr: {err}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

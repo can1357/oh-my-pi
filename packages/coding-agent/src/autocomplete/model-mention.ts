@@ -8,11 +8,11 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import {
 	buildSearchAffinity,
+	buildSessionModelScope,
 	type ModelBrowserItem,
 	type ModelBrowserRegistry,
 	type ModelBrowserSource,
 	ModelItemRanker,
-	SessionModelScopeCache,
 } from "../modes/view-model/overlays/model-browser";
 import { modelMentionDisplayName, modelMentionName } from "../session/model-mention-syntax";
 import type { AutocompleteItem, ModelMentionCompletion } from "./autocomplete";
@@ -44,7 +44,7 @@ export function isModelMentionPrefix(prefix: string): boolean {
 }
 
 function mentionRow(value: string, description: string): AutocompleteItem {
-	return { value, label: value, description, icon: currentTheme().symbols.symbol("icon.model"), iconName: "model" };
+	return { value, label: value, description, icon: currentTheme().symbols.symbol("mention.model"), iconName: "model" };
 }
 
 /**
@@ -130,12 +130,10 @@ export function createModelMentionSource(host: {
 	registry: DiscoveryRetryRegistry;
 	scopedModels: () => ReadonlyArray<Model>;
 }): ModelMentionCandidateSource {
-	let scopeCache: SessionModelScopeCache | undefined;
 	let ranker: ModelItemRanker | undefined;
 	let rankerProviderOrder: readonly string[] | undefined;
 	const rank = (query: string): ReadonlyArray<ModelBrowserItem> => {
-		scopeCache ??= new SessionModelScopeCache(host.source, host.registry);
-		const scope = scopeCache.get(host.scopedModels());
+		const scope = buildSessionModelScope(host.source, host.registry, host.scopedModels());
 		if (!query.trim()) return scope.items;
 		const providerOrder = host.source.modelProviderOrder;
 		if (ranker?.items !== scope.items || rankerProviderOrder !== providerOrder) {

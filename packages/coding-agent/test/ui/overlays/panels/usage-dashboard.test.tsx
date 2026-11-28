@@ -63,13 +63,14 @@ const activity: DailyActivityPoint[] = [0, 1, 2, 5, 9, 40, 120, 300].map((back, 
 }));
 
 type Options = Omit<UsageDashboardOptions, "terminalRows" | "now" | "onClose">;
+const missing = [
+	{ provider: "openai", label: "x@test" },
+	{ provider: "zai", label: "z@test" },
+];
 const DASHBOARDS: Record<string, Partial<Options>> = {
 	full: {
-		refresh: async () => reports().slice(0, 2),
-		unavailableAccounts: [
-			{ provider: "openai", label: "x@test" },
-			{ provider: "zai", label: "z@test" },
-		],
+		refresh: async () => ({ reports: reports().slice(0, 2), unavailableAccounts: missing }),
+		unavailableAccounts: missing,
 	},
 	loading: { loadActivity: () => new Promise(() => {}) },
 	empty: { reports: [], loadActivity: async push => push([]) },
@@ -119,7 +120,7 @@ function mountRow(props: UsageRowProps): Mounted {
 function mountDashboard(options: Partial<Options>): Mounted {
 	const model = new UsageDashboardModel({
 		reports: reports(),
-		renderDetail: (width, shown) => `Detail ${width} ${shown.length}\n${"row\n".repeat(40)}end`,
+		renderDetail: (width, data) => `Detail ${width} ${data.reports.length}\n${"row\n".repeat(40)}end`,
 		loadActivity: async push => push(activity),
 		onClose: () => {},
 		terminalRows: () => 30,

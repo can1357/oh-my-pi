@@ -14,7 +14,7 @@
 import type { UiNode } from "@oh-my-pi/pi-tui";
 import { type Block, defineRolePainter, EMPTY_BLOCK, type PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { stack } from "@oh-my-pi/pi-tui/term/painters/layout";
-import { SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-tui/term/painters/spinner";
+import { spinnerIndex } from "@oh-my-pi/pi-tui/term/painters/spinner";
 import { statusRow } from "@oh-my-pi/pi-tui/term/painters/status";
 import { truncate, truncateStart, visibleWidth } from "@oh-my-pi/pi-tui/text/width";
 import { FG_DEFAULT, fgSgr } from "@oh-my-pi/pi-tui/theme/color";
@@ -142,9 +142,7 @@ class LookPainter {
 		let glyph = this.#theme.symbols.symbol("cmd.question") || "?";
 		if (!awaiting) {
 			const frames = this.#theme.symbols.activityFrames;
-			glyph = cx.reduceMotion
-				? (frames[0] ?? "")
-				: (frames[Math.floor(now / SPINNER_INTERVAL_MS) % frames.length] ?? "");
+			glyph = frames[spinnerIndex(cx, frames.length)] ?? "";
 		}
 		const seconds = Math.max(0, Math.floor((now - since) / 1000));
 		const timer =

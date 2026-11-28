@@ -91,7 +91,7 @@ describe("loadFilesFromDir recursion", () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-loadfiles-recursion-"));
 		ctx = { cwd: tempDir, home: tempDir, repoRoot: tempDir };
 		// Top-level tool plus a Python-venv-style frontend asset nested below it,
-		// mirroring the ~/.codex/tools/mineru/Lib/site-packages layout from #8552.
+		// mirroring the tools/mineru/Lib/site-packages layout from #8552.
 		write("my-tool.ts", "export default () => ({});\n");
 		write(
 			path.join("mineru", "Lib", "site-packages", "gradio", "assets", "svelte", "media-query-D37ajmZt.js"),

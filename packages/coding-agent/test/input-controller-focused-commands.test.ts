@@ -4,7 +4,7 @@
  * `/export` writes the focused agent's own transcript (with its nested subagents),
  * `/jobs` lists the focused agent's background jobs, `/usage` reports account-wide
  * limits, and the model and thinking controls (`/model`, `/switch`, `/effort`, their
- * keys) act on the focused agent's session. Everything else, and mutating forms such
+ * keys) and `/retry` act on the focused agent's session. Everything else, and mutating forms such
  * as `/usage reset` and `/jobs kill`, still requires returning to main.
  *
  * Failure mode if this regresses: these commands silently do nothing (or steer the
@@ -81,6 +81,24 @@ describe("focused subagent view slash commands", () => {
 			expect(editor.text()).toBe("");
 			expect(raw.withLocalSubmission).not.toHaveBeenCalled();
 		}
+	});
+
+	it("retries the focused agent's failed turn with /retry, leaving the main session alone", async () => {
+		const focused = createFocusedContext();
+		const retryFocused = vi.fn(async () => true);
+		const retryMain = vi.fn(async () => true);
+		Object.assign(focused.raw.viewSession, { retry: retryFocused });
+		Object.assign(focused.raw.session, { retry: retryMain });
+		const controller = new InputController(focused.ctx);
+		controller.setupEditorSubmitHandler();
+		focused.editor.setText("/retry");
+		focused.editor.submit();
+		await controller.waitForSubmissionDispatches();
+
+		expect(retryFocused).toHaveBeenCalledTimes(1);
+		expect(retryMain).not.toHaveBeenCalled();
+		expect(focused.prompt).not.toHaveBeenCalled();
+		expect(focused.raw.showStatus).not.toHaveBeenCalled();
 	});
 
 	it("runs /usage from the focused view", async () => {

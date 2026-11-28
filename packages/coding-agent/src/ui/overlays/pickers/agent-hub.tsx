@@ -28,6 +28,7 @@ import {
 	type UiNode,
 	untrack,
 } from "@oh-my-pi/pi-tui";
+import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { formatAge, formatNumber } from "@oh-my-pi/pi-utils";
 import type {
 	TspKvProps,
@@ -51,6 +52,7 @@ import {
 	hubFallbackStatsSession,
 	hubRowMetrics,
 } from "../../../modes/view-model/overlays/agent-hub-projection";
+import { formatCost } from "../../../modes/view-model/overlays/agent-hub-renderer";
 import {
 	type AgentHubRegistry,
 	type AgentRecordLike,
@@ -69,7 +71,6 @@ import type {
 	HubEntries,
 	HubEntry,
 	HubLookTerm,
-	HubRecentLine,
 } from "../../styles/pickers/agent-hub";
 import { contextLevel, contextTone } from "../../status/format";
 import {
@@ -84,13 +85,13 @@ import {
 	agentTask,
 	compareFrozenRanks,
 	type FrozenRank,
-	formatCost,
 	formatMetricDuration,
 	hubModel,
 	localDateTime,
 	metricsText,
 	NATIVE_CHILD_IDS,
 	projectAgentTree,
+	recentActivityLine,
 	roleBadge,
 	STATUS_DOT,
 	span,
@@ -1070,7 +1071,9 @@ export function AgentHub<T extends AgentRecordLike>(
 					title="Open in transcript"
 				>
 					<text spans={[span(activityClock(row.timestamp), "mono dim")]} />
-					<text spans={glyph ? [span(glyph.text ?? NATIVE_GLYPHS[glyph.symbol!] ?? "", glyph.color)] : []} />
+					<text
+						spans={glyph ? [span(glyph.text ?? currentTheme().symbols.symbol(glyph.symbol!), glyph.color)] : []}
+					/>
 					<text spans={[span(sanitizeDisplaySingleLine(activityTitle(row)), "mono muted")]} />
 					<text text={sanitizeDisplaySingleLine(activitySummary(row))} truncate="end" grow={1} />
 				</row>
@@ -1248,13 +1251,6 @@ export function AgentHub<T extends AgentRecordLike>(
 		};
 	};
 
-	const recentLine = (row: AgentActivityRow): HubRecentLine => ({
-		clock: activityClock(row.timestamp),
-		glyph: activityGlyph(row),
-		title: activityTitle(row),
-		summary: activitySummary(row),
-	});
-
 	const detailOf = (ref: T, at: number): HubDetail => {
 		const session = observed(ref.id);
 		const progress = session?.progress;
@@ -1285,7 +1281,7 @@ export function AgentHub<T extends AgentRecordLike>(
 				...(artifacts?.nestedPatchPaths ?? []).map(nested => `Nested patch ${shortenPath(nested)}`),
 				...(artifacts?.branchName ? [`Worktree branch ${artifacts.branchName}`] : []),
 			],
-			recent: props.activity.recent(ref.id, Math.max(1, props.rows())).map(recentLine),
+			recent: props.activity.recent(ref.id, Math.max(1, props.rows())).map(recentActivityLine),
 		};
 	};
 
@@ -1293,7 +1289,7 @@ export function AgentHub<T extends AgentRecordLike>(
 		const ref = registry.get(row.agentId);
 		const role = observedById.get(row.agentId)?.progress?.modelRole ?? ref?.history?.modelRole;
 		return {
-			...recentLine(row),
+			...recentActivityLine(row),
 			id: row.id,
 			agent: row.agentId,
 			role: role && props.getRoleInfo ? roleBadge(role, props.getRoleInfo(role)) : undefined,
@@ -1373,11 +1369,3 @@ export function AgentHub<T extends AgentRecordLike>(
 		</picker>
 	);
 }
-
-/** Status glyphs by symbol key for native spans (the unicode preset: native terminals draw their own icons). */
-const NATIVE_GLYPHS: Readonly<Record<string, string>> = {
-	"status.error": "✘",
-	"status.aborted": "⏹",
-	"status.running": "⟳",
-	"status.success": "✔",
-};

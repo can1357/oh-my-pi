@@ -2,8 +2,11 @@ import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { combine, effect, register, type ScopeLike, type Setting, type SettingValueOf } from "../config/registry";
 import {
+	buildServiceTierByFamily,
 	SERVICE_TIER_ANTHROPIC_OPTIONS,
 	SERVICE_TIER_ANTHROPIC_VALUES,
+	SERVICE_TIER_DEVIN_OPTIONS,
+	SERVICE_TIER_DEVIN_VALUES,
 	SERVICE_TIER_GOOGLE_OPTIONS,
 	SERVICE_TIER_GOOGLE_VALUES,
 	SERVICE_TIER_INHERIT_OPTIONS,
@@ -11,6 +14,7 @@ import {
 	SERVICE_TIER_OPENAI_OPTIONS,
 	SERVICE_TIER_OPENAI_VALUES,
 } from "../config/service-tier";
+import { DaemonProviderSlots } from "../daemon/modules/provider-slots";
 import {
 	TINY_MODEL_DEVICE_DEFAULT,
 	TINY_MODEL_DEVICE_SETTING_OPTIONS,
@@ -26,7 +30,7 @@ import { compileModelPatterns } from "../utils/model-patterns";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses-state";
 import { configureCodexAccessPrograms } from "@oh-my-pi/pi-ai/providers/openai-codex/access-programs";
-import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
+import { configureProviderMaxInFlightRequests, configureProviderSlotBroker } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "../ui/keys/hints";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking/levels";
@@ -34,7 +38,7 @@ import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMeta
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const EMPTY_STRING_ARRAYS_RECORD: Record<string, string[]> = {};
 const EMPTY_STRING_RECORD: Record<string, string> = {};
-const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait"];
+const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["wait", "vibe_wait"];
 
 /** Scope of the resume picker's current-folder list. */
 export const cfgSessionWorktreeScope = register({
@@ -114,7 +118,8 @@ export const cfgPrewalkFrom = register({
 		tab: "model",
 		group: "Prewalk",
 		label: "Prewalk planning model",
-		description: "Model or role (default '@default') that /prewalk restart returns to for planning.",
+		description:
+			"Model or role (default '@default') to plan on: /prewalk restart returns to it, and Auto Prewalk's Escalate mode moves a front-loaded task to it before planning.",
 	},
 });
 
@@ -134,7 +139,7 @@ export const cfgPrewalkInto = register({
 export const cfgPrewalkAuto = register({
 	id: "prewalk.auto",
 	type: "enum",
-	values: ["off", "suggest", "on"] as const,
+	values: ["off", "suggest", "on", "escalate"] as const,
 	default: "off",
 	ui: {
 		tab: "model",
@@ -147,13 +152,20 @@ export const cfgPrewalkAuto = register({
 			{
 				value: "suggest",
 				label: "Suggest",
-				description: "Classify each task and report the decision without arming prewalk",
+				description:
+					"Classify each task and report the decision, and whether Escalate would plan on another model, without arming prewalk",
 			},
 			{
 				value: "on",
 				label: "On",
 				description:
 					"For confidently front-loaded tasks, arm a handoff from the active model to the auto target; the next task starts back on the planning model",
+			},
+			{
+				value: "escalate",
+				label: "Escalate",
+				description:
+					"Like On, but plan on the Prewalk planning model (prewalk.from) first: a confidently front-loaded task moves there before setup and hands off from it; the next task starts back where this one started. When the planning model is already active, this is On, except that '@initial' then has nothing to hand back to",
 			},
 		],
 	},
@@ -167,9 +179,13 @@ export const cfgPrewalkAutoTarget = register({
 		tab: "model",
 		group: "Prewalk",
 		label: "Auto-prewalk target",
-		description: "Model or role (default '@smol') auto-prewalk hands off to at the first edit/write.",
+		description:
+			"Model or role (default '@smol') auto-prewalk hands off to at the first edit/write. '@initial' (Escalate only) hands back to the model and thinking level the task started on.",
 	},
 });
+
+/** `prewalk.autoTarget` value that hands an `escalate` task back to the model and effort it started on. */
+export const PREWALK_INITIAL_TARGET = "@initial";
 
 function isPositiveLimit(limit: unknown): limit is number {
 	return typeof limit === "number" && Number.isFinite(limit) && limit > 0;
@@ -219,6 +235,8 @@ export const cfgProvidersMaxInFlightRequests = register({
 effect(cfgProvidersMaxInFlightRequests, limits =>
 	configureProviderMaxInFlightRequests(normalizeProviderMaxInFlightRequests(limits)),
 );
+// The limits bind every omp process of this config root, through the daemon.
+configureProviderSlotBroker(new DaemonProviderSlots());
 
 export const cfgImagesDescribeForTextModels = register({
 	id: "images.describeForTextModels",
@@ -361,7 +379,7 @@ export const cfgModelToolCallLoopGuardEnabled = register({
 		tab: "model",
 		group: "Thinking",
 		label: "Tool-Call Loop Guard",
-		description: "Detect consecutive identical tool calls across turns and inject a corrective steer",
+		description: "Detect repeated tool-call patterns across turns and inject a corrective steer",
 	},
 });
 
@@ -373,7 +391,7 @@ export const cfgModelToolCallLoopGuardThreshold = register({
 		tab: "model",
 		group: "Thinking",
 		label: "Tool-Call Loop Threshold",
-		description: "Consecutive identical tool calls required before the corrective steer is injected",
+		description: "Consecutive repeated tool-call patterns required before the corrective steer is injected",
 	},
 });
 
@@ -752,6 +770,27 @@ export const cfgTierGoogle = register({
 	},
 });
 
+export const cfgTierDevin = register({
+	id: "tier.devin",
+	type: "enum",
+	values: SERVICE_TIER_DEVIN_VALUES,
+	default: "none",
+	ui: {
+		tab: "model",
+		group: "Sampling",
+		label: "Service Tier — Devin",
+		description:
+			"Processing tier for Devin requests. `priority` sends a model's fast lane (`-fast`, `-priority`, `-lightning` wire ids) where it has one; the same switch as `/fast` on a Devin model.",
+		options: SERVICE_TIER_DEVIN_OPTIONS,
+	},
+});
+
+/** Per-family service tiers configured by the `tier.<family>` settings; the starting `/fast` state of a fresh session. */
+export const cfgTiers = combine(
+	{ openai: cfgTierOpenai, anthropic: cfgTierAnthropic, google: cfgTierGoogle, devin: cfgTierDevin },
+	buildServiceTierByFamily,
+);
+
 export const cfgTierSubagent = register({
 	id: "tier.subagent",
 	type: "enum",
@@ -961,7 +1000,7 @@ export const cfgRetryFallbackChains = register({
 		group: "Retry & Fallback",
 		label: "Retry Fallback Chains",
 		description:
-			'JSON object mapping model roles, model selectors ("provider/model-id"), or provider wildcards ("provider/*") to ordered fallback selectors, e.g. {"default":["openai/gpt-4o-mini"],"google-antigravity/*":["google/*","google-vertex/*"]}. Model-oriented keys apply whenever that model/provider is active, regardless of role; a "provider/*" entry keeps the failing model\'s id and swaps the provider. An id-prefixed wildcard ("openrouter/google/*") re-prefixes the failing model\'s bare id (google-antigravity/gemini-x -> openrouter/google/gemini-x) and, used as a key, matches only that provider\'s ids under the prefix. A fallback entry may carry an explicit thinking suffix ("provider/model:low", ":high", ":max", ":off"); a bare entry inherits the failing turn\'s effort, and "provider/*" entries always inherit.',
+			'JSON object mapping model roles, model selectors ("provider/model-id"), or provider wildcards ("provider/*") to ordered fallback selectors, e.g. {"default":["openai/gpt-4o-mini"],"google/*":["google-vertex/*"]}. Model-oriented keys apply whenever that model/provider is active, regardless of role; a "provider/*" entry keeps the failing model\'s id and swaps the provider. An id-prefixed wildcard ("openrouter/google/*") re-prefixes the failing model\'s bare id (google/gemini-x -> openrouter/google/gemini-x) and, used as a key, matches only that provider\'s ids under the prefix. A fallback entry may carry an explicit thinking suffix ("provider/model:low", ":high", ":max", ":off"); a bare entry inherits the failing turn\'s effort, and "provider/*" entries always inherit.',
 	},
 });
 
@@ -1059,36 +1098,6 @@ export const cfgProvidersWebSearchTimeoutSeconds = register({
 			{ value: "120", label: "2 minutes" },
 			{ value: "180", label: "3 minutes" },
 			{ value: "300", label: "5 minutes" },
-		],
-	},
-});
-
-export const cfgProvidersAntigravityEndpoint = register({
-	id: "providers.antigravityEndpoint",
-	type: "enum",
-	values: ["auto", "production", "sandbox"] as const,
-	default: "auto",
-	ui: {
-		tab: "providers",
-		group: "Services",
-		label: "Antigravity Endpoint Mode",
-		description: "Endpoint routing strategy for google-antigravity providers (chat, search, image, discovery)",
-		options: [
-			{
-				value: "auto",
-				label: "Auto",
-				description: "Try production endpoint, fail over to sandbox on 5xx/429",
-			},
-			{
-				value: "production",
-				label: "Production Only",
-				description: "Force production endpoint only",
-			},
-			{
-				value: "sandbox",
-				label: "Sandbox Only",
-				description: "Force sandbox endpoint only",
-			},
 		],
 	},
 });
@@ -1491,7 +1500,7 @@ export const cfgProvidersOpenrouterVariant = register({
 export const cfgProvidersFetch = register({
 	id: "providers.fetch",
 	type: "enum",
-	values: ["auto", "native", "trafilatura", "lynx", "parallel", "firecrawl", "jina"] as const,
+	values: ["auto", "local", "parallel", "firecrawl", "jina"] as const,
 	default: "auto",
 	ui: {
 		tab: "providers",
@@ -1502,11 +1511,9 @@ export const cfgProvidersFetch = register({
 			{
 				value: "auto",
 				label: "Auto",
-				description: "Priority: native > trafilatura > lynx > parallel > firecrawl > jina",
+				description: "Priority: local > parallel > firecrawl > jina",
 			},
-			{ value: "native", label: "Native", description: "In-process HTML→Markdown converter (always available)" },
-			{ value: "trafilatura", label: "Trafilatura", description: "Auto-installs via uv/pip" },
-			{ value: "lynx", label: "Lynx", description: "Requires lynx system package" },
+			{ value: "local", label: "Local", description: "In-process reader engine (always available)" },
 			{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
 			{ value: "firecrawl", label: "Firecrawl", description: "Requires FIRECRAWL_API_KEY" },
 			{ value: "jina", label: "Jina", description: "Uses r.jina.ai reader (JINA_API_KEY optional)" },
@@ -1607,6 +1614,19 @@ export const cfgCodexResetsSalvageHorizonHours = register({
 	},
 });
 
+export const cfgCodexResetsExpirySalvage = register({
+	id: "codexResets.expirySalvage",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Codex Reset Expiry Salvage",
+		description:
+			"Spend saved Codex resets that are about to expire, even when no chat window is exhausted (a full reset forfeits any remaining weekly headroom and restarts the window). Off: auto-redeem only restores an exhausted, blocked account, and expiring credits are left to lapse, including the 5-minute last chance.",
+	},
+});
+
 /** Codex saved-reset auto-redeem policy (`codexResets.*`). */
 export const cfgCodexResets = combine({
 	autoRedeem5h: cfgCodexResetsAutoRedeem5h,
@@ -1614,6 +1634,7 @@ export const cfgCodexResets = combine({
 	minBlockedMinutes: cfgCodexResetsMinBlockedMinutes,
 	keepCredits: cfgCodexResetsKeepCredits,
 	salvageHorizonHours: cfgCodexResetsSalvageHorizonHours,
+	expirySalvage: cfgCodexResetsExpirySalvage,
 });
 
 /** Whether automatic reset redemption asks first, spends, or remains disabled. */

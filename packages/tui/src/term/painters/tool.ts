@@ -9,9 +9,9 @@ import { truncate } from "../../text/width";
 import { type Block, definePainter, EMPTY_BLOCK, type PaintContext } from "../paint";
 import { bodyRows, borderOf, boxRows, disclosed } from "./card";
 import { styledText } from "./layout";
-import { SPINNER_INTERVAL_MS } from "./spinner";
+import { spinnerIndex } from "./spinner";
 
-/** The status glyph of a tool head: the spinner while it works (still under reduced motion). */
+/** The status glyph of a tool head: the spinner while it works (still at a 0 spinner interval). */
 function statusGlyph(cx: PaintContext, status: TspCardStatus, tone: TspTone | undefined): string {
 	const theme = cx.theme;
 	const symbol = (key: string, color: string): string => theme.style(color, theme.symbols.symbol(key));
@@ -19,8 +19,8 @@ function statusGlyph(cx: PaintContext, status: TspCardStatus, tone: TspTone | un
 		case "running":
 		case "pending": {
 			const frames = theme.symbols.spinnerFrames;
-			if (cx.reduceMotion || frames.length === 0) return symbol("status.pending", "muted");
-			return theme.style("accent", frames[Math.floor(cx.now() / SPINNER_INTERVAL_MS) % frames.length]!);
+			if (cx.spinnerInterval === 0 || frames.length === 0) return symbol("status.pending", "muted");
+			return theme.style("accent", frames[spinnerIndex(cx, frames.length)]!);
 		}
 		case "error":
 			return symbol("status.error", "error");

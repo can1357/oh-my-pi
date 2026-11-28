@@ -58,6 +58,7 @@ import { DEFAULT_USAGE_REQUEST_TIMEOUT_MS, UsageCache } from "./auth/usage-cache
 import type { UsageLogger } from "./usage";
 import { defaultRankingStrategy, defaultUsageProvider } from "./usage/registry";
 
+export { OAUTH_ORG_POLICY_BLOCK_SCOPE } from "./auth/blocks";
 export {
 	isSameOAuthAccount,
 	isSqliteBusyError,
@@ -321,17 +322,18 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 				affinity.clearProvider(provider);
 			},
 		});
-		const refresher = new OAuthRefresher({
-			store,
-			pool,
-			override: options.refreshOAuthCredential,
-			overrideMints: options.refreshOAuthCredentialMints,
-		});
 		const usageProviders = options.usageProviderResolver ?? defaultUsageProvider;
 		// Key reports by the effective provider (runtime extension override first), so an
 		// override's `cacheVersion` separates its rows from other processes sharing the store.
 		const usageCache = new UsageCache(store, pool, provider => usage.providerFor(provider));
 		const blocks = new CredentialBlocks({ store, pool, health: blockHealth, usageCache, strategies });
+		const refresher = new OAuthRefresher({
+			store,
+			pool,
+			blocks,
+			override: options.refreshOAuthCredential,
+			overrideMints: options.refreshOAuthCredentialMints,
+		});
 		const affinity = new SessionAffinity(store, pool, overrides, this.#restrictions);
 		const usage = new UsageService({
 			store,
@@ -368,8 +370,12 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 			pool,
 			overrides,
 			selector,
+			blocks,
 			affinity,
 			rotate: (provider, sessionId, rotateOptions) => limits.rotate(provider, sessionId, rotateOptions),
+			learnBillingMode: (provider, resolved) => {
+				if (options.copilotBillingProbe !== false) void usage.learnCopilotBillingMode(provider, resolved);
+			},
 			sourceLabel,
 		});
 		const oauth = new OAuthAccounts({ pool, overrides, policies, selector, affinity, refresher });

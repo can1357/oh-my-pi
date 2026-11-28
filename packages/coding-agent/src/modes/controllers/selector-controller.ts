@@ -1,6 +1,7 @@
 import { type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model, UsageReport } from "@oh-my-pi/pi-ai";
+import { LoginCancelledError } from "@oh-my-pi/pi-ai/error";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
@@ -8,17 +9,12 @@ import { type JSXNode, type KeyEvent, signal, type UiNode, untrack } from "@oh-m
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { actionKey, formatKeyHint } from "../../ui/keys/hints";
 import { getAgentDir, getProjectDir, logger, normalizePathForComparison, sanitizeText } from "@oh-my-pi/pi-utils";
-import {
-	ADVISOR_DEFAULT_TOOL_NAMES,
-	discoverAdvisorConfigs,
-	loadWatchdogConfigFile,
-	resolveAdvisorConfigEditPath,
-	saveWatchdogConfigFile,
-} from "../../advisor";
+import { ADVISOR_DEFAULT_TOOL_NAMES } from "../../advisor/advise-tool";
+import { loadWatchdogConfigFile, resolveAdvisorConfigEditPath, saveWatchdogConfigFile } from "../../advisor/config";
 import { reset as resetCapabilities } from "../../capability";
 import type { AdvisorConfigScope } from "../../advisor/advisor-config-types";
 import { showGitOverlay } from "../../cli/git-tui";
-import { formatLoginIdentity } from "../../cli/oauth-terminal";
+import { formatLoginIdentity, loginFollowUps } from "../../cli/oauth-terminal";
 import {
 	acquireModelRoleMutation,
 	applyModelPreset,
@@ -43,8 +39,14 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../../extensibility/plugins/marketplace";
-import type { AgentHubOpenOptions, InteractiveModeContext, ResumeSessionOptions } from "../../modes/types";
+import type {
+	AgentHubOpenOptions,
+	InteractiveModeContext,
+	ResumeSessionOptions,
+	SubmittedUserInput,
+} from "../../modes/types";
 import type { SessionOAuthAccountList } from "../../session/agent-session-types";
+import type { AiuTotals } from "../../session/aiu-billing";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import { credentialStoreLabel } from "../../session/auth-broker-config";
 import {
@@ -64,12 +66,14 @@ import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds, setSessionPinned } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
+import { connectedProviderName } from "../view-model/chrome/format";
 import type { LogoutAccount } from "../view-model/overlays/logout-account-selector";
 import { describeRedeemOutcome, toResetUsageAccounts } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
 import {
 	accountIdentityLabel,
 	collectStoredAccounts,
+	usageAuthRejectedHint,
 	collectUnreportedAccounts,
 	selectReportableAccounts,
 } from "../../slash-commands/helpers/usage-accounts";
@@ -117,18 +121,22 @@ import { LoginDialog, LoginDialogState } from "../../ui/overlays/panels/login-di
 import { UsageDashboard } from "../../ui/overlays/panels/usage-dashboard";
 import { UsageDashboardModel } from "../../ui/overlays/panels/usage-dashboard-model";
 import { AgentHub, type AgentHubHandle, type AgentHubProps } from "../../ui/overlays/pickers/agent-hub";
-import { AgentsHub } from "../../ui/overlays/pickers/agents-hub";
+import { AgentsHub, type AgentsHubHandle } from "../../ui/overlays/pickers/agents-hub";
 import { CopySelector } from "../../ui/overlays/pickers/copy-selector";
 import { HistorySearch } from "../../ui/overlays/pickers/history-search";
 import { LogoutAccountSelector } from "../../ui/overlays/pickers/logout-account-selector";
 import { ModelHub, type ModelHubProps } from "../../ui/overlays/pickers/model-hub";
 import type { ModelHubState } from "../../ui/overlays/pickers/model-hub-state";
-import { ModelPicker, type ModelPickerProps } from "../../ui/overlays/pickers/model-picker";
+import { ModelPicker, type ModelPickerProps, prewarmModelPicker } from "../../ui/overlays/pickers/model-picker";
 import { type OAuthAuthState, OAuthSelector } from "../../ui/overlays/pickers/oauth-selector";
 import { ResetUsageSelector } from "../../ui/overlays/pickers/reset-usage-selector";
-import { RewindSelector, rewindTargets } from "../../ui/overlays/pickers/rewind-selector";
+import { hasRewindPoint, RewindSelector } from "../../ui/overlays/pickers/rewind-selector";
 import { SessionAccountSelector } from "../../ui/overlays/pickers/session-account-selector";
-import { SessionSelector, type SessionSelectorProps } from "../../ui/overlays/pickers/session-selector";
+import {
+	SessionSelector,
+	sessionSelectorFocus,
+	type SessionSelectorProps,
+} from "../../ui/overlays/pickers/session-selector";
 import { ThinkingSelector } from "../../ui/overlays/pickers/thinking-selector";
 import { TreeSelector } from "../../ui/overlays/pickers/tree-selector";
 import { PluginSelector } from "../../ui/overlays/plugins/selector";
@@ -147,6 +155,7 @@ import {
 	outcomeLinesView,
 	REWIND_PAGE,
 	successText,
+	transcriptFocus,
 	usageDashboardView,
 } from "./selector-views";
 
@@ -181,6 +190,25 @@ function statusLinePreview(preview: StatusLinePreview): Partial<StatusLineSettin
 /** Keys of a select sheet go to its `picker`. */
 const pickerFocus = (root: UiNode): UiNode => firstOfKind(root, "picker");
 
+/**
+ * History sizes from which a picker's first terminal paint takes about 100 ms (headless profiles:
+ * a /copy or /rewind tail of 600 entries 130–220 ms, a /tree of 5,814 entries 27 ms). A smaller
+ * history opens at once: a loading notice would only flash.
+ */
+const SLOW_TRANSCRIPT_PICKER_ENTRIES = 300;
+const SLOW_TREE_PICKER_ENTRIES = 20_000;
+
+/** The entries under `roots`, counted without recursion: a long session nests thousands deep. */
+function treeSize(roots: readonly SessionTreeNode[]): number {
+	let size = 0;
+	const pending = [...roots];
+	for (let node = pending.pop(); node; node = pending.pop()) {
+		size++;
+		for (const child of node.children) pending.push(child);
+	}
+	return size;
+}
+
 /** Menus that open at most once: a repeat request focuses the open one. */
 type MenuKind = "settings" | "model-picker" | "model-hub" | "agents-dashboard" | "agent-hub" | "usage-dashboard";
 
@@ -210,6 +238,8 @@ export class SelectorController {
 	#openMenus = new Map<MenuKind, OpenMenu>();
 	/** The open agent hub's handle (deep links into the open hub). */
 	#agentHub: AgentHubHandle | undefined;
+	/** A history picker waiting for its loading notice's frame. */
+	#historyPickerOpening: Promise<void> | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {}
 
@@ -318,6 +348,45 @@ export class SelectorController {
 		const handle = this.ctx.showEditorAreaDialog(() => build(done), { focus });
 	}
 
+	/**
+	 * Say the history is loading before a picker that draws it: the terminal paints such a picker in
+	 * one frame that takes a while on a long session, and until then the keypress showed nothing.
+	 * The notice takes the composer hint's place, so nothing on screen moves.
+	 */
+	async #presentHistoryLoader(): Promise<void> {
+		const composer = this.ctx.composer;
+		const symbols = currentTheme().symbols;
+		composer.setNotice([
+			{ t: symbols.symbol("status.pending"), s: "accent" },
+			{ t: " " },
+			{ t: "Loading the session history…", s: "dim em" },
+		]);
+		await this.ctx.shell.nextFrame();
+		// The caller opens its picker before the next frame: the notice stays on screen while that frame paints.
+		composer.setNotice(undefined);
+	}
+
+	/**
+	 * Open a history picker with `open`: at once, or, when the terminal renderer would take a while
+	 * to paint its `slow` history, after a frame showing the loading notice. A request while one
+	 * waits joins it and opens nothing of its own: the composer still holds the keys then, and a
+	 * second picker would stack on the first.
+	 */
+	#openHistoryPicker(slow: boolean, open: () => void): Promise<void> {
+		if (this.#historyPickerOpening) return this.#historyPickerOpening;
+		if (!slow || this.ctx.shell.native()) {
+			open();
+			return Promise.resolve();
+		}
+		const opening = this.#presentHistoryLoader()
+			.then(open)
+			.finally(() => {
+				this.#historyPickerOpening = undefined;
+			});
+		this.#historyPickerOpening = opening;
+		return opening;
+	}
+
 	showSettingsSelector(): void {
 		if (this.#focusOpenMenu("settings")) return;
 		const menu = this.#claimMenu("settings");
@@ -415,24 +484,28 @@ export class SelectorController {
 	 * idiom): compact subscriptions grid + daily activity heatmap, with the
 	 * classic full report one keypress away. Takes no transcript space.
 	 */
-	showUsageDashboard(reports: UsageReport[]): void {
+	showUsageDashboard(reports: UsageReport[], sessionAiu?: AiuTotals): void {
 		// Checked here, not before the fetch: a repeat `/usage` whose fetch lands
 		// while the first dashboard is open focuses it instead of stacking a copy.
 		const kind = "usage-dashboard";
 		if (this.#focusOpenMenu(kind)) return;
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
-		const accounts = selectReportableAccounts(
-			collectStoredAccounts(authStorage),
-			provider => authStorage.usage.providerFor(provider) !== undefined,
-		);
-		if (reports.length === 0 && accounts.length === 0) {
+		const dashboardData = (reports: UsageReport[]) => {
+			const accounts = selectReportableAccounts(
+				collectStoredAccounts(authStorage),
+				provider => authStorage.usage.providerFor(provider) !== undefined,
+			);
+			const unavailableAccounts = collectUnreportedAccounts(reports, accounts).map(account => ({
+				provider: account.provider,
+				label: [accountIdentityLabel(account), usageAuthRejectedHint(account)].filter(Boolean).join(" — "),
+			}));
+			return { reports, unavailableAccounts };
+		};
+		const data = dashboardData(reports);
+		if (reports.length === 0 && data.unavailableAccounts.length === 0 && sessionAiu === undefined) {
 			this.ctx.showWarning("No usage data available.");
 			return;
 		}
-		const unavailableAccounts = collectUnreportedAccounts(reports, accounts).map(account => ({
-			provider: account.provider,
-			label: accountIdentityLabel(account),
-		}));
 		const currentProvider = this.ctx.session.model?.provider;
 		const activeAccount = currentProvider
 			? this.ctx.session.modelRegistry.authStorage.oauth.identity(currentProvider, this.ctx.session.sessionId)
@@ -441,9 +514,9 @@ export class SelectorController {
 		const menu = this.#claimMenu(kind);
 		const size = this.ctx.shell.size;
 		const dashboard = new UsageDashboardModel({
-			reports,
-			unavailableAccounts,
-			renderDetail: (width, current) =>
+			...data,
+			sessionAiu,
+			renderDetail: (width, { reports: current, unavailableAccounts }) =>
 				renderUsageReports(
 					current,
 					currentTheme(),
@@ -464,7 +537,10 @@ export class SelectorController {
 					throw error;
 				}
 			},
-			refresh: () => this.ctx.session.fetchUsageReports(),
+			refresh: async () => {
+				const refreshed = await this.ctx.session.fetchUsageReports();
+				return refreshed && dashboardData(refreshed);
+			},
 			terminalRows: () => size().rows,
 			onClose: () => this.#closeMenu(menu),
 		});
@@ -520,7 +596,7 @@ export class SelectorController {
 				defaultToolNames: ADVISOR_DEFAULT_TOOL_NAMES,
 				externalEditor: text => {
 					const command = getEditorCommand();
-					return command ? openInEditor(command, text) : Promise.resolve(null);
+					return command ? this.ctx.suspend(() => openInEditor(command, text)) : Promise.resolve(null);
 				},
 				scopedModels: this.ctx.session.scopedModels,
 				availableToolNames: this.ctx.session.getAdvisorAvailableToolNames(),
@@ -533,17 +609,10 @@ export class SelectorController {
 				loadDoc: async scope => loadWatchdogConfigFile(await resolveAdvisorConfigEditPath(scope, dirs)),
 				save: async (scope, doc) => {
 					await saveWatchdogConfigFile(await resolveAdvisorConfigEditPath(scope, dirs), doc);
-					// Re-discover the merged roster (project + user) so the live advisors
-					// reflect cross-level precedence, not just the edited file.
-					const discovered = await discoverAdvisorConfigs(cwd, agentDir);
-					const count = this.ctx.session.applyAdvisorConfigs(
-						discovered.advisors,
-						discovered.sharedInstructions,
-						discovered.sharedMaxNotesPerUpdate,
-					);
+					const { count, warnings } = await this.ctx.session.reloadAdvisorConfigs();
 					this.ctx.statusLine.refresh();
-					if (discovered.warnings.length > 0) {
-						this.ctx.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(discovered.warnings).join("; ")}`);
+					if (warnings.length > 0) {
+						this.ctx.showWarning(`WATCHDOG.yml: ${sanitizeDisplayWarnings(warnings).join("; ")}`);
 					}
 					this.ctx.showStatus(
 						count > 0
@@ -673,19 +742,24 @@ export class SelectorController {
 			model => this.ctx.session.effectiveServiceTier(model),
 		);
 		const size = this.ctx.shell.size;
-		let reload: (() => Promise<void>) | undefined;
-		const handle = this.#showFullscreenMenu("agents-dashboard", menu, () =>
-			AgentsHub({
-				deps,
-				rows: () => size().rows,
-				onCancel: () => this.#closeMenu(menu),
-				ref: hub => {
-					reload = hub.reload;
-				},
-			}),
+		let hub: AgentsHubHandle | undefined;
+		const handle = this.#showFullscreenMenu(
+			"agents-dashboard",
+			menu,
+			() =>
+				AgentsHub({
+					deps,
+					rows: () => size().rows,
+					onCancel: () => this.#closeMenu(menu),
+					ref: instance => {
+						hub = instance;
+					},
+				}),
+			// The hub swaps its root (picker ↔ card): keys go through the layer, not a node it replaces.
+			{ onKey: key => hub?.onKey(key) ?? false },
 		);
 		try {
-			await reload?.();
+			await hub?.reload();
 		} catch (error) {
 			// A dashboard that never loaded must not block the next `/agents`.
 			handle.close();
@@ -729,6 +803,25 @@ export class SelectorController {
 			return;
 		}
 		this.#showModelHub({});
+	}
+
+	/**
+	 * Builds what the first alt+p reads ahead of it, in background slices
+	 * ({@link prewarmModelPicker}), once the startup model discovery settled:
+	 * composing the catalog earlier would make each discovery land recompose it.
+	 */
+	async warmModelPicker(signal: AbortSignal): Promise<void> {
+		const registry = this.ctx.session.modelRegistry;
+		await registry.awaitInitialBackgroundRefresh(signal);
+		if (signal.aborted) return;
+		const viewed = this.ctx.viewSession;
+		await prewarmModelPicker({
+			source: createModelBrowserSource(this.ctx.settings, model => viewed.effectiveServiceTier(model)),
+			registry,
+			scopedModels: this.ctx.session.scopedModels.map(entry => entry.model),
+			currentContextTokens: viewed.getContextUsage()?.tokens ?? 0,
+			signal,
+		});
 	}
 
 	/**
@@ -1140,6 +1233,7 @@ export class SelectorController {
 				done();
 				void this.#loginThenReopenModelHub(providerId);
 			},
+			onManageAccess: url => openPath(url),
 			onCatalogRefreshed: async () => {
 				await this.ctx.session.refreshScopedModels();
 				return this.ctx.session.scopedModels;
@@ -1336,43 +1430,43 @@ export class SelectorController {
 	}
 
 	/** The rewind selector (Esc Esc), its outline on the latest turn, or on entry `startAt` (a turn's Rewind to here…). */
-	showUserMessageSelector(startAt?: string): void {
+	async showUserMessageSelector(startAt?: string): Promise<void> {
 		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
-		if (entries.length === 0) {
+		if (!hasRewindPoint(entries)) {
 			this.ctx.showStatus("No messages to branch from");
 			return;
 		}
 
-		if (rewindTargets(entries).length === 0) {
-			this.ctx.showStatus("No messages to branch from");
-			return;
-		}
-		const done = () => {
-			overlay?.close();
-			this.focusActiveEditorArea();
-		};
-		// Fullscreen alternate-screen overlay: the replica draws over the live
-		// transcript, and the normal screen stays untouched until the rewind
-		// itself rewrites it.
-		const native = this.ctx.shell.native();
-		const overlay = this.ctx.shell.overlays.show(
-			() =>
-				fullscreenMenuView(
-					"rewind",
-					RewindSelector({
-						entries,
-						siblingPaths: entryId => this.#siblingBranchPaths(entryId),
-						startAt,
-						terminalRows: () => this.ctx.shell.size().rows,
-						...(native ? { replica: turns => this.ctx.createTranscriptReplica(turns) } : {}),
-						onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
-						onCancel: done,
-					}),
-					undefined,
-					REWIND_PAGE,
-				),
-			{ focus: layerDock },
-		);
+		return this.#openHistoryPicker(entries.length >= SLOW_TRANSCRIPT_PICKER_ENTRIES, () => {
+			const done = () => {
+				overlay?.close();
+				this.focusActiveEditorArea();
+			};
+			// Fullscreen alternate-screen overlay: the replica draws over the live
+			// transcript, and the normal screen stays untouched until the rewind
+			// itself rewrites it.
+			const native = this.ctx.shell.native();
+			const overlay = this.ctx.shell.overlays.show(
+				() =>
+					fullscreenMenuView(
+						"rewind",
+						RewindSelector({
+							entries,
+							siblingPaths: entryId => this.#siblingBranchPaths(entryId),
+							startAt,
+							terminalRows: () => this.ctx.shell.size().rows,
+							...(native
+								? { replica: (turns, clipped) => this.ctx.createTranscriptReplica(turns, clipped) }
+								: {}),
+							onSelect: entryId => void this.#rewindFromTranscript(entryId, done),
+							onCancel: done,
+						}),
+						undefined,
+						REWIND_PAGE,
+					),
+				{ focus: layerDock },
+			);
+		});
 	}
 
 	/**
@@ -1410,69 +1504,116 @@ export class SelectorController {
 	}
 
 	/**
-	 * Complete an esc-esc rewind in place via `navigateTree`: the session tree
-	 * keeps the old path as a sibling branch instead of forking a child
-	 * session. A user-request target (plain prompt, user-invoked skill/collab
-	 * prompt) rewinds PAST itself (leaf moves to its parent) and its draft
-	 * replaces the editor text, so it is a real move even when it is the
-	 * current leaf; every other target lands the leaf on the entry. `done`
-	 * closes the fullscreen selector after the transcript is rebuilt so the
-	 * alternate screen never flashes a stale transcript. `resend` sends a user
-	 * target's prompt again at once (a turn's Retry) instead of leaving it in
-	 * the editor; otherwise the status toast offers Undo ({@link #undoRewind}).
+	 * Complete an esc-esc rewind by branching: the session moves onto a new file holding the
+	 * conversation up to the target, and the file it leaves stays on disk unchanged. A
+	 * user-request target (plain prompt, user-invoked skill/collab prompt) branches before
+	 * itself and its draft replaces the editor text, so it is a real move even when it is the
+	 * current leaf; every other target branches through the entry (`AgentSession.fork`). Work
+	 * still running in the abandoned conversation stops first. `done` closes the fullscreen
+	 * selector after the transcript is rebuilt so the alternate screen never flashes a stale
+	 * transcript. Retry submits instead of leaving the prompt in the editor; otherwise the
+	 * status toast offers Undo ({@link #undoRewind}).
 	 */
-	async #rewindFromTranscript(entryId: string, done: () => void, resend = false): Promise<void> {
-		const entry = this.ctx.sessionManager.getEntry(entryId);
-		if (!entry || !isTranscriptEntry(entry)) {
-			done();
-			return;
-		}
-
-		const isUserTarget = isUserRequestEntry(entry);
-		const realLeafId = this.ctx.sessionManager.getLeafId();
-		if (entryId === realLeafId && !isUserTarget) {
-			done();
-			this.ctx.showStatus("Already at this point");
-			return;
-		}
-		const treeRewind = this.#treeRewindBoundary(entryId, realLeafId);
-		const branch = this.ctx.sessionManager.getBranch();
-		const at = branch.findIndex(e => e.id === entryId);
-		const dropped = at < 0 ? 0 : branch.slice(isUserTarget ? at : at + 1).filter(e => isUserRequestEntry(e)).length;
+	async #rewindFromTranscript(
+		target: string | SubmittedUserInput,
+		done: () => void,
+		turn?: "edit" | "retry",
+	): Promise<void> {
 		const draft = { text: this.ctx.composer.text(), images: [...this.ctx.composer.pendingImages] };
 		try {
-			const result = await this.ctx.session.navigateTree(entryId, { summarize: false });
+			if (turn || this.ctx.session.isBusyForSnapshot) {
+				if (this.ctx.loopModeEnabled) this.ctx.pauseLoop();
+				this.ctx.cancelGoalContinuation();
+				this.ctx.cancelPendingSubmission();
+				this.ctx.yieldCompaction = undefined;
+				this.ctx.compactionQueueOrigin = undefined;
+				this.ctx.compactionQueuedMessages = [];
+				this.ctx.updatePendingMessagesDisplay();
+				await this.ctx.session.abortForRewind();
+			}
+			// Before the first token the bubble exists, but the session may only record
+			// its user entry as the abort unwinds. Never substitute another turn by text.
+			const entry =
+				typeof target === "string"
+					? this.ctx.sessionManager.getEntry(target)
+					: this.ctx.sessionManager
+							.getBranch()
+							.findLast(
+								e =>
+									e.type === "message" &&
+									e.message.role === "user" &&
+									e.message.timestamp === target.submittedAt,
+							);
+			if (!entry || !isTranscriptEntry(entry)) {
+				if (typeof target !== "string") {
+					// Cancelled before dispatch: there is no persisted turn to rewind past.
+					await this.#rebuildEditedTranscript();
+					this.ctx.composer.setDraft(target.text, target.images);
+					if (turn === "retry") this.ctx.composer.submit();
+				}
+				done();
+				return;
+			}
+			const entryId = entry.id;
+			const isUserTarget = isUserRequestEntry(entry);
+			// Undo must return to the settled leaf, including any interrupted tool result or partial answer.
+			const realLeafId = this.ctx.sessionManager.getLeafId();
+			if (entryId === realLeafId && !isUserTarget) {
+				done();
+				this.ctx.showStatus("Already at this point");
+				return;
+			}
+			const treeRewind = turn ? undefined : this.#treeRewindBoundary(entryId, realLeafId);
+			const branch = this.ctx.sessionManager.getBranch();
+			const at = branch.findIndex(e => e.id === entryId);
+			const dropped =
+				at < 0 ? 0 : branch.slice(isUserTarget ? at : at + 1).filter(e => isUserRequestEntry(e)).length;
+			// Undo resumes the file the rewind leaves; an unpersisted session has none to return to.
+			const sourceFile = this.ctx.sessionManager.isSessionOnDisk()
+				? this.ctx.sessionManager.getSessionFile()
+				: undefined;
+			await this.ctx.prepareSessionSwitch();
+			const result = isUserTarget
+				? await this.ctx.session.branch(entryId, { requireIdle: true })
+				: { cancelled: !(await this.ctx.session.fork(entryId)) };
 			if (result.cancelled) {
 				done();
-				this.ctx.showStatus("Navigation cancelled");
+				this.ctx.showStatus("Rewind cancelled");
 				return;
 			}
 			const fastRewind =
 				treeRewind !== undefined &&
 				this.ctx.sessionManager.getLeafId() === treeRewind.expectedLeafId &&
 				this.ctx.truncateTranscriptFromMessage(treeRewind.message);
-			if (!fastRewind) {
-				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+			if (turn) {
+				await this.#rebuildEditedTranscript();
+			} else {
+				if (!fastRewind) await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+				await this.ctx.reloadTodos();
 			}
-			await this.ctx.reloadTodos();
-			if (result.editorText && (isUserTarget || !this.ctx.composer.text().trim())) {
-				this.ctx.composer.setDraft(result.editorText, result.editorImages);
-				if (resend && isUserTarget) this.ctx.composer.submit();
+			this.ctx.statusLine.refresh();
+			if ("selectedText" in result) {
+				this.ctx.composer.setDraft(result.selectedText, result.selectedImages);
+				if (turn === "retry") this.ctx.composer.submit();
 			}
 			done();
-			if (resend) {
+			if (turn === "retry") {
 				this.ctx.showStatus("Retrying the turn");
 				return;
 			}
+			const rewound =
+				dropped > 0 ? `Rewound ${dropped} turn${dropped === 1 ? "" : "s"}` : "Rewound to selected point";
 			this.ctx.showStatus(
-				dropped > 0 ? `Rewound ${dropped} turn${dropped === 1 ? "" : "s"}` : "Rewound to selected point",
-				{
-					action: {
-						act: "undo",
-						label: "Undo",
-						run: () => void this.#undoRewind(realLeafId, isUserTarget ? draft : undefined),
-					},
-				},
+				`${rewound} in a new session`,
+				sourceFile
+					? {
+							action: {
+								act: "undo",
+								label: "Undo",
+								run: () => void this.#undoRewind(sourceFile, isUserTarget ? draft : undefined),
+							},
+						}
+					: undefined,
 			);
 		} catch (error) {
 			done();
@@ -1480,23 +1621,20 @@ export class SelectorController {
 		}
 	}
 
+	async #rebuildEditedTranscript(): Promise<void> {
+		this.ctx.eventController.resetTranscriptAnchors();
+		this.ctx.clearTransientSessionUi();
+		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
+		await this.ctx.reloadTodos();
+	}
+
 	/**
-	 * Undo of a transcript rewind: the leaf goes back to `leafId`, where it was (the rewind kept that path as a
-	 * branch), and `draft`, what the editor held before the rewind put a prompt there, comes back.
+	 * Undo of a transcript rewind: resumes `sessionFile`, the session the rewind branched from (left unchanged
+	 * on disk), and brings back `draft`, what the editor held before the rewind put a prompt there.
 	 */
-	async #undoRewind(
-		leafId: string | null,
-		draft: { text: string; images: ImageContent[] } | undefined,
-	): Promise<void> {
-		if (!leafId) return;
+	async #undoRewind(sessionFile: string, draft: { text: string; images: ImageContent[] } | undefined): Promise<void> {
 		try {
-			const result = await this.ctx.session.navigateTree(leafId, { summarize: false });
-			if (result.cancelled) {
-				this.ctx.showStatus("Navigation cancelled");
-				return;
-			}
-			await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
-			await this.ctx.reloadTodos();
+			if (!(await this.handleResumeSession(sessionFile))) return;
 			if (draft) this.ctx.composer.setDraft(draft.text, draft.images);
 			this.ctx.showStatus("Rewind undone");
 		} catch (error) {
@@ -1506,22 +1644,30 @@ export class SelectorController {
 
 	/**
 	 * A transcript turn's hold-menu action on `message`, found on the current branch by role and timestamp:
-	 * `rewind` opens the rewind selector on it; `edit` rewinds past the turn's prompt and puts it in the editor,
-	 * as Esc Esc does; `retry` rewinds past the prompt and sends it again; `fork` moves onto a new session
-	 * holding the conversation up to the message, the old one kept on disk.
+	 * `rewind` opens the rewind selector on it; `edit` branches a new session before the turn's prompt and puts
+	 * it in the editor, as Esc Esc does; `retry` branches the same way and sends the prompt again; `fork` moves
+	 * onto a new session holding the conversation up to the message. Each keeps the old session on disk.
 	 */
-	async runTurnAction(turn: TurnAct, message: TurnMessage): Promise<void> {
+	async runTurnAction(turn: TurnAct, message: TurnMessage, pending?: SubmittedUserInput): Promise<void> {
+		if (turn === "retry" && (this.ctx.composer.text().trim() || this.ctx.composer.pendingImages.length > 0)) {
+			this.ctx.showStatus("Send or clear the draft to retry this turn");
+			return;
+		}
 		const branch = this.ctx.sessionManager.getBranch();
 		const index = branch.findLastIndex(
 			e => e.type === "message" && e.message.role === message.role && e.message.timestamp === message.at,
 		);
 		const entry = branch[index];
 		if (!entry) {
+			if (message.role === "user" && pending?.submittedAt === message.at && (turn === "edit" || turn === "retry")) {
+				await this.#rewindFromTranscript(pending, () => {}, turn);
+				return;
+			}
 			this.ctx.showStatus("That message is no longer on this branch");
 			return;
 		}
 		if (turn === "rewind") {
-			this.showUserMessageSelector(entry.id);
+			await this.showUserMessageSelector(entry.id);
 			return;
 		}
 		if (turn === "fork") {
@@ -1534,12 +1680,7 @@ export class SelectorController {
 			this.ctx.showStatus("No prompt to resend before this answer");
 			return;
 		}
-		// Retry sends the prompt through the editor, which holds the user's unsent draft.
-		if (turn === "retry" && (this.ctx.composer.text().trim() || this.ctx.composer.pendingImages.length > 0)) {
-			this.ctx.showStatus("Send or clear the draft to retry this turn");
-			return;
-		}
-		await this.#rewindFromTranscript(prompt.id, () => {}, turn === "retry");
+		await this.#rewindFromTranscript(prompt.id, () => {}, turn);
 	}
 
 	/** Fork from here: the session moves onto a new file holding the conversation up to `entryId`. */
@@ -1564,7 +1705,7 @@ export class SelectorController {
 		);
 	}
 
-	showCopySelector(): void {
+	async showCopySelector(): Promise<void> {
 		// The session on screen: a focused subagent's transcript, else the main one.
 		const session = this.ctx.viewSession;
 		const entries = session.sessionManager.getBranch().filter(isTranscriptEntry);
@@ -1573,39 +1714,41 @@ export class SelectorController {
 			return;
 		}
 
-		const done = () => {
-			overlay?.close();
-			this.focusActiveEditorArea();
-		};
-		const overlay = this.ctx.shell.overlays.show(
-			() =>
-				fullscreenMenuView(
-					"copy",
-					CopySelector({
-						entries,
-						onPick: (content, label) => {
-							done();
-							if (!content.trim()) {
-								this.ctx.showStatus("Nothing to copy in that item");
-								return;
-							}
-							void copyToClipboard(content);
-							this.ctx.showStatus(`Copied ${label} to clipboard`);
-						},
-						onOpen: (href, label) => {
-							done();
-							openPath(href);
-							this.ctx.showStatus(`Opening ${label}: ${href}`);
-						},
-						onCancel: done,
-						terminalRows: () => this.ctx.shell.size().rows,
-					}),
-				),
-			{ focus: layerContent },
-		);
+		return this.#openHistoryPicker(entries.length >= SLOW_TRANSCRIPT_PICKER_ENTRIES, () => {
+			const done = () => {
+				overlay?.close();
+				this.focusActiveEditorArea();
+			};
+			const overlay = this.ctx.shell.overlays.show(
+				() =>
+					fullscreenMenuView(
+						"copy",
+						CopySelector({
+							entries,
+							onPick: (content, label) => {
+								done();
+								if (!content.trim()) {
+									this.ctx.showStatus("Nothing to copy in that item");
+									return;
+								}
+								void copyToClipboard(content);
+								this.ctx.showStatus(`Copied ${label} to clipboard`);
+							},
+							onOpen: (href, label) => {
+								done();
+								openPath(href);
+								this.ctx.showStatus(`Opening ${label}: ${href}`);
+							},
+							onCancel: done,
+							terminalRows: () => this.ctx.shell.size().rows,
+						}),
+					),
+				{ focus: layerContent },
+			);
+		});
 	}
 
-	showTreeSelector(): void {
+	async showTreeSelector(): Promise<void> {
 		const tree = this.ctx.sessionManager.getTree();
 		const realLeafId = this.ctx.sessionManager.getLeafId();
 
@@ -1614,6 +1757,12 @@ export class SelectorController {
 			return;
 		}
 
+		return this.#openHistoryPicker(treeSize(tree) >= SLOW_TREE_PICKER_ENTRIES, () =>
+			this.#mountTreeSelector(tree, realLeafId),
+		);
+	}
+
+	#mountTreeSelector(tree: readonly SessionTreeNode[], realLeafId: string | null): void {
 		this.#showInEditorArea(done =>
 			TreeSelector({
 				roots: tree,
@@ -1663,7 +1812,7 @@ export class SelectorController {
 
 						if (summaryChoice === undefined) {
 							// User pressed escape - re-show tree selector
-							this.showTreeSelector();
+							void this.showTreeSelector();
 							return;
 						}
 
@@ -1723,7 +1872,7 @@ export class SelectorController {
 						if (result.aborted) {
 							// Summarization aborted - re-show tree selector
 							this.ctx.showStatus("Branch summarization cancelled");
-							this.showTreeSelector();
+							void this.showTreeSelector();
 							return;
 						}
 						if (result.cancelled) {
@@ -2010,7 +2159,7 @@ export class SelectorController {
 						},
 					}),
 				),
-			{ focus: layerContent },
+			{ focus: sessionSelectorFocus },
 		);
 	}
 
@@ -2072,19 +2221,32 @@ export class SelectorController {
 		// AgentSession owns the transaction. It restores the complete source state
 		// if applying the target project's cwd fails, including in-memory sessions.
 		let modelFallbackWarning: string | undefined;
-		if (
-			(await this.ctx.session.switchSession(target.sessionPath, {
+		// The warning of the last cwd application, which names where the session ends up. Shown after the
+		// re-render below, which would clear it; a switch that does not commit renders nothing more, so a
+		// rollback's warning shows at once.
+		let memoryWarning: string | undefined;
+		let switched = false;
+		try {
+			switched = await this.ctx.session.switchSession(target.sessionPath, {
 				onCwdChange: async (newCwd, sourceCwd) => {
+					memoryWarning = undefined;
 					if (normalizePathForComparison(newCwd) === normalizePathForComparison(sourceCwd)) return true;
-					return this.ctx.applyCwdChange(newCwd);
+					return this.ctx.applyCwdChange(newCwd, {
+						// The switch calls back with the directory this resume started in only to roll back to it.
+						restore: normalizePathForComparison(newCwd) === normalizePathForComparison(previousCwd),
+						onWarning: warning => {
+							memoryWarning = warning;
+						},
+					});
 				},
 				onModelFallback: warning => {
 					modelFallbackWarning = warning;
 				},
-			})) === false
-		) {
-			return false;
+			});
+		} finally {
+			if (!switched && memoryWarning) this.ctx.showWarning(memoryWarning);
 		}
+		if (!switched) return false;
 		this.ctx.clearTransientSessionUi();
 		const newCwd = this.ctx.sessionManager.getCwd();
 		const movedProject = normalizePathForComparison(newCwd) !== normalizePathForComparison(previousCwd);
@@ -2111,6 +2273,7 @@ export class SelectorController {
 		}
 		if (continuation) this.ctx.showWarning(formatSessionContinuationNotice(continuation));
 		if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
+		if (memoryWarning) this.ctx.showWarning(memoryWarning);
 		return true;
 	}
 
@@ -2245,7 +2408,17 @@ export class SelectorController {
 			const destination = await credentialStoreLabel(getOAuthCredentialProvider(providerId));
 			this.ctx.present(() =>
 				outcomeLinesView([
-					["success", successText(`Successfully logged in to ${providerId}${who ? ` as ${who}` : ""}`)],
+					[
+						"success",
+						successText(
+							`Successfully logged in to ${connectedProviderName(providerId)}${who ? ` as ${who}` : ""}`,
+						),
+					],
+					...(identity
+						? loginFollowUps(providerId, identity, `/login ${providerId}`).map(
+								({ tone, text }) => [tone, text] as const,
+							)
+						: []),
 					["dim", `Credentials saved to ${destination}`],
 				]),
 			);
@@ -2256,6 +2429,11 @@ export class SelectorController {
 				// surfaced "Login cancelled".
 				return false;
 			}
+			if (error instanceof LoginCancelledError) {
+				// Declining the provider's consent screen is a choice, not a failure.
+				this.ctx.showStatus(error.message);
+				return false;
+			}
 			this.ctx.showError(`Login failed: ${error instanceof Error ? error.message : String(error)}`);
 			return false;
 		} finally {
@@ -2264,24 +2442,26 @@ export class SelectorController {
 	}
 
 	async #handleCredentialLogout(providerId: string, account: LogoutAccount): Promise<void> {
+		const providerName = connectedProviderName(providerId);
 		try {
 			// Before the logout: removing a broker-unserved provider's last local login hands it back to the broker.
 			const source = await credentialStoreLabel(providerId);
-			const { removed, remainingSource } = await logoutCredential(
+			const { removed, remainingSource, signOutError } = await logoutCredential(
 				this.ctx.session,
 				providerId,
 				account.credentialId,
 			);
 			if (!removed) {
-				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerId}.`);
+				this.ctx.showError(`Logout skipped: ${account.label} is no longer stored for ${providerName}.`);
 				return;
 			}
 
 			const lines: [string, string][] = [
-				["success", successText(`Successfully logged out ${account.label} from ${providerId}`)],
+				["success", successText(`Successfully logged out ${account.label} from ${providerName}`)],
 				["dim", `Credential removed from ${source}`],
 			];
-			if (remainingSource) lines.push(["warning", `${providerId} is still authenticated via ${remainingSource}`]);
+			if (signOutError) lines.push(["warning", signOutError]);
+			if (remainingSource) lines.push(["warning", `${providerName} is still authenticated via ${remainingSource}`]);
 			this.ctx.present(() => outcomeLinesView(lines));
 		} catch (error: unknown) {
 			this.ctx.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -2313,7 +2493,7 @@ export class SelectorController {
 
 		this.#showInEditorArea(done =>
 			LogoutAccountSelector({
-				provider: provider?.name ?? providerId,
+				provider: connectedProviderName(providerId, provider?.name ?? providerId),
 				accounts,
 				onSelect: account => {
 					done();
@@ -2411,7 +2591,7 @@ export class SelectorController {
 		}
 		const { getOAuthProviders } = await loadProviderAuthUi();
 		const provider = getOAuthProviders().find(candidate => candidate.id === accountList.provider);
-		const providerName = provider?.name ?? accountList.provider;
+		const providerName = connectedProviderName(accountList.provider, provider?.name ?? accountList.provider);
 		const accounts = toSessionPinAccounts(accountList.accounts);
 		if (accounts.length === 0) {
 			const source = session.modelRegistry.authStorage.keys.describe(accountList.provider, session.sessionId);
@@ -2516,7 +2696,8 @@ export class SelectorController {
 		const { DebugSelector } = await import("../../debug");
 		this.#showInEditorArea(
 			done => DebugSelector({ host: this.ctx, onDone: done }),
-			root => firstOfKind(root, "list"),
+			// A card's `list` in Tern, the sheet's `picker` on terminal rows.
+			root => firstOfKind(root, "list", "picker"),
 		);
 	}
 
@@ -2592,11 +2773,12 @@ export class SelectorController {
 					actions: transcriptActions,
 					hour12: this.ctx.shell.hour12,
 					inspectShell: source => presentShellInspector(this.ctx.shell, source),
+					settings: this.ctx.settings,
 				});
 				viewer = this.ctx.shell.overlays.show(
 					() => fullscreenMenuView("agent-transcript", AgentTranscriptViewer({ model })),
 					{
-						focus: root => firstOfKind(root, "editor"),
+						focus: transcriptFocus,
 						onClose: () => {
 							viewer = undefined;
 							model.dispose();

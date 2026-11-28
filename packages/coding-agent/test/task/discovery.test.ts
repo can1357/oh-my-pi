@@ -238,10 +238,9 @@ describe("discoverAgents", () => {
 		expect(names).not.toEqual(expect.arrayContaining(["stale-agent", "settings-agent", "loom-verify-spec"]));
 	});
 
-	test("discovers agents from a --plugin-dir root with the foreign claude-plugins opt-in off (#11151)", async () => {
+	test("discovers agents from a user-scope --plugin-dir root (#11151)", async () => {
 		// `--plugin-dir` roots ride the shared plugin registry as user-scope, origin
-		// "plugin-dir" entries. The claude-plugins foreign opt-in is off by default, so
-		// gating user-scope roots purely on scope (as before) dropped these agents.
+		// "plugin-dir" entries; user-scope roots must not be dropped.
 		const pluginDir = path.join(tempHome, "my-plugin");
 		await fs.mkdir(path.join(pluginDir, "agents"), { recursive: true });
 		await fs.writeFile(

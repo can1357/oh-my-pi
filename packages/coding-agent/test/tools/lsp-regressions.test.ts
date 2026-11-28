@@ -9,7 +9,6 @@ import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { preloadPluginRoots } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { rejectionOf, trackUnhandled } from "../helpers/rejection";
-import { restoreEnvValue } from "../helpers/settings-test-state";
 import { createLspWritethrough, LspTool } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
@@ -53,7 +52,7 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { clampTimeout } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import * as piUtils from "@oh-my-pi/pi-utils";
-import { sanitizeText, TempDir } from "@oh-my-pi/pi-utils";
+import { getPluginsDir, sanitizeText, TempDir } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import DEFAULTS from "../../src/lsp/defaults.json" with { type: "json" };
 import { ToolCall } from "../../src/ui/transcript/tool-block";
@@ -1403,6 +1402,66 @@ describe("lsp regressions", () => {
 			);
 
 			expect(result).toEqual({ contents: "Atas.version()" });
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not count forwarded workspace file changes as activity for the idle timeout", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-watched-idle-");
+		try {
+			const server = installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "initialized") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: 9003,
+						method: "client/registerCapability",
+						params: {
+							registrations: [
+								{
+									id: "py-files",
+									method: "workspace/didChangeWatchedFiles",
+									registerOptions: {
+										watchers: [{ globPattern: { baseUri: fileToUri(tempDir.path()), pattern: "**/*.py" } }],
+									},
+								},
+							],
+						},
+					});
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			const config: ServerConfig = { command: "fake-lsp", fileTypes: ["py"], rootMarkers: [] };
+			const client = await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+			await server.waitFor(message => message.id === 9003 && message.method === undefined);
+
+			// Another process keeps writing in the workspace long after omp last used the server.
+			const lastUse = Date.now() - 10 * 60_000;
+			const deadline = Date.now() + 5_000;
+			for (let attempt = 0; ; attempt++) {
+				client.lastActivity = lastUse;
+				const probe = path.join(tempDir.path(), `probe-${attempt}.py`);
+				await Bun.write(probe, "x = 1\n");
+				const seen = await server
+					.waitFor(
+						message =>
+							message.method === "workspace/didChangeWatchedFiles" &&
+							JSON.stringify(message.params).includes(fileToUri(probe)),
+						300,
+					)
+					.catch(() => undefined);
+				if (seen) break;
+				if (Date.now() > deadline) throw new Error("the watch never reported a probe file");
+			}
+
+			expect(client.lastActivity).toBe(lastUse);
+			expect(lspClient.isIdleClient(client, Date.now(), 60_000)).toBe(true);
 		} finally {
 			await lspClient.shutdownAll();
 			tempDir.removeSync();
@@ -2882,6 +2941,50 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("keeps completed diagnostics and identifies unverified targets when the batch deadline expires", async () => {
+		const temp = TempDir.createSync("@omp-lsp-partial-");
+		const cwd = temp.path();
+		const deadline = new AbortController();
+		const config: ServerConfig = {
+			command: "test-linter",
+			fileTypes: ["ts"],
+			rootMarkers: [],
+			createClient: () => ({
+				format: async (_file, text) => text,
+				lint: async file => {
+					if (path.basename(file) !== "first.ts") {
+						deadline.abort();
+						throw new ToolAbortError();
+					}
+					return [
+						{
+							severity: 1,
+							message: "Unresolved reference",
+							range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } },
+						},
+					];
+				},
+			}),
+		};
+		try {
+			await initTheme();
+			configCache.set(cwd, { servers: { lint: config } });
+			vi.spyOn(AbortSignal, "timeout").mockReturnValueOnce(deadline.signal);
+			const result = await new LspTool(makeLspSession(cwd)).execute("batch-deadline", {
+				action: "diagnostics",
+				file: "first.ts;waiting.ts;untouched.ts",
+			});
+			const output = textResult(result);
+			expect(output).toContain("Unresolved reference");
+			expect(output).toContain("waiting.ts: no diagnostics report");
+			expect(output).toContain("unverified: untouched.ts");
+		} finally {
+			vi.restoreAllMocks();
+			configCache.delete(cwd);
+			temp.removeSync();
+		}
+	});
+
 	it("reports failure when every applicable diagnostics server fails (#8377)", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-all-servers-fail-");
 		try {
@@ -3370,24 +3473,14 @@ describe("lsp regressions", () => {
 		expect(detectLanguageId(emacsPath)).toBe("emacs-lisp");
 	});
 
-	it("loads config-only marketplace LSP servers from Claude plugin cache", async () => {
-		const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
-		delete process.env.CLAUDE_CONFIG_DIR;
-		delete Bun.env.CLAUDE_CONFIG_DIR;
+	it("loads config-only marketplace LSP servers from a Claude-format plugin", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-marketplace-config-");
 		const home = path.join(tempDir.path(), "home");
 		const cwd = path.join(tempDir.path(), "repo");
-		const pluginRoot = path.join(
-			home,
-			".claude",
-			"plugins",
-			"cache",
-			"claude-plugins-official",
-			"csharp-lsp",
-			"1.0.0",
-		);
+		const pluginsDir = getPluginsDir(home);
+		const pluginRoot = path.join(pluginsDir, "cache", "claude-plugins-official", "csharp-lsp", "1.0.0");
 		const marketplaceRoot = path.dirname(path.dirname(pluginRoot));
-		const registryPath = path.join(home, ".claude", "plugins", "installed_plugins.json");
+		const registryPath = path.join(pluginsDir, "installed_plugins.json");
 
 		await fs.promises.mkdir(pluginRoot, { recursive: true });
 		await fs.promises.mkdir(cwd, { recursive: true });
@@ -3457,7 +3550,6 @@ describe("lsp regressions", () => {
 			try {
 				await preloadPluginRoots(path.join(tempDir.path(), "empty-home"), cwd);
 			} finally {
-				restoreEnvValue("CLAUDE_CONFIG_DIR", originalClaudeConfigDir);
 				tempDir.removeSync();
 			}
 		}
@@ -4620,12 +4712,11 @@ describe("lsp regressions", () => {
 				});
 				await server.waitFor(message => message.id === 9101 && message.method === undefined);
 
-				// The watch is armed shortly after the registration is acknowledged; wait until a
-				// probe file is reported, then check the exact notification for a fresh file.
+				// Registration can be acknowledged before the OS watcher is live.
+				const probe = path.join(sessionRoot, "src", "probe.py");
 				const deadline = Date.now() + 5_000;
 				for (let attempt = 0; ; attempt++) {
-					const probe = path.join(sessionRoot, "src", `probe-${attempt}.py`);
-					await Bun.write(probe, "");
+					await Bun.write(probe, `value = ${attempt}\n`);
 					const seen = await server
 						.waitFor(
 							message =>
@@ -4647,7 +4738,10 @@ describe("lsp regressions", () => {
 						JSON.stringify(message.params).includes(fileToUri(created)),
 					5_000,
 				);
-				expect(watched.params).toEqual({ changes: [{ uri: fileToUri(created), type: FileChangeType.Created }] });
+				// A late probe event may share the batch with the new file.
+				expect(watched.params).toEqual({
+					changes: expect.arrayContaining([{ uri: fileToUri(created), type: FileChangeType.Created }]),
+				});
 			} finally {
 				configCache.delete(sessionRoot);
 				await lspClient.shutdownAll();

@@ -19,8 +19,11 @@ import { type Block, defineRolePainter, EMPTY_BLOCK, type Hit, type PaintContext
 import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/index";
 import { truncate, wrap } from "@oh-my-pi/pi-tui/text/width";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
-import type { TaskToolDetails } from "../../../task/task-details";
+import { isTaskToolDetails, type TaskToolDetails } from "../../../task/task-details";
+import { expandKeyLabel } from "../../keys/hints";
 import { agentColored } from "../../tools/agent-identity";
+import { cleanText } from "../../tools/agent-common";
+import { shortenEmbeddedPaths } from "../../../utils/render-utils";
 import type { TaskTerm } from "../../tools/task";
 import { assignmentSource, contextSource, flatAgentLabel, noticeLines, runTally } from "../../tools/task/model";
 import { agentLines, callLines, type Line, nestedResultLines, type RowContext } from "../../tools/task/rows";
@@ -43,7 +46,13 @@ function ink(theme: Theme, line: Line): string {
 }
 
 function rowContext(cx: PaintContext, expanded: boolean, facts: Pick<TaskTerm, "nowMs" | "frozen">): RowContext {
-	return { glyph: key => cx.theme.symbols.symbol(key), expanded, nowMs: facts.nowMs, frozen: facts.frozen };
+	return {
+		glyph: key => cx.theme.symbols.symbol(key),
+		expandKey: () => expandKeyLabel(cx.theme),
+		expanded,
+		nowMs: facts.nowMs,
+		frozen: facts.frozen,
+	};
 }
 
 /** A markdown section (context or brief), muted prose. */
@@ -82,7 +91,7 @@ function paintTask(node: UiNode, cx: PaintContext): Block {
 			const lines = callLines(rows, args);
 			if (lines.length > 0) sections.push({ separator: true, lines: inkLines(lines) });
 		}
-	} else if (!facts.details) {
+	} else if (!facts.details || !isTaskToolDetails(facts.details)) {
 		const errored = facts.isError === true;
 		outcome = errored ? "error" : "success";
 		if (errored) border = "error";
@@ -93,7 +102,7 @@ function paintTask(node: UiNode, cx: PaintContext): Block {
 		});
 		if (context) sections.push(context);
 		if (brief) sections.push(brief);
-		const text = facts.text ?? "";
+		const text = shortenEmbeddedPaths(cleanText(facts.text ?? ""));
 		if (text) sections.push({ separator: true, lines: [theme.fg("dim", truncate(text, width))] });
 	} else {
 		const details: TaskToolDetails = facts.details;

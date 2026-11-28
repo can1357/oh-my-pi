@@ -1,12 +1,14 @@
 /** @jsxImportSource @oh-my-pi/pi-tui */
 /**
- * `/copy`: pick what to put on the clipboard from the transcript, as a
+ * Shared transcript picker used by `/copy` and annotation session sources: a
  * `timeline` picker of the branch's turns.
  *
- * The selected turn's preview holds its whole text and each inner block
- * (fenced code, quotes, links, commands, tool output) as sections a click
- * copies. → descends into the blocks (↑/↓ move between them, ← or ⎋ back);
- * ⏎ picks the outlined turn or block; `o` opens a link block. Long sessions
+ * The selected turn's side preview holds its whole text and each inner block
+ * (fenced code, quotes, links, commands, tool output) as sections the current
+ * action can pick. Select/activate highlights a turn with blocks; use Blocks
+ * to browse them or Copy/Select/Enter to accept the whole turn. A turn without
+ * blocks activates immediately. When descended, ↑/↓ move between blocks, ← or
+ * ⎋ back; ⏎ picks the focused block; `o` opens a link block. Long sessions
  * replay only their tail until ↑ walks past it (or `a`).
  *
  * The terminal fills the screen with the branch drawn by the transcript's own
@@ -17,11 +19,15 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Accessor, batch, computed, type JSXNode, type KeyEvent, signal } from "@oh-my-pi/pi-tui";
 import { lexMarkdown } from "@oh-my-pi/pi-tui/text/markdown/lexer";
 import type { TspPickerAction, TspPickerItem } from "@oh-my-pi/pi-wire";
+import { sanitizeDisplaySingleLine } from "../../../extensibility/inventory/display-text";
+import { cancelKbd } from "../../keys/hints";
+import { previewLine, TRUNCATE_LENGTHS } from "../../../utils/render-utils";
 import type { CopyBlock, CopyPickSource } from "../../../modes/view-model/overlays/copy-selector";
 import { commandFromToolCall } from "../../../modes/view-model/overlays/copy-targets";
 import { isReplyWrite, toolResultReplies } from "../../../session/transcript/reply-write";
 import {
 	isUserRequestEntry,
+	recentTranscriptEntries,
 	type TranscriptEntryLike,
 	textContent,
 	transcriptEntryMessage,
@@ -52,9 +58,7 @@ export interface CopySelectorProps {
 	readonly terminalRows?: Accessor<number>;
 }
 
-/** Entries replayed at open; older history loads on demand. */
-const TAIL_ENTRIES = 600;
-/** Lines of a block the preview holds; longer blocks copy through the program. */
+/** Maximum code lines rendered in a block's side preview; picking retains full content. */
 const PREVIEW_BLOCK_LINES = 400;
 /** Lines of a block the terminal shows while descended. */
 const TERMINAL_BLOCK_LINES = 12;
@@ -75,14 +79,6 @@ interface MarkdownToken {
 	codeBlockStyle?: string;
 	tokens?: MarkdownToken[];
 	items?: MarkdownToken[];
-}
-
-/** The tail of a long branch, starting at a user turn. */
-function recentEntries(entries: readonly TranscriptEntryLike[]): readonly TranscriptEntryLike[] {
-	if (entries.length <= TAIL_ENTRIES) return entries;
-	for (let index = entries.length - TAIL_ENTRIES; index > 0; index--)
-		if (isUserRequestEntry(entries[index]!)) return entries.slice(index);
-	return entries;
 }
 
 function targetsOf(entries: readonly TranscriptEntryLike[]): Target[] {
@@ -362,6 +358,21 @@ function blockCaption(block: CopyBlock): string {
 	return `${kind} · ${lines} line${lines === 1 ? "" : "s"}`;
 }
 
+function blockItemId(target: Target, index: number): string {
+	return `copy-block:${target.turnId}:${index}`;
+}
+
+/** A block row carries its caption and first source line, not just its language. */
+function blockPickerItem(target: Target, block: CopyBlock, index: number): TspPickerItem {
+	const firstSourceLine = block.content.split("\n").find(line => line.trim().length > 0) ?? "";
+	const preview = previewLine(sanitizeDisplaySingleLine(firstSourceLine), TRUNCATE_LENGTHS.CONTENT);
+	return {
+		id: blockItemId(target, index),
+		label: blockCaption(block),
+		detail: preview || "(empty)",
+	};
+}
+
 function blockBody(block: CopyBlock): JSXNode {
 	if (block.href) return <text spans={[{ t: block.href, s: "link" }]} wrap="char" href={block.href} />;
 	if (block.kind === "quote") return <md text={block.content} />;
@@ -389,17 +400,15 @@ function terminalBlockBody(block: CopyBlock): JSXNode {
 	);
 }
 
-/** One preview section: a click copies it (`pick` asks the program when the preview holds only part). */
+/** A preview click picks the full source through the program, not Tern's local Copy action. */
 function previewSection(
 	key: string,
 	head: string,
 	body: JSXNode,
-	content: string,
 	focused: boolean,
 	onAction: (act: string, section?: string) => void,
 	href?: string,
 ): JSXNode {
-	const whole = content.split("\n").length <= PREVIEW_BLOCK_LINES;
 	return (
 		<section
 			key={key}
@@ -407,7 +416,7 @@ function previewSection(
 			role={focused ? "omp.picker.block.focused" : "omp.picker.block"}
 			tone={focused ? "accent" : undefined}
 			href={href}
-			actions={{ click: whole ? "copy" : "pick", ...(href ? { menu: ["copy", "open"] } : {}) }}
+			actions={{ click: "pick", ...(href ? { menu: ["copy", "open"] } : {}) }}
 			onAction={act => onAction(act, key)}
 		>
 			{body}
@@ -436,8 +445,9 @@ export function turnPreview(target: Target, content: string): JSXNode {
 
 export function CopySelector(props: CopySelectorProps): JSXNode {
 	const all = props.entries;
-	const truncated = signal(recentEntries(all).length < all.length);
-	const targets = computed(() => targetsOf(truncated() ? recentEntries(all) : all));
+	const tail = recentTranscriptEntries(all);
+	const truncated = signal(tail.length < all.length);
+	const targets = computed(() => targetsOf(truncated() ? tail : all));
 	const selected = signal(Math.max(0, targets().length - 1));
 	/** The focused block while descended into the turn's blocks. */
 	const blockAt = signal<number | undefined>(undefined);
@@ -559,20 +569,27 @@ export function CopySelector(props: CopySelectorProps): JSXNode {
 		}
 		return false;
 	};
-	const onSelectTurn = (id: string, activate: boolean): void => {
-		const index = targets().findIndex(t => t.turnId === id);
+	const onSelectItem = (id: string, activate: boolean): void => {
+		if (blockAt() !== undefined) {
+			const current = target();
+			if (!current) return;
+			const index = blocksOf(current).findIndex((_, blockIndex) => blockItemId(current, blockIndex) === id);
+			if (index < 0) return;
+			if (index !== blockAt()) blockAt.set(index);
+			if (activate) pick();
+			return;
+		}
+		const currentTargets = targets();
+		const index = currentTargets.findIndex(t => t.turnId === id);
 		if (index < 0) return;
-		if (index !== selected() || blockAt() !== undefined)
-			batch(() => {
-				selected.set(index);
-				blockAt.set(undefined);
-			});
-		if (activate) pick();
+		selected.set(index);
+		// A single Tern tap can activate a row. Don't skip its block choices.
+		if (activate && blocksOf(currentTargets[index]!).length === 0) pick();
 	};
+
 	const onAction = (act: string, section?: string): void => {
 		switch (act) {
 			case "pick":
-			case "copy":
 				return section === undefined ? pick() : pickSection(section);
 			case "blocks":
 				return descend();
@@ -589,7 +606,13 @@ export function CopySelector(props: CopySelectorProps): JSXNode {
 		}
 	};
 
-	const items = computed(() => targets().map(timelineItem));
+	const items = computed(() => {
+		const current = target();
+		const at = blockAt();
+		return current && at !== undefined
+			? blocksOf(current).map((block, index) => blockPickerItem(current, block, index))
+			: targets().map(timelineItem);
+	});
 	const actions = (): TspPickerAction[] => {
 		const current = target();
 		const blocks = current ? blocksOf(current) : [];
@@ -599,41 +622,31 @@ export function CopySelector(props: CopySelectorProps): JSXNode {
 		if (at === undefined && blocks.length > 0) out.push(pickerAction("blocks", "Blocks", "right"));
 		if (focused?.href && props.onOpen) out.push(pickerAction("open-link", "Open link", "o"));
 		if (at === undefined && truncated()) out.push(pickerAction("earlier", "Earlier turns", "a"));
-		out.push(at !== undefined ? closeAction("Back") : closeAction());
+		out.push(
+			at !== undefined ? pickerAction("back", "Back", ["left", ...cancelKbd()], { end: true }) : closeAction(),
+		);
 		return out;
 	};
+
 	const preview = (): JSXNode => {
 		const current = target();
 		if (!current) return null;
 		const blocks = blocksOf(current);
+		const at = blockAt();
+		const blockSection = (block: CopyBlock, index: number) =>
+			previewSection(`b${index}`, blockCaption(block), blockBody(block), at === index, onAction, block.href);
+		if (at !== undefined) {
+			const block = blocks[at];
+			return block ? blockSection(block, at) : null;
+		}
 		const out: JSXNode[] = [];
 		const whole = targetCopy(current, blocks);
 		if (whole.content.trim())
-			out.push(
-				previewSection(
-					"whole",
-					"Whole message",
-					turnPreview(current, whole.content),
-					whole.content,
-					false,
-					onAction,
-				),
-			);
-		blocks.forEach((block, index) =>
-			out.push(
-				previewSection(
-					`b${index}`,
-					blockCaption(block),
-					blockBody(block),
-					block.content,
-					blockAt() === index,
-					onAction,
-					block.href,
-				),
-			),
-		);
+			out.push(previewSection("whole", "Whole message", turnPreview(current, whole.content), false, onAction));
+		blocks.forEach((block, index) => out.push(blockSection(block, index)));
 		return out;
 	};
+
 	const term = (): CopyLookTerm => {
 		const at = blockAt();
 		const current = target();
@@ -680,22 +693,29 @@ export function CopySelector(props: CopySelectorProps): JSXNode {
 			title={props.title ?? "Copy"}
 			subtitle={props.title ? undefined : "Pick what to put on the clipboard"}
 			icon="clipboard"
-			noun="turns"
+			noun={() => (blockAt() === undefined ? "turns" : "blocks")}
 			size="lg"
-			layout="timeline"
+			layout={() => (blockAt() === undefined ? "timeline" : "rows")}
 			preview="side"
 			query={null}
 			columns={[{ id: "at", format: "dim", priority: 1 }]}
 			items={items}
-			selected={() => target()?.turnId ?? null}
-			total={() => targets().length}
+			selected={() => {
+				const current = target();
+				const at = blockAt();
+				return current ? (at === undefined ? current.turnId : blockItemId(current, at)) : null;
+			}}
+			total={() => {
+				const current = target();
+				return blockAt() !== undefined && current ? blocksOf(current).length : targets().length;
+			}}
 			empty="Nothing to copy"
-			focus={() => (blockAt() !== undefined ? "preview" : "list")}
+			focus="list"
 			actions={actions}
 			term={term}
 			onKey={onKey}
-			onSelect={id => onSelectTurn(id, false)}
-			onActivate={id => onSelectTurn(id, true)}
+			onSelect={id => onSelectItem(id, false)}
+			onActivate={id => onSelectItem(id, true)}
 			onAction={act => onAction(act)}
 		>
 			{preview}

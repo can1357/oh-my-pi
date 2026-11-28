@@ -2,16 +2,51 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed turn-end hooks being unable to tell which tool calls named no tool: `AgentTurnEndContext.unresolvedToolCallIds` now lists them ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
+- Fixed `generateHandoffFromContext` sending no output limit, so a server without its own limit could stream a handoff forever; the request is now capped at `MAX_SUMMARY_TOKENS` and ends as an incomplete-output failure ([#18031](https://github.com/can1357/oh-my-pi/issues/18031))
+- Reduced the size of authentication-gateway requests by preventing tool definitions from including internal host state.
+- Corrected OpenTelemetry chat spans to report the model that actually served the response.
+- Fixed shake replacing tool results smaller than its recovery placeholder, which grew context instead of shrinking it ([#7204](https://github.com/can1357/oh-my-pi/issues/7204))
+- Fixed the context figure that the status line and compaction read leaving out `$` Python output, `@file` mentions and a `!` command's terminal images, and counting `!!` output that no request carries ([#20834](https://github.com/can1357/oh-my-pi/pull/20834) by [@sjawhar](https://github.com/sjawhar))
+- Fixed token counting throwing on a stored custom message whose content is neither text nor blocks ([#20834](https://github.com/can1357/oh-my-pi/pull/20834) by [@sjawhar](https://github.com/sjawhar))
+- Fixed a failed split-turn compaction leaving its other summary request running after the failure was reported ([#20713](https://github.com/can1357/oh-my-pi/pull/20713) by [@sjawhar](https://github.com/sjawhar))
+
 ### Added
 
-- Added `SoftToolRequirement.unsatisfiedNotice`: the skipped-result text for a call to the required tool that fails `satisfies`, so a host can name the invocation it needs instead of the generic request to call that tool ([#20335](https://github.com/can1357/oh-my-pi/pull/20335) by [@baekjosh](https://github.com/baekjosh))
-- Added `AgentLoopError`, thrown when the loop ends a turn itself (a soft tool requirement the model never met); `Agent` marks that turn's error message `errorFromAgentLoop` so hosts can tell it from a failed request ([#20336](https://github.com/can1357/oh-my-pi/pull/20336) by [@baekjosh](https://github.com/baekjosh))
+- Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
+
+### Changed
+
+- `resolveThresholdTokens()` caps the reserve-based default trigger at `DEFAULT_THRESHOLD_CEILING_TOKENS` (690,000), so 1M-class windows compact at 690K instead of 85% of the window; a configured percentage, fixed trigger, or `baseWindowTokens` is not capped
+
+## [19.2.1] - 2026-11-25
+
+### Added
+
+- Added `Agent.peekDeliveringMessages(queue?)` for queued input on its way into the next request that the transcript has not recorded yet; queue listeners hear when it lands.
+- Added `Agent.continue(signal, { queuedOnly: true })` to start an idle turn using queued input without making a separate model call for the current context.
+
+### Changed
+
+- Debug logs now time the wait between dequeuing input and the model request that carries it, by phase.
+
+## [19.2.0] - 2026-11-25
+
+### Added
+
+- Added customizable notices for unmet soft tool requirements, allowing hosts to specify the text shown when a required tool call does not satisfy its requirement.
+- Added `AgentLoopError` and turn-level error metadata so hosts can distinguish an agent loop that ended because a soft tool requirement was not met from a failed request.
+- Added abort-signal support to provider-context transformation and side-request context building.
+- Added optional tool detachment when aborting an agent run, allowing tools that support background execution to continue instead of being terminated.
+- Agents can accept an asynchronous Cursor handler factory; a session opens its execution bridge on the first Cursor request, including after a model switch.
 
 ### Fixed
 
-- Fixed DeepSeek DSML markup leaking into tool-call arguments (e.g. a `</｜DSML｜ parameter>` tail on an edit or bash command) being executed and replayed; the leaked tail is now cut before the call runs
-- Fixed DSML markup removed from a DeepSeek turn's text and reasoning still being sent back to the model on OpenRouter's Responses route, which replays the turn's original output items
-- Fixed the loop aborting an unmet soft tool requirement without answering that turn's tool calls, so continuing the run (as a retry does) executed a call the requirement had refused ([#20338](https://github.com/can1357/oh-my-pi/pull/20338) by [@baekjosh](https://github.com/baekjosh))
+- Fixed DeepSeek DSML markup leaking into tool-call arguments and being executed or replayed.
+- Fixed DeepSeek DSML markup being incorrectly included in conversation history on OpenRouter Responses requests.
+- Fixed unmet soft tool requirements leaving tool calls unanswered when a run was continued or retried.
 
 ## [19.1.1] - 2026-11-23
 
