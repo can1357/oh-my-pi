@@ -6210,6 +6210,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							sessionId: providerSessionId,
 							preferWebsockets: session.preferWebsockets,
 							providerSessionState: session.providerSessionState,
+							captureResponseHeaders: extensionRunner.hasHandlers("after_provider_response"),
 							serviceTier,
 						});
 					} catch (error) {
