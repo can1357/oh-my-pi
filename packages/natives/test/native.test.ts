@@ -1299,6 +1299,7 @@ console.log("ok");
 				} finally {
 					assertion.stop();
 				}
+				for (let attempt = 0; attempt < 8 && held(); attempt++) Bun.sleepSync(10);
 				expect(held()).toBe(false);
 			},
 		);

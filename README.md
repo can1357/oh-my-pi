@@ -568,6 +568,7 @@ $ omp --mode rpc --no-session
 `omp acp`
 
 The [Agent Client Protocol](https://github.com/zed-industries/agent-client-protocol) over JSON-RPC. When the editor advertises capabilities, tool I/O routes through it and writes are gated by `session/request_permission`.
+On SIGTERM or SIGHUP, `omp acp` records its active turn as interrupted. `omp --restore` can resume it.
 
 | omp tool     | ACP route                           |
 | ------------ | ----------------------------------- |
