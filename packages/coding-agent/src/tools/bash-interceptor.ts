@@ -33,7 +33,10 @@ export interface InterceptionResult {
 function compileRules(rules: BashInterceptorRule[]): Array<{ rule: BashInterceptorRule; regex: RegExp }> {
 	const compiled: Array<{ rule: BashInterceptorRule; regex: RegExp }> = [];
 	for (const rule of rules) {
-		const flags = rule.flags ?? "";
+		if (!rule || typeof rule.pattern !== "string" || rule.pattern.length === 0 || typeof rule.message !== "string") {
+			continue;
+		}
+		const flags = typeof rule.flags === "string" ? rule.flags : "";
 		try {
 			compiled.push({ rule, regex: new RegExp(rule.pattern, flags) });
 		} catch {
@@ -75,8 +78,10 @@ export function checkBashInterception(
 	const candidates = interceptionCandidates(command);
 
 	for (const { rule, regex } of compiled) {
-		// Only block if the suggested tool is actually available
-		if (!availableTools.includes(rule.tool)) {
+		// Tool-scoped rules only block when their suggested tool is available.
+		// Rules without a `tool` apply unconditionally as custom policy blocks.
+		const requiredTool = typeof rule.tool === "string" ? rule.tool.trim() : "";
+		if (requiredTool.length > 0 && !availableTools.includes(requiredTool)) {
 			continue;
 		}
 
@@ -87,7 +92,7 @@ export function checkBashInterception(
 				return {
 					block: true,
 					message: `Blocked: ${rule.message}\n\nOriginal command: ${originalCommand}`,
-					suggestedTool: rule.tool,
+					...(requiredTool.length > 0 ? { suggestedTool: requiredTool } : {}),
 				};
 			}
 		}
@@ -118,7 +123,7 @@ export function bashInterception(
 	toolCommands: ReadonlySet<string>,
 ): string | undefined {
 	if (!cfgBashInterceptorEnabled.get(settings)) return undefined;
-	const rules = cfgBashInterceptorPatterns.get(settings).filter(rule => !name || rule.tool !== "bash");
+	const rules = cfgBashInterceptorPatterns.get(settings).filter(rule => !name || rule.tool?.trim() !== "bash");
 	for (const commandToCheck of rawCommand === command ? [command] : [rawCommand, command]) {
 		if (startsWithToolCommand(commandToCheck, toolCommands)) continue;
 		const interception = checkBashInterception(commandToCheck, toolNames, rules, rawCommand);

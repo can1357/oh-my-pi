@@ -8,7 +8,7 @@ import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool, type BashToolInput } from "@oh-my-pi/pi-coding-agent/tools/bash";
-import { checkBashInterception } from "@oh-my-pi/pi-coding-agent/tools/bash-interceptor";
+import { bashInterception, checkBashInterception } from "@oh-my-pi/pi-coding-agent/tools/bash-interceptor";
 
 function createBashTool(rules: BashInterceptorRule[]): BashTool {
 	const session = {
@@ -464,5 +464,145 @@ describe("pre-approval refusal gate", () => {
 		).rejects.toThrow("Use the `read` tool instead of cat/head/tail");
 
 		expect(select).not.toHaveBeenCalled();
+	});
+});
+
+describe("tool-less policy rules", () => {
+	const sleepPolicyRules: BashInterceptorRule[] = [
+		{
+			pattern: "^\\s*sleep\\s+(?:[1-9]\\d+(?:\\.\\d+)?[smhd]?|\\d+(?:\\.\\d+)?[mhd])(?:\\s|$)",
+			message: "Do not poll with sleep; use wait or an event listener.",
+		},
+		{
+			pattern: "(?:^|[;&|\\n])\\s*(?:while|until)\\b[\\s\\S]*\\bsleep\\b",
+			message: "Do not run shell polling loops; use wait or an event listener.",
+		},
+	];
+
+	it("blocks unconditionally when rule.tool is omitted even if availableTools is empty", () => {
+		const res = checkBashInterception("sleep 30", [], sleepPolicyRules);
+		expect(res.block).toBe(true);
+		expect(res.suggestedTool).toBeUndefined();
+		expect(res.message).toContain("Do not poll with sleep");
+	});
+
+	it("treats whitespace-only rule.tool as unconditional and omits suggestedTool", () => {
+		const res = checkBashInterception(
+			"sleep 30",
+			[],
+			[{ pattern: "^\\s*sleep\\s+\\d+", tool: "   ", message: "No sleep." }],
+		);
+		expect(res.block).toBe(true);
+		expect(res.suggestedTool).toBeUndefined();
+	});
+
+	it("blocks polling sleep variants while allowing short settle delays, quotes, and comments", () => {
+		for (const blocked of [
+			"sleep 30",
+			"sleep 10s",
+			"sleep 1m",
+			"FOO=1 sleep 60",
+			"gh pr checks && sleep 15",
+			"while true; do gh pr checks; sleep 2; done",
+			"until false; do sleep 5; done",
+		]) {
+			expect(checkBashInterception(blocked, [], sleepPolicyRules).block).toBe(true);
+		}
+		for (const allowed of [
+			"sleep 2",
+			"sleep 5",
+			'echo "sleep 30"',
+			"echo ok # sleep 60",
+			"printf 'while true; do sleep 5; done'",
+		]) {
+			expect(checkBashInterception(allowed, [], sleepPolicyRules).block).toBe(false);
+		}
+	});
+
+	it("rejects via BashTool.execute even when ctx.toolNames is empty", async () => {
+		const tool = createBashTool(sleepPolicyRules);
+		await expect(
+			tool.execute("tool-call", { command: "gh pr checks && sleep 30" }, undefined, undefined, {
+				toolNames: [],
+			} as unknown as AgentToolContext),
+		).rejects.toThrow("Do not poll with sleep");
+	});
+
+	it("keeps tool-less rules for named bash services while dropping tool=bash rules", () => {
+		const settings = Settings.isolated({
+			"bashInterceptor.enabled": true,
+			"bashInterceptor.patterns": [
+				{ pattern: "^\\s*nohup\\s+", tool: "bash", message: "Use bash with name." },
+				{ pattern: "^\\s*sleep\\s+\\d+", message: "No sleep." },
+			],
+		});
+		expect(bashInterception(settings, "nohup echo hi", "nohup echo hi", "svc", ["bash"], new Set())).toBeUndefined();
+		expect(bashInterception(settings, "sleep 30", "sleep 30", "svc", ["bash"], new Set())).toContain("No sleep.");
+	});
+
+	it("skips malformed rules without throwing", () => {
+		const malformed = [
+			{ pattern: "", message: "empty pattern" },
+			{ pattern: "[unclosed", message: "bad regex" },
+			{ pattern: "^\\s*sleep\\s+30", message: "valid rule" },
+		] as BashInterceptorRule[];
+		expect(checkBashInterception("sleep 30", [], malformed).block).toBe(true);
+		expect(checkBashInterception("echo ok", [], malformed).block).toBe(false);
+	});
+
+	it("seeded property/fuzz pass: linear runtime, zero throws, exact tool-scoping invariants", () => {
+		let state = 0x5eed1234;
+		const nextInt = (max: number) => {
+			state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+			return state % max;
+		};
+		const benignTokens = [
+			"echo hi",
+			"ls -la",
+			"git status",
+			"sleep 2",
+			"true",
+			'echo "sleep 30"',
+			"echo ok # sleep 60",
+		];
+		const sepTokens = [" && ", "; ", " || ", "\n", " | "];
+		const envPrefixes = ["", "FOO=1 ", 'BAR="a b" '];
+		const mixedRules: BashInterceptorRule[] = [
+			{ pattern: "^\\s*sleep\\s+[1-9]\\d+\\b", message: "No long sleep." },
+			{ pattern: "^\\s*cat\\s+", tool: "read", message: "Use read." },
+			{ pattern: "[broken(", message: "Invalid." },
+		];
+
+		const started = performance.now();
+		for (let i = 0; i < 300; i++) {
+			const parts: string[] = [];
+			const count = 1 + nextInt(4);
+			for (let j = 0; j < count; j++) {
+				const env = envPrefixes[nextInt(envPrefixes.length)]!;
+				const tok = benignTokens[nextInt(benignTokens.length)]!;
+				parts.push(`${env}${tok}`);
+			}
+			const benignCmd = parts.reduce(
+				(acc, part, idx) => (idx === 0 ? part : `${acc}${sepTokens[nextInt(sepTokens.length)]}${part}`),
+				"",
+			);
+			// Benign commands never trigger the long-sleep or cat rules.
+			expect(checkBashInterception(benignCmd, [], mixedRules).block).toBe(false);
+			expect(checkBashInterception(benignCmd, ["read"], mixedRules).block).toBe(false);
+
+			// Injecting a real unpiped long sleep on a new line (so a trailing # comment cannot swallow it) triggers regardless of availableTools.
+			const sleepCmd = `${benignCmd}\nsleep ${10 + nextInt(90)}`;
+			const sleepRes = checkBashInterception(sleepCmd, [], mixedRules);
+			expect(sleepRes.block).toBe(true);
+			expect(sleepRes.suggestedTool).toBeUndefined();
+
+			// Injecting cat blocks ONLY when `read` is in availableTools.
+			const catCmd = `${benignCmd}\ncat file.txt`;
+			expect(checkBashInterception(catCmd, [], mixedRules).block).toBe(false);
+			const catRes = checkBashInterception(catCmd, ["read"], mixedRules);
+			expect(catRes.block).toBe(true);
+			expect(catRes.suggestedTool).toBe("read");
+		}
+		expect(performance.now() - started).toBeLessThan(2000);
 	});
 });
