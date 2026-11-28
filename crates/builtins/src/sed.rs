@@ -206,6 +206,7 @@ pub enum ReplacementPart {
 	WholeMatch,           // &
 	Group(u32),           // \1 to \9
 	Case(CaseConversion), // \U, \L, \E, \u, \l (GNU extension)
+	Unconverted(char),    // \ before a non-ASCII character: copied as it is
 }
 
 /// A case conversion of the text that follows it in a replacement
@@ -287,6 +288,11 @@ impl CaseState {
 	/// yet used, while `\U` and `\L` go on past it; a NUL ends the
 	/// conversion of the piece, whose rest is copied as it is.
 	fn append(&mut self, text: &[u8], result: &mut Vec<u8>) {
+		if self.run.is_none() && self.next.is_none() {
+			// No conversion is pending: copy the piece without reading it.
+			result.extend_from_slice(text);
+			return;
+		}
 		if text.is_empty() {
 			// An empty group passes a `\u` or `\l` on to what follows it.
 			if self.next.is_some() {
@@ -316,6 +322,13 @@ impl CaseState {
 			copied += chunk.invalid().len();
 		}
 		result.extend_from_slice(&text[copied..]);
+	}
+
+	/// Append an escaped non-ASCII character. GNU sed copies it as it is,
+	/// and drops a `\u` or `\l` not yet used, while `\U` and `\L` go on.
+	fn append_unconverted(&mut self, ch: char, result: &mut Vec<u8>) {
+		self.next = None;
+		result.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes());
 	}
 }
 
@@ -370,6 +383,7 @@ impl ReplacementTemplate {
 					case.append(caps.get(*n as usize).map_or(&[][..], |m| m.as_bytes()), result);
 				},
 				ReplacementPart::Case(conversion) => case.set(*conversion),
+				ReplacementPart::Unconverted(ch) => case.append_unconverted(*ch, result),
 			}
 		}
 	}
@@ -383,6 +397,7 @@ impl ReplacementTemplate {
 				ReplacementPart::WholeMatch => case.append(m.as_bytes(), result),
 				ReplacementPart::Group(_) => panic!("unexpected Regex group replacement"),
 				ReplacementPart::Case(conversion) => case.set(*conversion),
+				ReplacementPart::Unconverted(ch) => case.append_unconverted(*ch, result),
 			}
 		}
 	}
@@ -1451,11 +1466,17 @@ pub fn compile_replacement(
 						line.advance();
 					},
 
-					// other escape sequences
+					// other escape sequences; in a replacement GNU reads `\b` as
+					// an unknown escape, not as a backspace
 					_ => {
 						let numeric = matches!(line.current(), 'd' | 'o' | 'x');
 						let control = line.current() == 'c';
-						if let Some(decoded) = parse_char_escape(line) {
+						let decoded = if line.current() == 'b' {
+							None
+						} else {
+							parse_char_escape(line)
+						};
+						if let Some(decoded) = decoded {
 							literal.push(decoded);
 							// GNU reads `\c\\` as one escape, the control character
 							// of `\`, so what follows it is plain text.
@@ -1468,9 +1489,19 @@ pub fn compile_replacement(
 								parts.push(ReplacementPart::Literal(std::mem::take(&mut literal)));
 							}
 						} else {
-							literal.push('\\');
-							literal.push(line.current());
-							parts.push(ReplacementPart::Literal(std::mem::take(&mut literal)));
+							// GNU drops the backslash of an unknown escape, which
+							// ends a piece of the replacement after its character.
+							// It copies an escaped non-ASCII character as it is.
+							let c = line.current();
+							if c.is_ascii() {
+								literal.push(c);
+								parts.push(ReplacementPart::Literal(std::mem::take(&mut literal)));
+							} else {
+								if !literal.is_empty() {
+									parts.push(ReplacementPart::Literal(std::mem::take(&mut literal)));
+								}
+								parts.push(ReplacementPart::Unconverted(c));
+							}
 							line.advance();
 						}
 					},
@@ -2780,13 +2811,18 @@ mod tests {
 
 	#[test]
 	fn test_compile_replacement_ampersand() {
-		// As in GNU sed, the escaped `&` ends a piece of the replacement.
 		let (mut lines, mut chars) = make_providers("/Simon \\& Garfunkel/");
 		let template = compile_replacement(&mut lines, &mut chars, false).unwrap();
 
-		assert_eq!(template.parts.len(), 2);
-		assert!(matches!(&template.parts[0], ReplacementPart::Literal(s) if s == "Simon &"));
-		assert!(matches!(&template.parts[1], ReplacementPart::Literal(s) if s == " Garfunkel"));
+		let text: String = template
+			.parts
+			.iter()
+			.map(|part| match part {
+				ReplacementPart::Literal(s) => s.as_str(),
+				other => panic!("unexpected part {other:?}"),
+			})
+			.collect();
+		assert_eq!(text, "Simon & Garfunkel");
 	}
 
 	#[test]
@@ -9913,6 +9949,10 @@ mod tests {
 			(&["s/a/X/"], &input[..], &b"Xb\xffcd\n"[..]),
 			(&["s/[bc]/X/g"], &input[..], &b"aX\xffXd\n"[..]),
 			(&[r"s/\(.\)c/\1X/"], &input[..], &b"ab\xffXd\n"[..]),
+			// A byte that is no UTF-8 character is copied as it is: `\U` goes
+			// on past it, and a `\u` before it changes nothing.
+			(&[r"s/\(.\)c/\U\1x/"], &input[..], &b"ab\xffXd\n"[..]),
+			(&[r"s/\(.\)c/\u\1x/"], &input[..], &b"ab\xffxd\n"[..]),
 			(&[r"s/\(.\)\1/X/g"], &b"a\xff\xffb\n"[..], &b"aXb\n"[..]),
 			(&["-n", "/c/p"], &input[..], &input[..]),
 			(&["-n", "/.cd/p"], &input[..], &input[..]),
@@ -10590,6 +10630,18 @@ mod tests {
 			// so the `U` after it is plain text.
 			(r"sUaU\UU", "aU\n", "UU\n"),
 			(r"s/a/\c\\Ux/", "a\n", "\u{1c}Ux\n"),
+			// An unknown escape gives its character, which a conversion
+			// converts. GNU sed copies an escaped non-ASCII character as it
+			// is: it drops a `\u` or `\l` and leaves `\U` and `\L` on.
+			(r"s/a/\qabc/", "a\n", "qabc\n"),
+			(r"s/a/\u\qabc/", "a\n", "Qabc\n"),
+			(r"s/a/\u\éx/", "a\n", "éx\n"),
+			(r"s/a/\U\éx/", "a\n", "éX\n"),
+			// In a replacement GNU sed reads `\b` as such an unknown escape,
+			// not as a backspace.
+			(r"s/a/\bx/", "a\n", "bx\n"),
+			(r"s/a/\u\bx/", "a\n", "Bx\n"),
+			(r"s/a/\U\bx/", "a\n", "BX\n"),
 		] {
 			let (code, capture) = crate::host::run_util::<Sed>(&[script], input, "/");
 			let out = capture.out();
@@ -10598,14 +10650,17 @@ mod tests {
 		let (code, capture) = crate::host::run_util::<Sed>(&["--posix", r"s/a/\Ux/"], "ab\n", "/");
 		assert_eq!((code, capture.out().as_str()), (0, "Uxb\n"), "{}", capture.err());
 		// A NUL ends the conversion of its piece of the replacement, which
-		// ends at the next escape: `\&` and `\\` start another, converted, and
-		// so does a numeric escape that gives `&` or `\`, which GNU reads as
-		// `\&` or `\\`. Any other character it gives is plain text.
+		// ends at the next escape: `\&`, `\\` and an unknown escape start
+		// another, converted, and so does a numeric escape that gives `&` or
+		// `\`, which GNU reads as `\&` or `\\`. Any other character it gives
+		// is plain text.
 		for (script, expected) in [
 			(r"s/a/\Ua\x00bc\&de/", &b"A\0bc&DE\n"[..]),
 			(r"s/a/\Ua\x00bc\\de/", &b"A\0bc\\DE\n"[..]),
 			(r"s/a/\Ua\x00bc\x26de/", &b"A\0bc&DE\n"[..]),
 			(r"s/a/\Ua\x00bc\x5cde/", &b"A\0bc\\DE\n"[..]),
+			(r"s/a/\Ua\x00bc\qde/", &b"A\0bcqDE\n"[..]),
+			(r"s/a/\Ua\x00bc\éde/", "A\0bcéDE\n".as_bytes()),
 			(r"s/a/\Ua\x00bc\d038de/", &b"A\0bc&DE\n"[..]),
 			(r"s/a/\Ua\x00bc\o134de/", &b"A\0bc\\DE\n"[..]),
 			(r"s/a/\Ua\x00bc\x41de/", &b"A\0bcAde\n"[..]),
