@@ -1,0 +1,97 @@
+// A user/developer message whose `content` is neither a string nor a block
+// array (lossy session rebuild / third-party extension) previously crashed
+// provider request builds with a bare `for...of` over `content`
+// (`undefined is not an object (evaluating 'I of g.content')`), surfacing as
+// `stopReason: "error"` on the first turn after compaction. transformMessages
+// must normalize such content to a harmless placeholder instead.
+import { describe, expect, it } from "bun:test";
+import {
+	MALFORMED_MESSAGE_CONTENT_PLACEHOLDER,
+	transformMessages,
+	withCredentialRedaction,
+} from "@oh-my-pi/pi-ai/providers/transform-messages";
+import {
+	inputBlocks,
+	lateToolResultPrompt,
+	transcriptDigest,
+} from "@oh-my-pi/pi-ai/providers/antigravity-cli/reconcile";
+import type { Message, Model, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+
+function makeModel(): Model<"openai-completions"> {
+	return buildModel({
+		api: "openai-completions",
+		name: "GPT Test",
+		id: "gpt-test",
+		provider: "openai",
+		baseUrl: "https://api.openai.com/v1",
+		contextWindow: 8192,
+		maxTokens: 2048,
+		input: ["text"],
+		reasoning: false,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	});
+}
+
+function malformedUser(): Message {
+	// Cast needed: the type system guarantees content, but the runtime can see
+	// malformed messages from extensions/lossy rebuilds.
+	return { role: "user", content: undefined, timestamp: Date.now() } as unknown as Message;
+}
+
+describe("transformMessages malformed-content normalization", () => {
+	it("replaces undefined user content with a text placeholder", () => {
+		const messages: Message[] = [malformedUser()];
+		const out = transformMessages(messages, makeModel());
+		expect(out).toHaveLength(1);
+		const user = out[0] as { role: string; content: Array<{ type: string; text: string }> };
+		expect(user.role).toBe("user");
+		expect(Array.isArray(user.content)).toBe(true);
+		expect(user.content[0].type).toBe("text");
+		expect(user.content[0].text).toBe(MALFORMED_MESSAGE_CONTENT_PLACEHOLDER);
+	});
+
+	it("normalizes undefined user content before credential redaction", () => {
+		const messages: Message[] = [malformedUser()];
+		const out = withCredentialRedaction(true, () => transformMessages(messages, makeModel()));
+		expect(out).toHaveLength(1);
+		const user = out[0] as { role: string; content: Array<{ type: string; text: string }> };
+		expect(user.role).toBe("user");
+		expect(user.content).toEqual([{ type: "text", text: MALFORMED_MESSAGE_CONTENT_PLACEHOLDER }]);
+	});
+
+	it("leaves well-formed string and array content untouched", () => {
+		const messages: Message[] = [
+			{ role: "user", content: "hello", timestamp: Date.now() } as Message,
+			{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() } as Message,
+		];
+		const out = transformMessages(messages, makeModel());
+		expect(out).toHaveLength(2);
+		expect((out[0] as { content: string }).content).toBe("hello");
+		expect((out[1] as { content: Array<{ text: string }> }).content[0].text).toBe("hi");
+	});
+});
+
+describe("antigravity-acp malformed message content (#20910)", () => {
+	it("degrades undefined user content in inputBlocks and transcriptDigest", () => {
+		const message = { role: "user", content: undefined, timestamp: 0 } as unknown as UserMessage;
+		expect(inputBlocks(message)).toEqual([{ type: "text", text: MALFORMED_MESSAGE_CONTENT_PLACEHOLDER }]);
+		expect(() => transcriptDigest([message])).not.toThrow();
+	});
+
+	it("degrades undefined tool-result content in lateToolResultPrompt", () => {
+		const result = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			isError: false,
+			content: undefined,
+			timestamp: 0,
+		} as unknown as ToolResultMessage;
+		expect(() => lateToolResultPrompt(result)).not.toThrow();
+		const blocks = lateToolResultPrompt(result);
+		expect(blocks.some(block => block.type === "text" && block.text === MALFORMED_MESSAGE_CONTENT_PLACEHOLDER)).toBe(
+			true,
+		);
+	});
+});
