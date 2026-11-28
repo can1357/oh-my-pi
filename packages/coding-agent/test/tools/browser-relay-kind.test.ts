@@ -222,16 +222,20 @@ describe("resolveBrowserKind in a subagent", () => {
 	};
 
 	it("skips the relay, Tern and cmux the parent would use for an open without app", async () => {
-		expect((await resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }), pane)).kind).toBe("headless");
-		expect((await resolveBrowserKind({ action: "open" }, subagent({}), { ...pane, PI_BROWSER_RELAY: "1" })).kind).toBe(
+		expect((await resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }), pane)).kind).toBe(
 			"headless",
 		);
 		expect(
-			(await resolveBrowserKind(
-				{ action: "open" },
-				subagent({ "browser.relay": true, "browser.cdpUrl": "http://127.0.0.1:9222" }),
-				pane,
-			)).kind,
+			(await resolveBrowserKind({ action: "open" }, subagent({}), { ...pane, PI_BROWSER_RELAY: "1" })).kind,
+		).toBe("headless");
+		expect(
+			(
+				await resolveBrowserKind(
+					{ action: "open" },
+					subagent({ "browser.relay": true, "browser.cdpUrl": "http://127.0.0.1:9222" }),
+					pane,
+				)
+			).kind,
 		).toBe("connected");
 	});
 
@@ -239,16 +243,20 @@ describe("resolveBrowserKind in a subagent", () => {
 		const forced = { ...pane, PI_BROWSER_TERN: "1", PI_BROWSER_CMUX: "1" };
 		expect((await resolveBrowserKind({ action: "open" }, subagent({}), forced)).kind).toBe("headless");
 		expect(
-			(await resolveBrowserKind({ action: "open" }, subagent({}), {
-				CMUX_SOCKET_PATH: "/tmp/cmux.sock",
-				PI_BROWSER_CMUX: "1",
-				PI_BROWSER_WEBKIT: "0",
-			})).kind,
+			(
+				await resolveBrowserKind({ action: "open" }, subagent({}), {
+					CMUX_SOCKET_PATH: "/tmp/cmux.sock",
+					PI_BROWSER_CMUX: "1",
+					PI_BROWSER_WEBKIT: "0",
+				})
+			).kind,
 		).toBe("headless");
 	});
 
 	it("leaves a /tan clone (task depth 0) on its parent's defaults, which its copied prompt describes", async () => {
-		expect((await resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }, 0), pane)).kind).toBe("relay");
+		expect((await resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }, 0), pane)).kind).toBe(
+			"relay",
+		);
 	});
 
 	it("still opens the user's Chrome or Tern when the open asks", async () => {

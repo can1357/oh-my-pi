@@ -2443,7 +2443,11 @@ export class SelectorController {
 		}
 	}
 
-	async #handleCredentialLogout(providerId: string, account: LogoutAccount, action: LogoutAccountAction): Promise<void> {
+	async #handleCredentialLogout(
+		providerId: string,
+		account: LogoutAccount,
+		action: LogoutAccountAction,
+	): Promise<void> {
 		const providerName = connectedProviderName(providerId);
 		try {
 			// Before the logout: removing a broker-unserved provider's last local login hands it back to the broker.
