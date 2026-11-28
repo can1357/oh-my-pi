@@ -131,7 +131,7 @@
 
 ### Fixed
 
-- Fixed finished subagents coming back as active in the subagent HUD, the active-subagent descriptions and the tray after a progress update that lost the race to the subagent's terminal frame, or that reached an observer which joined after the subagent started (a collab guest, a reset session view). A running progress update no longer reopens a completed, failed or aborted agent; only the agent's next turn does. An agent first seen through a settled progress update shows as settled
+- Fixed finished subagents reappearing as active in the subagent HUD and tray after a late progress update or when joining a session as a collab guest
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).

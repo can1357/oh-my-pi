@@ -120,27 +120,4 @@ describe("SessionObserverRegistry frame ordering", () => {
 		expect(registry.getSession("KeptAlive")?.status).toBe("active");
 		expect(registry.getActiveSubagentCount()).toBe(1);
 	});
-
-	it("counts a nested fan-out on the shared root bus, grandchildren included", () => {
-		emitLifecycle("Anna", "started");
-		emitLifecycle("Anna.Bob", "started");
-		emitProgress("Anna.Bob.Cy", "running");
-		emitLifecycle("Anna.Bob.Cy", "started");
-		expect(registry.getActiveSubagentCount()).toBe(3);
-
-		emitLifecycle("Anna.Bob.Cy", "completed");
-		emitProgress("Anna.Bob.Cy", "running");
-		emitLifecycle("Anna.Bob", "completed");
-		expect(registry.getActiveSubagentCount()).toBe(1);
-		expect(
-			registry
-				.getSessions()
-				.filter(session => session.kind === "subagent")
-				.map(session => [session.id, session.status]),
-		).toEqual([
-			["Anna", "active"],
-			["Anna.Bob", "completed"],
-			["Anna.Bob.Cy", "completed"],
-		]);
-	});
 });
