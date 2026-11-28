@@ -1,3 +1,4 @@
+import { GOAL_USAGE_ENTRY_TYPE, mergeGoalUsage } from "../goals/state";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { customMessageEntryMessage, isUserRequestEntry } from "./transcript/transcript-entry";
 import {
@@ -398,34 +399,8 @@ export function buildSessionContext(
 		} else if (entry.type === "mode_change") {
 			mode = entry.mode;
 			modeData = entry.data;
-		} else if (entry.type === "custom" && entry.customType === "goal_usage") {
-			const goal = modeData?.goal;
-			if (goal && typeof goal === "object" && typeof entry.data === "object" && entry.data !== null) {
-				const usage = entry.data as Record<string, unknown>;
-				const currentGoal = goal as Record<string, unknown>;
-				if (
-					typeof usage.id === "string" &&
-					usage.id === currentGoal.id &&
-					typeof usage.tokensUsed === "number" &&
-					Number.isFinite(usage.tokensUsed) &&
-					usage.tokensUsed >= 0 &&
-					typeof usage.timeUsedSeconds === "number" &&
-					Number.isFinite(usage.timeUsedSeconds) &&
-					usage.timeUsedSeconds >= 0 &&
-					typeof usage.updatedAt === "number" &&
-					Number.isFinite(usage.updatedAt)
-				) {
-					modeData = {
-						...modeData,
-						goal: {
-							...currentGoal,
-							tokensUsed: usage.tokensUsed,
-							timeUsedSeconds: usage.timeUsedSeconds,
-							updatedAt: usage.updatedAt,
-						},
-					};
-				}
-			}
+		} else if (entry.type === "custom" && entry.customType === GOAL_USAGE_ENTRY_TYPE) {
+			modeData = mergeGoalUsage(modeData, entry.data);
 		}
 		previous = entry;
 	}

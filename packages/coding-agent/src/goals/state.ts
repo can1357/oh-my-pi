@@ -47,6 +47,65 @@ export function goalFromModeData(modeData: Record<string, unknown> | undefined):
 	};
 }
 
+/** Journal custom-entry type carrying a compact goal usage counter update. */
+export const GOAL_USAGE_ENTRY_TYPE = "goal_usage";
+
+/** Persisted payload of a `goal_usage` journal entry. */
+export interface GoalUsageEntryData {
+	id: string;
+	tokensUsed: number;
+	timeUsedSeconds: number;
+	updatedAt: number;
+}
+
+/** Compact counter snapshot for a usage-only flush. Callers persist it as a `goal_usage` entry. */
+export function goalUsageEntryData(state: GoalModeState): GoalUsageEntryData {
+	return {
+		id: state.goal.id,
+		tokensUsed: state.goal.tokensUsed,
+		timeUsedSeconds: state.goal.timeUsedSeconds,
+		updatedAt: state.goal.updatedAt,
+	};
+}
+
+/**
+ * Replay a `goal_usage` journal entry onto the current mode data. Returns the input
+ * unchanged when there is no active goal, the entry targets a stale goal id, or the
+ * payload is malformed. A stale id must not overwrite a newer goal's counters.
+ */
+export function mergeGoalUsage(
+	modeData: Record<string, unknown> | undefined,
+	data: unknown,
+): Record<string, unknown> | undefined {
+	const goal = modeData?.goal;
+	if (!goal || typeof goal !== "object" || typeof data !== "object" || data === null) return modeData;
+	const usage = data as Record<string, unknown>;
+	const currentGoal = goal as Record<string, unknown>;
+	if (
+		typeof usage.id !== "string" ||
+		usage.id !== currentGoal.id ||
+		typeof usage.tokensUsed !== "number" ||
+		!Number.isFinite(usage.tokensUsed) ||
+		usage.tokensUsed < 0 ||
+		typeof usage.timeUsedSeconds !== "number" ||
+		!Number.isFinite(usage.timeUsedSeconds) ||
+		usage.timeUsedSeconds < 0 ||
+		typeof usage.updatedAt !== "number" ||
+		!Number.isFinite(usage.updatedAt)
+	) {
+		return modeData;
+	}
+	return {
+		...modeData,
+		goal: {
+			...currentGoal,
+			tokensUsed: usage.tokensUsed,
+			timeUsedSeconds: usage.timeUsedSeconds,
+			updatedAt: usage.updatedAt,
+		},
+	};
+}
+
 /**
  * Digest of a turn's tool calls and results. Two continuation turns with the same
  * (or empty) activity made no progress, so automatic continuation stops.
