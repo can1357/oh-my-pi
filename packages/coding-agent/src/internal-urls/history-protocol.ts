@@ -4,6 +4,7 @@
  * Exposes agent transcripts as concise markdown. Live refs render from the
  * in-memory message array; parked refs (session disposed, sessionFile
  * retained) load read-only from the JSONL session file — no writer, no lock.
+ * External agents' transcripts are paged in through their extension.
  *
  * Agents that are no longer in the `AgentRegistry` — one-shot helpers
  * unregistered after `finalizeSubagentLifecycle` (`keepAlive: false`, e.g. the
@@ -25,6 +26,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { readerIncludesThinking, textWithoutThinking } from "@oh-my-pi/snapcompact";
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry } from "../registry/agent-registry";
+import { readExternalTranscriptMessages } from "../registry/external-agents";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import {
 	renderTranscriptMessages,
@@ -530,6 +532,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		} else if (ref.sessionFile) {
 			messages = await loadSessionMessagesReadOnly(ref.sessionFile);
 			notes.push(`Source: session file (read-only, ${ref.status})`);
+		} else if (ref.external) {
+			messages = await readExternalTranscriptMessages(ref.external, context?.signal);
+			notes.push(`Source: external transcript (${ref.status})`);
 		} else {
 			// No live session and no retained sessionFile — try the disk scan before
 			// giving up, in case the transcript lingers under an artifacts dir.

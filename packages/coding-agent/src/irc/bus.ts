@@ -304,6 +304,25 @@ export class IrcBus implements IrcBusApi {
 				error: `Agent "${message.to}" is a read-only advisor transcript and cannot be messaged.`,
 			};
 		}
+		// An external agent runs elsewhere: the extension that registered it delivers the message.
+		if (ref.kind === "external") {
+			const steer = ref.external?.steer;
+			if (!steer || (ref.status !== "running" && ref.status !== "idle")) {
+				return {
+					to: message.to,
+					outcome: "failed",
+					error: `Agent "${message.to}" runs outside this session and is not taking messages.`,
+				};
+			}
+			const outcome = ref.status === "running" ? "injected" : "woken";
+			try {
+				await steer(message.body);
+			} catch (error) {
+				return { to: message.to, outcome: "failed", error: error instanceof Error ? error.message : String(error) };
+			}
+			this.#relayToMainUi(message);
+			return { to: message.to, outcome };
+		}
 
 		// A `parked` or killed (`aborted`) recipient always needs the lifecycle to
 		// revive it from its transcript — this is read from *this* bus's registry,

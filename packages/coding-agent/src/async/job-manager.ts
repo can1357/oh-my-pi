@@ -4,6 +4,7 @@ import { isRecord, logger, truncate } from "@oh-my-pi/pi-utils";
 import { collapseCommand } from "../cli/ps-model";
 import type { StructuredSubagentOutput } from "../task/task-details";
 import type { OutputMeta } from "../tools/output-meta-format";
+import { enforceInlineByteCap, type InlineByteCapOptions } from "../tools/streaming-output";
 import type { ShellTrace } from "@oh-my-pi/pi-wire";
 import { IrcBus } from "../irc/bus";
 import { yieldQueueStaleMessage } from "../session/yield-queue";
@@ -25,6 +26,20 @@ export const ASYNC_JOB_LABEL_MAX_CHARS = 120;
 /** Format a command into a single-line bounded label stored on a managed job row. */
 export function formatAsyncJobLabel(command: string): string {
 	return truncate(collapseCommand(command), ASYNC_JOB_LABEL_MAX_CHARS, "...");
+}
+
+/**
+ * Run a job body whose text reaches the model verbatim, with its result or its failure's message capped by
+ * {@link enforceInlineByteCap} under `cap`, as `bash` caps the output it hands the model.
+ */
+export async function capAsyncJobOutcome(body: () => Promise<string>, cap: InlineByteCapOptions): Promise<string> {
+	let text: string;
+	try {
+		text = await body();
+	} catch (error) {
+		throw new Error(await enforceInlineByteCap(error instanceof Error ? error.message : String(error), cap));
+	}
+	return await enforceInlineByteCap(text, cap);
 }
 /**
  * A settled job row whose result was already consumed — auto-delivered to its
@@ -64,7 +79,7 @@ const DEFAULT_MAX_RUNNING_JOBS = 15;
 export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
 
 /** Kind of work a managed job runs; drives job-row badges and delivery labels. */
-export type AsyncJobType = "bash" | "task" | "eval";
+export type AsyncJobType = "bash" | "task" | "eval" | "extension";
 
 /** Settled job-body payload: delivery text plus its parsed structured output. */
 export interface AsyncJobRunResult {

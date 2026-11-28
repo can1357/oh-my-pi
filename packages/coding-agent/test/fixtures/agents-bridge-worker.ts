@@ -9,10 +9,14 @@ import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AsyncJobManager } from "../../src/async/job-manager";
 import { ModelRegistry } from "../../src/config/model-registry";
+import { AgentProtocolHandler } from "../../src/internal-urls/agent-protocol";
+import { HistoryProtocolHandler } from "../../src/internal-urls/history-protocol";
 import { Settings } from "../../src/config/settings";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../../src/registry/agent-registry";
+import { registerExternalAgent } from "../../src/registry/external-agents";
 import { AgentSession } from "../../src/session/agent-session";
 import { AuthStorage } from "../../src/session/auth-storage";
 import { convertToLlm } from "../../src/session/messages";
@@ -25,6 +29,7 @@ import { type RpcFrame, RpcLink } from "../../src/thread/rpc";
 import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { identityThreadService } from "../../src/thread/services/identity";
+import { resolveArtifactSpillThreshold } from "../../src/tools/output-meta";
 
 /** What a worker-side peer handle reports about a session homed elsewhere. */
 export interface PeerReport {
@@ -79,6 +84,10 @@ export interface AgentsProbe {
 	disposed(key: string): Promise<boolean>;
 	/** Whether the worker's lifecycle proxy manages the worker's registry proxy. */
 	manages(): Promise<boolean>;
+	/** Register an external agent through the worker's registry proxy, settle it with `complete()`, and return its id. */
+	settleExternal(): Promise<string>;
+	/** Read an `agent://` or `history://` URL with this worker's handlers. */
+	readUrl(url: string): Promise<string>;
 }
 
 /** Test-only boot globals of the probe service. */
@@ -252,6 +261,29 @@ const probe: AgentsProbe = {
 		return session.isDisposed;
 	},
 	manages: async () => AgentLifecycleManager.global().manages(AgentRegistry.global()),
+	settleExternal: async () => {
+		const handle = registerExternalAgent(
+			{
+				registry: AgentRegistry.global(),
+				jobs: new AsyncJobManager({}),
+				ownerId: "W-owner",
+				emitFrame: () => {},
+				resultCap: { maxBytes: resolveArtifactSpillThreshold(undefined) },
+			},
+			{
+				label: "remote run",
+				execution: { backend: "queue", jobId: "q-1" },
+				readTranscript: async () => ({ text: "", newSize: 0 }),
+				steer: async () => {},
+			},
+		);
+		handle.complete({ status: "done", text: "remote result" });
+		return handle.id;
+	},
+	readUrl: async url => {
+		const handler = url.startsWith("history:") ? new HistoryProtocolHandler() : new AgentProtocolHandler();
+		return (await handler.resolve(new URL(url) as never)).content;
+	},
 };
 
 function isProbeGlobals(value: unknown): value is AgentsProbeGlobals {

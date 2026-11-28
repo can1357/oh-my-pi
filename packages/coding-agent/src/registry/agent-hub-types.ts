@@ -20,6 +20,32 @@ export interface AgentMetricsSummary {
 	contextWindow?: number;
 }
 
+/** Where an external agent runs: its backend, the job id there, and the host when known. */
+export interface ExternalAgentExecution {
+	backend: string;
+	jobId: string;
+	machine?: string;
+}
+
+/** One page of an external agent's transcript, read from a byte cursor. */
+export interface ExternalTranscriptPage {
+	/** Session JSONL entries from the requested byte, or from byte 0 when {@link reset} is set. */
+	text: string;
+	/** Cursor for the next read. */
+	newSize: number;
+	/** The transcript was rebuilt: `text` replaces everything read before. */
+	reset?: boolean;
+	/** Permanent read failure; readers show it and stop polling. */
+	error?: string;
+}
+
+/** What core calls on an external agent; the extension that registered it serves them. */
+export interface ExternalAgentControls {
+	readTranscript(fromByte: number, signal?: AbortSignal): Promise<ExternalTranscriptPage>;
+	/** Deliver a message: steered into its turn while it runs, a follow-up once idle. Absent when it takes none, or once it settled. */
+	steer?(text: string): Promise<void>;
+}
+
 /** Live session data and actions used by the agent hub. */
 export interface AgentHubSession {
 	readonly thinkingLevel: ThinkingLevel | undefined;
@@ -44,8 +70,9 @@ export interface AgentHubSession {
 export interface AgentRecordLike {
 	id: string;
 	displayName: string;
-	kind: "main" | "sub" | "advisor";
+	kind: "main" | "sub" | "advisor" | "external";
 	parentId?: string;
+	execution?: ExternalAgentExecution;
 	status: AgentStatus;
 	session: AgentHubSession | null;
 	sessionFile: string | null;

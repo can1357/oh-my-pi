@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { AsyncJobManager } from "../../src/async/job-manager";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { IrcBus } from "../../src/irc/bus";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../../src/registry/agent-registry";
+import { registerExternalAgent } from "../../src/registry/external-agents";
 import { AgentSession } from "../../src/session/agent-session";
 import type { AgentSessionHandle } from "../../src/session/agent-session-handle";
 import { AuthStorage } from "../../src/session/auth-storage";
@@ -20,6 +22,7 @@ import type { ThreadService } from "../../src/thread/services";
 import { agentsThreadService } from "../../src/thread/services/agents";
 import { identityThreadService } from "../../src/thread/services/identity";
 import { SubagentWorker } from "../../src/thread/subagent-worker";
+import { resolveArtifactSpillThreshold } from "../../src/tools/output-meta";
 import { WriteTool } from "../../src/tools/write";
 import type { AgentsProbe, AgentsProbeGlobals } from "../fixtures/agents-bridge-worker";
 
@@ -365,5 +368,35 @@ describe("agent bridging across subagent workers", () => {
 		expect(liveRef("W1").session).toBe(revived);
 		expect(liveRef("W1").status).toBe("idle");
 		expect(worker.load).toBe(1);
+	});
+
+	it("settles an external agent registered through a worker's registry proxy", async () => {
+		const { probe } = await startWorker();
+		const ref = liveRef(await probe.settleExternal());
+		expect(ref.status).toBe("idle");
+		expect(ref.external?.steer).toBeUndefined();
+	});
+
+	it("reads a main-registered external agent's transcript from a worker, also after it settled", async () => {
+		const { probe } = await startWorker();
+		const transcript = `${JSON.stringify({ type: "message", id: "a", parentId: null, timestamp: new Date(0).toISOString(), message: { role: "assistant", content: [{ type: "text", text: "final answer" }], timestamp: 0 } })}\n`;
+		const agent = registerExternalAgent(
+			{
+				registry: AgentRegistry.global(),
+				jobs: new AsyncJobManager({}),
+				ownerId: "Main",
+				emitFrame: () => {},
+				resultCap: { maxBytes: resolveArtifactSpillThreshold(undefined) },
+			},
+			{
+				label: "remote run",
+				execution: { backend: "queue", jobId: "q-1" },
+				readTranscript: async fromByte => ({ text: transcript.slice(fromByte), newSize: transcript.length }),
+			},
+		);
+
+		expect(await probe.readUrl(`agent://${agent.id}`)).toContain("final answer");
+		agent.complete({ status: "done", text: "remote result" });
+		expect(await probe.readUrl(`history://${agent.id}`)).toContain("final answer");
 	});
 });

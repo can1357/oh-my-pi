@@ -538,8 +538,8 @@ export function AgentHub<T extends AgentRecordLike>(
 	const activate = (ref: T): void => {
 		notice = undefined;
 		const focusAgent = props.focusAgent;
-		// An advisor is a read-only transcript with nothing to revive.
-		if (ref.kind === "advisor" || props.remote || !focusAgent) {
+		// An advisor is a read-only transcript with nothing to revive; an external agent has no local session.
+		if (ref.kind === "advisor" || ref.kind === "external" || props.remote || !focusAgent) {
 			openChat(ref.id);
 			touch();
 			return;
@@ -558,6 +558,8 @@ export function AgentHub<T extends AgentRecordLike>(
 		const ref = rows[selectedRow];
 		if (!ref) return;
 		if (ref.kind === "advisor") notice = `"${ref.id}" is a read-only advisor transcript — nothing to revive.`;
+		else if (ref.kind === "external")
+			notice = `"${ref.id}" runs outside this session and cannot be revived; message it instead.`;
 		else if (ref.status !== "parked" && ref.status !== "aborted")
 			notice = `Agent "${ref.id}" is ${ref.status} — only parked or killed agents can be revived.`;
 		else {
@@ -916,6 +918,12 @@ export function AgentHub<T extends AgentRecordLike>(
 		if (role && props.getRoleInfo)
 			badges.push({ text: roleBadge(role, props.getRoleInfo(role)).text, title: "Model role" });
 		if (ref.kind === "advisor") badges.push({ text: "read-only", tone: "warning" });
+		if (ref.execution)
+			badges.push({
+				text: sanitizeDisplaySingleLine(ref.execution.machine ?? ref.execution.backend),
+				tone: "muted",
+				title: `Runs on ${sanitizeDisplaySingleLine(ref.execution.backend)}`,
+			});
 		const unread = props.irc.unreadCount(ref.id);
 		if (unread > 0) badges.push({ text: `${unread} unread`, tone: "warning" });
 		if (viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID)
@@ -993,13 +1001,28 @@ export function AgentHub<T extends AgentRecordLike>(
 			facts.push({ k: "Children", v: [span(`${named.join(", ")}${more > 0 ? `, … +${more}` : ""}`, "dim")] });
 		}
 		facts.push({ k: "Registered", v: [span(localDateTime(ref.createdAt), "dim")] });
+		const execution = ref.execution;
+		if (execution)
+			facts.push({
+				k: "Runs on",
+				v: [
+					span(
+						sanitizeDisplaySingleLine(
+							`${execution.backend} job ${execution.jobId}${execution.machine ? ` on ${execution.machine}` : ""}`,
+						),
+						"dim",
+					),
+				],
+			});
 		facts.push({
 			k: "Changes",
 			v: [
 				span(
 					ref.kind === "advisor" || ref.history?.readOnly
 						? "Read-only · 0 LoC"
-						: "Shared workspace · per-agent LoC not attributable",
+						: execution
+							? "Outside this workspace · not attributable"
+							: "Shared workspace · per-agent LoC not attributable",
 					"dim",
 				),
 			],
@@ -1223,6 +1246,7 @@ export function AgentHub<T extends AgentRecordLike>(
 			status: ref.status,
 			parent: viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID ? ref.parentId : undefined,
 			readOnly: ref.kind === "advisor",
+			execution: ref.execution,
 			unread: props.irc.unreadCount(ref.id),
 			role: role && props.getRoleInfo ? roleBadge(role, props.getRoleInfo(role)) : undefined,
 			model: hubModel(ref, session),
@@ -1275,6 +1299,7 @@ export function AgentHub<T extends AgentRecordLike>(
 			children: (childrenByParent.get(ref.id) ?? []).map(child => child.id),
 			registered: localDateTime(ref.createdAt),
 			readOnly: ref.kind === "advisor" || ref.history?.readOnly === true,
+			execution: ref.execution,
 			artifacts: [
 				...(artifacts?.outputPath ? [`Output ${shortenPath(artifacts.outputPath)}`] : []),
 				...(artifacts?.patchPath ? [`Patch ${shortenPath(artifacts.patchPath)}`] : []),

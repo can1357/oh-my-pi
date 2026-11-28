@@ -1183,6 +1183,19 @@ Failure responses:
   an abort or a usage-limit preflight denial lands first) →
   `error: "Subagent refused the message: <reason>"`
 
+### External agents
+
+Agents an extension registers with [`ctx.agents.registerExternal`](./extensions.md#external-agents-ctxagents)
+run outside this process and appear in these channels like subagents.
+`get_subagents` lists them with `agent` set to their backend (`backend@host`
+when the host is known), and their progress carries the model they run on
+(`resolvedModel`) and their current activity (`lastIntent`). `get_subagent_messages`
+by `subagentId` pages the transcript their extension serves, also after they
+finish; `sessionFile` is empty, and `reset: true` means the extension rebuilt
+the transcript, so the entries replace everything read before.
+`cancel_subagent` cancels one through its extension, and `steer_subagent`
+hands the message to its extension and responds once the extension accepted it.
+
 ### Side questions (`/btw`)
 
 `btw` asks the TUI's `/btw` side question: one ephemeral model turn over the

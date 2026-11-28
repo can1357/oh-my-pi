@@ -26,7 +26,7 @@ import { padTo, spaces, truncate, visibleWidth, wrap } from "@oh-my-pi/pi-tui/te
 import { sanitizeDisplaySingleLine } from "../../../extensibility/inventory/display-text";
 import type { AggregateMetrics, AgentMetrics } from "../../../modes/view-model/overlays/agent-hub-projection";
 import { formatCost } from "../../../modes/view-model/overlays/agent-hub-renderer";
-import type { AgentStatus } from "../../../registry/agent-hub-types";
+import type { AgentStatus, ExternalAgentExecution } from "../../../registry/agent-hub-types";
 import {
 	formatMetricDuration,
 	type HubModel,
@@ -51,6 +51,7 @@ export interface HubEntry {
 	/** The spawner shown as `↳ parent` (flat roster, below the top level). */
 	readonly parent?: string;
 	readonly readOnly: boolean;
+	readonly execution?: ExternalAgentExecution;
 	readonly unread: number;
 	readonly role?: HubBadge;
 	readonly model?: HubModel;
@@ -103,6 +104,7 @@ export interface HubDetail {
 	readonly children: readonly string[];
 	readonly registered: string;
 	readonly readOnly: boolean;
+	readonly execution?: ExternalAgentExecution;
 	/** `Output …`, `Patch …`, `Worktree branch …` lines. */
 	readonly artifacts: readonly string[];
 	/** Its newest activity, oldest first. */
@@ -369,6 +371,8 @@ function entryRows(
 	const fields = [`${cursor} ${branch}${statusGlyph(pen, entry.status)} ${styledId}`];
 	if (entry.parent) fields.push(theme.fg("dim", `↳ ${sanitizeDisplaySingleLine(entry.parent)}`));
 	if (entry.readOnly) fields.push(theme.fg("warning", "read-only"));
+	if (entry.execution)
+		fields.push(theme.fg("muted", sanitizeDisplaySingleLine(entry.execution.machine ?? entry.execution.backend)));
 	if (entry.unread > 0) fields.push(theme.fg("warning", `⧉ ${entry.unread}`));
 	const left = fields.join("  ");
 	const right = modelLine(pen, entry.role, entry.model);
@@ -598,8 +602,22 @@ function detailPanel(
 	);
 	if (children.length > 0) add(theme.fg("dim", childIds(children, width)));
 	add(theme.fg("dim", `Registered ${detail.registered}`));
+	const execution = detail.execution;
+	if (execution) {
+		const machine = execution.machine ? ` on ${execution.machine}` : "";
+		add(theme.fg("dim", sanitizeDisplaySingleLine(`Runs on ${execution.backend} job ${execution.jobId}${machine}`)));
+	}
 	section("Changes");
-	add(theme.fg("dim", detail.readOnly ? "Read-only · 0 LoC" : "Shared workspace · per-agent LoC not attributable"));
+	add(
+		theme.fg(
+			"dim",
+			detail.readOnly
+				? "Read-only · 0 LoC"
+				: execution
+					? "Outside this workspace · not attributable"
+					: "Shared workspace · per-agent LoC not attributable",
+		),
+	);
 	for (const artifact of detail.artifacts) addWrapped(artifact);
 	if (lines.length < rows) add();
 	if (lines.length < rows) add(theme.style("strong", theme.fg("accent", "Recent activity")));

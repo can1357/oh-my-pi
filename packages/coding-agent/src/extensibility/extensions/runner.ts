@@ -40,11 +40,15 @@ import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { currentTheme } from "@oh-my-pi/pi-tui/theme/runtime";
 import { extensionTheme } from "../../ui/extensions/render-output";
 import type { ComposerShape } from "../../ui/styles/composer/shapes";
+import { capAsyncJobOutcome, formatAsyncJobLabel } from "../../async";
 import type { SendUserMessageOptions } from "../../session/agent-session";
-import { MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { type AgentRegistryApi, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { registerExternalAgent } from "../../registry/external-agents";
 import type { SessionManager } from "../../session/session-manager";
 import type { ApprovalRecordSink } from "../../session/tool-approval-records";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
+import { resolveArtifactSpillThreshold } from "../../tools/output-meta";
+import { type InlineByteCapOptions, truncateTail } from "../../tools/streaming-output";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { aggregateExtensionFlags } from "./flags";
@@ -604,6 +608,26 @@ interface TodoBackendList {
 	phases: TodoPhase[];
 }
 
+/**
+ * Extension-supplied job label or intent as one bounded display line: job views render it as text
+ * and every `wait` report repeats it, so escapes and extra rows are stripped and the length capped.
+ */
+function extensionJobText(text: string): string {
+	return formatAsyncJobLabel(sanitizeDisplayLine(text));
+}
+
+/**
+ * The cap on an extension job's result or failure before the session keeps and delivers it: the spill threshold
+ * itself, without the slack `bash` adds for output its sink already bounded, and the full text saved as a session
+ * artifact the cap's `[raw output: …]` footer links.
+ */
+function extensionJobResultCap(settings: Settings | undefined, sessionManager: SessionManager): InlineByteCapOptions {
+	return {
+		maxBytes: resolveArtifactSpillThreshold(settings),
+		saveArtifact: full => sessionManager.saveArtifact(full).catch(() => undefined),
+	};
+}
+
 /** Longest a backend gets to answer `apply`; the extension handler timeout caps it further. */
 const TODO_APPLY_TIMEOUT_MS = 10_000;
 
@@ -662,6 +686,8 @@ export class ExtensionRunner {
 	#startLiveFn?: ExtensionContextActions["startLive"];
 	#ephemeralTurnBlocker = new AsyncLocalStorage<string | undefined>();
 	#asyncJobs?: ExtensionAsyncJobAccess;
+	#agentRegistry: AgentRegistryApi | undefined;
+	#emitSubagentFrame: (channel: string, payload: unknown) => void = () => {};
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
 	#navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -1214,6 +1240,15 @@ export class ExtensionRunner {
 	 */
 	setUserWaitTracker(track: UserWaitTracker): void {
 		this.#trackUserWait = track;
+	}
+
+	/**
+	 * Backs `ctx.agents` (with the job manager) with the session's agent registry and the buses its
+	 * `task:subagent:*` frames go out on.
+	 */
+	setAgentRegistry(registry: AgentRegistryApi, emitSubagentFrame: (channel: string, payload: unknown) => void): void {
+		this.#agentRegistry = registry;
+		this.#emitSubagentFrame = emitSubagentFrame;
 	}
 
 	/** Waits until the interactive transcript can show the tool call being approved. */
@@ -2143,6 +2178,8 @@ export class ExtensionRunner {
 			void this.runtime.sendUserMessage(text, options);
 		};
 		const getSessionModes = () => this.#sessionModes;
+		const asyncJobManager = this.#asyncJobs?.manager;
+		const agentRegistry = this.#agentRegistry;
 		return {
 			ui: delegation?.extensionPath ? this.#uiForPath(delegation.extensionPath) : this.#uiContext,
 			mode: this.#mode,
@@ -2202,6 +2239,50 @@ export class ExtensionRunner {
 					}
 				: undefined,
 			startLive: this.#startLiveFn,
+			asyncJobs: asyncJobManager
+				? {
+						// Owned by this runner's session agent, the only owner here with a delivery sink:
+						// an advisor-scoped `agent` would strand the job where nothing waits, delivers, or cancels.
+						register: (label, run, options) =>
+							asyncJobManager.register(
+								"extension",
+								extensionJobText(label),
+								// Bounded like a background `bash` job: progress like its output preview (job views paint all of
+								// it), the result or failure like the output it hands the model.
+								({ jobId, signal, reportProgress }) =>
+									capAsyncJobOutcome(
+										() =>
+											run({
+												jobId,
+												signal,
+												reportProgress: text => reportProgress(truncateTail(text).content),
+											}),
+										extensionJobResultCap(this.settings, this.sessionManager),
+									),
+								{
+									ownerId: this.agent.id,
+									intent: options?.intent ? extensionJobText(options.intent) : undefined,
+								},
+							),
+					}
+				: undefined,
+			agents:
+				asyncJobManager && agentRegistry
+					? {
+							// Owned by the session's agent for the same reason as `asyncJobs`.
+							registerExternal: spec =>
+								registerExternalAgent(
+									{
+										registry: agentRegistry,
+										jobs: asyncJobManager,
+										ownerId: this.agent.id,
+										emitFrame: this.#emitSubagentFrame,
+										resultCap: extensionJobResultCap(this.settings, this.sessionManager),
+									},
+									spec,
+								),
+						}
+					: undefined,
 			localProtocolOptions: this.localProtocolOptions,
 			memory: this.#getMemoryFn?.(),
 			// A getter, not a value: `createHandlerContext` scopes a handler via `Object.create(ctx)`, and

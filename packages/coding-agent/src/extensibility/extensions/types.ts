@@ -102,6 +102,8 @@ import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { LoopLimitConfig } from "../../modes/loop-limit";
 import type { MemoryRuntimeContext } from "../../memory-backend";
+import type { ExternalAgentHandle, ExternalAgentSpec } from "../../registry/external-agents";
+import type { AsyncJobManagerApi } from "../../async";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
@@ -631,10 +633,12 @@ export interface ExtensionModelQuery {
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
-/** Host wiring for the owning session's async jobs, backing `ctx.getAsyncJobSnapshot`/`ctx.cancelAsyncJob`. */
+/** Host wiring for the owning session's async jobs, backing `ctx.getAsyncJobSnapshot`/`ctx.cancelAsyncJob`/`ctx.asyncJobs`. */
 export interface ExtensionAsyncJobAccess {
 	getSnapshot(): AsyncJobSnapshot | null;
 	cancel(id: string): boolean;
+	/** The session's job manager, where `ctx.asyncJobs` registers jobs; without one `ctx.asyncJobs` is absent. */
+	manager?: AsyncJobManagerApi;
 }
 
 /**
@@ -838,6 +842,54 @@ export interface ExtensionLiveSession {
 	stop(): Promise<void>;
 }
 
+/** What an extension job's run receives from {@link ExtensionAsyncJobs.register}. */
+export interface ExtensionAsyncJobRunContext {
+	/** Id of the job, as `wait`, `cancel`, and job listings show it. */
+	jobId: string;
+	/** Aborted when the job is cancelled (by `cancel`, the job list, or session teardown). */
+	signal: AbortSignal;
+	/**
+	 * Replace the job's latest progress text, which job views show as its output while it runs. Like a background
+	 * `bash` job's output, only its last 50 KB (at most 3000 lines) is kept.
+	 */
+	reportProgress(text: string): Promise<void>;
+}
+
+/** Background jobs an extension runs in this session's job manager; see {@link ExtensionContext.asyncJobs}. */
+export interface ExtensionAsyncJobs {
+	/**
+	 * Start `run` as a background job owned by this session's agent and return its id at once.
+	 * The job appears in `wait`, `proc://`, and the job list like a native background job,
+	 * cancelling it aborts `signal`, and the string `run` resolves to is delivered to the agent
+	 * as the job's result. A rejection fails the job with its message. A result or message larger than
+	 * `tools.artifactSpillThreshold` (50 KB by default) keeps its head and tail and links the full text
+	 * saved as a session artifact, as a `bash` result does. `label` and `options.intent` are
+	 * each stripped of terminal escapes, collapsed to one line, and cut to 120 characters.
+	 * Throws when the session's running-job limit is reached.
+	 */
+	register(
+		label: string,
+		run: (job: ExtensionAsyncJobRunContext) => Promise<string>,
+		options?: { intent?: string },
+	): string;
+}
+
+export type { ExternalAgentHandle, ExternalAgentSpec };
+
+/** Agents an extension runs outside this process; see {@link ExtensionContext.agents}. */
+export interface ExtensionAgents {
+	/**
+	 * Show an agent that runs elsewhere (a remote host, a job queue) as a subagent of this session's
+	 * agent and return its handle at once. It is listed in the Agent Hub, the subagent HUD and RPC
+	 * subagent channels; its transcript viewer pages `readTranscript`; `wait` blocks on it until
+	 * `complete()` delivers its result; `agent://<id>` writes reach `steer`; and cancelling it (`cancel`,
+	 * `proc://<id>/kill`, the Agent Hub) calls `cancel`. Session shutdown cancels nothing: the agent is
+	 * marked parked. `label` and the `execution` fields are each stripped of terminal escapes, collapsed
+	 * to one line, and cut to 120 characters. Throws when the session's running-job limit is reached.
+	 */
+	registerExternal(spec: ExternalAgentSpec): ExternalAgentHandle;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -937,6 +989,16 @@ export interface ExtensionContext {
 	 * Optional: present only in hosts that run live sessions (currently interactive mode).
 	 */
 	startLive?(options: ExtensionLiveStartOptions): Promise<ExtensionLiveSession>;
+	/**
+	 * Run extension work as background jobs that `wait`, cancellation, and result delivery treat like
+	 * native ones. Optional: absent when the session has no async job manager.
+	 */
+	asyncJobs?: ExtensionAsyncJobs;
+	/**
+	 * Show agents an extension runs elsewhere as subagents of this session's agent. Optional: absent
+	 * when the session has no async job manager.
+	 */
+	agents?: ExtensionAgents;
 	/** Structured memory runtime for status/search/save across the configured backend. */
 	memory?: MemoryRuntimeContext;
 	/** `/annotate` as an API: build or collect annotation feedback on text and diffs. */

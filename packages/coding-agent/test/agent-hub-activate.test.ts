@@ -259,6 +259,30 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
+	it("shows where an external agent runs in its row and inspector", () => {
+		const agents = new AgentRegistry();
+		agents.register({
+			id: AGENT_ID,
+			displayName: AGENT_ID,
+			kind: "external",
+			parentId: "Main",
+			session: null,
+			sessionFile: null,
+			status: "running",
+			execution: { backend: "queue", jobId: "job-7", machine: "gpu-1" },
+		});
+		const hub = mountAgentHub({
+			...createAgentHubRuntime({ settings: Settings.isolated(), registry: agents }),
+			registry: agents,
+			irc: new IrcBus(agents),
+		});
+
+		expect(renderedRosterEntry(hub, AGENT_ID)).toContain("gpu-1");
+		expect(hub.text()).toContain("Runs on queue job job-7 on gpu-1");
+		expect(hub.text()).toContain("Outside this workspace · not attributable");
+		hub.dispose();
+	});
+
 	it("ranks restored subagents by recency rather than readdir order", async () => {
 		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-order-");
 		const sessionFile = path.join(tempDir.path(), "main.jsonl");

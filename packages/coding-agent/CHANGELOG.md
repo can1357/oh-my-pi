@@ -18,6 +18,8 @@
 
 ### Added
 
+- Added `ctx.asyncJobs.register()` so extensions can run their own work as background jobs that show up in `wait` and the job list, can be cancelled, and deliver their results to the agent like native background jobs. ([#20785](https://github.com/can1357/oh-my-pi/pull/20785) by [@Xytronix](https://github.com/Xytronix))
+- Added `ctx.agents.registerExternal()` so extensions can show agents that run elsewhere (a remote host, a job queue) as subagents: they appear in the Agent Hub, the subagent HUD and RPC subagent channels with a transcript viewer, `wait` blocks on them until their result is delivered, `agent://` messages reach them until they finish, and cancelling them stops the remote work. ([#20818](https://github.com/can1357/oh-my-pi/pull/20818) by [@Xytronix](https://github.com/Xytronix))
 - Added `--prepaint=on|off|force` to control the composer drawn before startup finishes: `off` waits for the full interface, `force` draws it even for flags that would change it
 - Todo backends can define an optional `apply`: the selected backend is asked before the model's `todo` call commits, and returning `{ block: true, reason }` refuses the call with the list unchanged ([#20355](https://github.com/can1357/oh-my-pi/pull/20355) by [@Dangerboi](https://github.com/Dangerboi))
 - `models.yml` `compat.neutralizeDeepseekSpecialTokens` turns DeepSeek chat-template token breaking on or off per model (on by default for DeepSeek-class models on chat-completions) ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))

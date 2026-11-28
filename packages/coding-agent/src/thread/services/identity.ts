@@ -107,6 +107,9 @@ interface RefSnapshot {
 	readonly activity: AgentRef["activity"];
 	readonly history: AgentRef["history"];
 	readonly lifecycle: AgentRef["lifecycle"];
+	readonly execution: AgentRef["execution"];
+	/** An external agent's transcript and message controls; its functions cross as remote callables. */
+	readonly external: AgentRef["external"];
 }
 
 /** Worker → main: which ref generation the worker means. */
@@ -162,6 +165,8 @@ const mainRefCodec: RpcCodec<AgentRef> = {
 			activity: ref.activity,
 			history: ref.history,
 			lifecycle: ref.lifecycle,
+			execution: ref.execution,
+			external: ref.external,
 		}) satisfies RefSnapshot,
 	decode: data => {
 		if (!isRefIdentity(data)) throw new Error("Malformed agent ref identity");
@@ -194,6 +199,8 @@ function refresh(ref: AgentRef, snapshot: RefSnapshot): AgentRef {
 	ref.activity = snapshot.activity;
 	ref.history = snapshot.history;
 	ref.lifecycle = snapshot.lifecycle;
+	ref.execution = snapshot.execution;
+	ref.external = snapshot.external;
 	return ref;
 }
 

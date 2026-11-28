@@ -102,7 +102,13 @@ import {
 import { RpcSessionEventForwarder } from "./rpc-session-events";
 import { isSessionSettled } from "../../session/session-settle";
 import { RpcSessionSettleWatcher, watchedScheduledTurnProbe } from "./rpc-session-settle";
-import { RpcSubagentRegistry, readRpcSubagentTranscript, resolveOwnedLiveSubagent } from "./rpc-subagents";
+import {
+	RpcSubagentRegistry,
+	readRpcExternalTranscript,
+	readRpcSubagentTranscript,
+	resolveListedExternalSubagent,
+	resolveOwnedLiveSubagent,
+} from "./rpc-subagents";
 import type {
 	RpcAbortAndRestoreQueueResult,
 	RpcCommand,
@@ -819,6 +825,9 @@ export async function handleRpcCancelSubagent(
 	subagentRegistry: Pick<RpcSubagentRegistry, "getSubagents">,
 	subagentId: string,
 ): Promise<boolean> {
+	// An external agent's kill cancels its backing job, which calls its extension's `cancel`.
+	const external = resolveListedExternalSubagent(subagentRegistry, subagentId);
+	if (external) return AgentLifecycleManager.global().release(subagentId, external, { tombstone: true });
 	const owned = resolveOwnedLiveSubagent(subagentRegistry, subagentId);
 	if (!owned) return false;
 	// Start the release first: it publishes the `aborted` tombstone synchronously,
@@ -862,6 +871,16 @@ export async function handleRpcSteerSubagent(
 	message: string,
 ): Promise<string | undefined> {
 	const notRunning = `Subagent not running: ${subagentId}`;
+	const external = resolveListedExternalSubagent(subagentRegistry, subagentId);
+	if (external) {
+		if (!external.external?.steer) return `Subagent refused the message: ${subagentId} takes no messages`;
+		try {
+			await external.external.steer(message);
+			return undefined;
+		} catch (err) {
+			return `Subagent refused the message: ${err instanceof Error ? err.message : String(err)}`;
+		}
+	}
 	const owned = resolveOwnedLiveSubagent(subagentRegistry, subagentId);
 	if (!owned) return notRunning;
 	let session: AgentSessionHandle;
@@ -2744,8 +2763,12 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					if (command.fromByte !== undefined && !Number.isFinite(command.fromByte)) {
 						return error(id, "get_subagent_messages", "fromByte must be a finite number");
 					}
-					const sessionFile = subagentRegistry.resolveSessionFile(command);
-					const transcript = await readRpcSubagentTranscript(sessionFile, command.fromByte);
+					const external = command.subagentId
+						? subagentRegistry.resolveExternalTranscript(command.subagentId)
+						: undefined;
+					const transcript = external
+						? await readRpcExternalTranscript(external, command.fromByte)
+						: await readRpcSubagentTranscript(subagentRegistry.resolveSessionFile(command), command.fromByte);
 					return success(id, "get_subagent_messages", transcript);
 				} catch (err) {
 					return error(id, "get_subagent_messages", err instanceof Error ? err.message : String(err));
