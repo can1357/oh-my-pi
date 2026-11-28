@@ -62,22 +62,60 @@ pub enum Launch<'a> {
 
 /// Parse the `#!` line at the start of `head` (the first bytes of a file;
 /// only [`HEAD_LEN`] of them count). `None` without `#!` or interpreter.
+///
+/// A carriage return that ends the line is dropped; [`exec_interpreter`]
+/// keeps it, as the kernel does.
 pub fn parse(head: &[u8]) -> Option<Shebang<'_>> {
-	let head = &head[..head.len().min(HEAD_LEN)];
-	let line = head.strip_prefix(b"#!")?;
-	let line = line.find_byte(b'\n').map_or(line, |n| &line[..n]);
-	let line = line.strip_suffix(b"\r").unwrap_or(line);
-	let line = line.trim_start_with(|c| c == ' ' || c == '\t');
-	let end = line.find_byteset(b" \t").unwrap_or(line.len());
-	let (interp, rest) = line.split_at(end);
-	if interp.is_empty() {
-		return None;
-	}
+	let line = line(head)?;
+	let (interp, rest) = split(line.strip_suffix(b"\r").unwrap_or(line))?;
 	let rest = rest.trim_with(|c| c == ' ' || c == '\t');
 	Some(Shebang {
 		interpreter: interp.as_bstr(),
 		arg:         (!rest.is_empty()).then(|| rest.as_bstr()),
 	})
+}
+
+/// The `#!` interpreter `execve` looks up for a file starting with `head`.
+///
+/// Linux splits the `#!` line on blanks only, so unlike [`parse`] this keeps
+/// a carriage return that ends the line right after the interpreter:
+/// `#!/bin/sh\r` names `/bin/sh\r`. `None` without `#!` or interpreter.
+pub fn exec_interpreter(head: &[u8]) -> Option<&BStr> {
+	split(line(head)?).map(|(interp, _)| interp.as_bstr())
+}
+
+/// The `#!` line at the start of `head`, after `#!` and up to the newline;
+/// only [`HEAD_LEN`] bytes count.
+fn line(head: &[u8]) -> Option<&[u8]> {
+	let line = head[..head.len().min(HEAD_LEN)].strip_prefix(b"#!")?;
+	Some(line.find_byte(b'\n').map_or(line, |n| &line[..n]))
+}
+
+/// `line`'s first word (the blanks before it skipped) and the rest after it;
+/// `None` when the line has no word.
+fn split(line: &[u8]) -> Option<(&[u8], &[u8])> {
+	let line = line.trim_start_with(|c| c == ' ' || c == '\t');
+	let (word, rest) = line.split_at(line.find_byteset(b" \t").unwrap_or(line.len()));
+	(!word.is_empty()).then_some((word, rest))
+}
+
+/// Whether the Linux kernel takes the `#!` interpreter of a file starting
+/// with `head` as cut short.
+///
+/// The kernel reads the `#!` line from the first [`HEAD_LEN`] bytes of the
+/// file only (execve(2)). The interpreter is cut short when the file has at
+/// least [`HEAD_LEN`] bytes, with no newline in the first [`HEAD_LEN`], and no
+/// blank or NUL from the interpreter's first byte to the last of them.
+/// `execve` then refuses the file, and `execvp` runs it with `/bin/sh`: on
+/// Linux 6.12 such a file ran under `/bin/sh`.
+pub fn interpreter_cut(head: &[u8]) -> bool {
+	let Some(line) = head.get(2..HEAD_LEN).filter(|_| head.starts_with(b"#!")) else {
+		return false;
+	};
+	let Some(start) = line.iter().position(|&c| c != b' ' && c != b'\t') else {
+		return false;
+	};
+	!line.contains(&b'\n') && !line[start..].iter().any(|&c| matches!(c, b' ' | b'\t' | 0))
 }
 
 /// Last path component (either separator, so Windows paths work too).
@@ -169,7 +207,9 @@ pub fn has_shebang(path: &Path) -> bool {
 	read_head(path, &mut head).is_ok_and(|n| n == 2 && head == *b"#!")
 }
 
-fn read_head(path: &Path, buf: &mut [u8]) -> io::Result<usize> {
+/// Read the first bytes of the file at `path` into `buf`, as many as fit or
+/// the file has; their count.
+pub fn read_head(path: &Path, buf: &mut [u8]) -> io::Result<usize> {
 	let mut f = fs::File::open(path)?;
 	let mut n = 0;
 	while n < buf.len() {
