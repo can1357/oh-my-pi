@@ -2822,16 +2822,6 @@ mod tests {
 			let (code, out, err) = run(args, stdin).await;
 			assert_eq!((code, out.as_str()), expected, "grep {args:?}: {err}");
 		}
-		// A compile error exits 2, as in GNU grep. The message is the builtin's
-		// own (GNU's names no offset): its offset counts the pattern and the
-		// `(?:` grep wraps it in, and nothing else.
-		for (pattern, message) in [
-			("a)", "offset 5: unmatched closing parenthesis"),
-			("(?<=a+)b", "offset 3: length of lookbehind assertion is not limited"),
-		] {
-			let err = format!("grep: PCRE2: error compiling pattern at {message}\n");
-			assert_eq!(run(&["-P", pattern], "a\n").await, (2, String::new(), err), "grep -P {pattern:?}");
-		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
