@@ -1861,6 +1861,19 @@ mod tests {
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
+	async fn trace_does_not_keep_a_huge_literal_of_a_sourced_script() {
+		let dir = tempfile::tempdir().unwrap();
+		let lib = dir.path().join("big.sh");
+		let literal = "x".repeat(1024 * 1024);
+		std::fs::write(&lib, format!("big='{literal}'\n")).unwrap();
+		let script = format!(". '{}'; echo \"${{#big}}\"", lib.display());
+		let (captured, trace) = trace_capture(&mut session(), &script).await;
+		assert_eq!(captured.stdout, "1048576\n");
+		let json = trace.snapshot_json().len();
+		assert!(json < 64 * 1024, "trace is {json} bytes for a 1 MiB literal");
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
 	async fn trace_cancelled_run_detaches_its_observer_before_the_next_call() {
 		let mut session = session();
 		let trace = Arc::new(crate::bash::trace::RunTrace::new("/bin/sleep 30"));

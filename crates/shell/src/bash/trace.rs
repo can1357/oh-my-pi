@@ -46,11 +46,14 @@ const ARG_BYTES: usize = 256;
 const ARG_ITEMS: usize = 64;
 /// Diagnostics kept (the newest).
 const DIAGS: usize = 8;
-/// Syntax nodes of runtime-read scripts (`.`/`source`, `eval`, a nested
-/// shell's file) whose units a trace keeps whole, about 250 lines. A unit
-/// read past it is elided: no source, syntax or nodes, and its events are not
-/// journaled, so a trace does not grow with the size of a sourced library.
+/// Syntax nodes (about 250 lines) and source bytes of runtime-read scripts
+/// (`.`/`source`, `eval`, a nested shell's file) whose units a trace keeps
+/// whole. A unit read past either is elided: no source, syntax or nodes, and
+/// its events are not journaled, so a trace does not grow with the size of a
+/// sourced library or of one huge literal in it.
 const SCRIPT_NODES: usize = 1024;
+/// See [`SCRIPT_NODES`].
+const SCRIPT_BYTES: usize = 64 * 1024;
 
 /// A statement's state, derived at snapshot time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -346,11 +349,12 @@ struct Inner {
 	by_id:        HashMap<Vpid, HashMap<(Option<u32>, UnitId), u32>>,
 	diags:        Vec<Diag>,
 	journal:      history::Journal,
-	/// [`SCRIPT_NODES`] left for runtime-read units.
-	script_room:  usize,
+	/// [`SCRIPT_NODES`] and [`SCRIPT_BYTES`] left for runtime-read units.
+	script_room:  (usize, usize),
 	/// The one source-less unit every elided unit resolves to: a runtime-read
-	/// unit past [`SCRIPT_NODES`], or one defined in such a unit. Its events
-	/// are not journaled. Once set, every later runtime-read unit is elided.
+	/// unit past [`SCRIPT_NODES`] or [`SCRIPT_BYTES`], or one defined in such a
+	/// unit. Its events are not journaled. Once set, every later runtime-read
+	/// unit is elided.
 	elided:       Option<u32>,
 	segment:      Option<SegmentState>,
 	next_segment: u32,
@@ -439,7 +443,7 @@ impl RunTrace {
 				by_id:        HashMap::new(),
 				diags:        Vec::new(),
 				journal:      history::Journal::default(),
-				script_room:  SCRIPT_NODES,
+				script_room:  (SCRIPT_NODES, SCRIPT_BYTES),
 				elided:       None,
 				segment:      None,
 				next_segment: 0,
@@ -1075,7 +1079,7 @@ impl Inner {
 					.and_then(|syntax| syntax.parent)
 					.map(|parent| parent.unit)
 					== self.elided)
-			|| runtime && nodes.len() > self.script_room;
+			|| runtime && (nodes.len() > self.script_room.0 || source.len() > self.script_room.1);
 		if elided {
 			let u = *self.elided.get_or_insert_with(|| {
 				self.units.push(UnitState {
@@ -1099,7 +1103,8 @@ impl Inner {
 			return;
 		}
 		if runtime {
-			self.script_room -= nodes.len();
+			self.script_room.0 -= nodes.len();
+			self.script_room.1 -= source.len();
 		}
 		// A script a command ran is not the command text, whatever it holds.
 		let at = exact_at.or_else(|| {
