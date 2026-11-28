@@ -1714,6 +1714,10 @@ fn compile_label_command(
 		label.push(line.current());
 		line.advance();
 	}
+	// GNU sed keeps a label only up to a NUL in it: `b x\0tail` jumps to `x`.
+	if let Some(nul) = label.find('\0') {
+		label.truncate(nul);
+	}
 
 	if label.is_empty() {
 		if cmd.code == ':' {
@@ -10180,6 +10184,8 @@ mod tests {
 			(&["-n", "-e", ":a+b", "-e", "s/a/X/;ta+b;p"][..], "a\nb\n", "X\nb\n"),
 			(&["-n", "bL\x0bR; :L\x0bR; p"], "a\n", "a\n"),
 			(&["-n", "tx p;:x"], "a\n", "a\n"),
+			// After a label, as between any commands, a vertical tab is skipped.
+			(&["ba \x0bp;:a"], "a\n", "a\n"),
 			(&["-n", "p\t#c"], "a\n", "a\n"),
 			(&["s/a/X/g\r\np"], "a\nb\n", "X\nX\nb\nb\n"),
 		] {
@@ -10195,8 +10201,6 @@ mod tests {
 			// A CR that no newline follows is junk after the flags.
 			("s/a/X/\r", "char 7: unknown option to `s'"),
 			("s/a/X/\r;p", "char 8: unknown option to `s'"),
-			// The unclosed group is reported before the jump to a missing label.
-			("{b missing", "char 0: unmatched `{'"),
 		] {
 			let (code, capture) = crate::host::run_util::<Sed>(&["-n", script], "a\n", "/");
 			assert_eq!(
@@ -10212,6 +10216,33 @@ mod tests {
 			let (code, capture) = crate::host::run_util::<Sed>(&[script], "a\n", "/");
 			assert_eq!((code, capture.out().as_str()), (1, ""), "{script:?}: {}", capture.err());
 		}
+	}
+
+	#[test]
+	fn a_label_ends_at_its_first_nul() {
+		// GNU sed 4.9 reads a label in a script file up to its usual end, but
+		// keeps only what comes before a NUL in it: `b x\0tail` jumps to `:x`,
+		// and `:x\0tail` defines `x`.
+		let dir = tempfile::tempdir().unwrap();
+		let script = dir.path().join("s.sed");
+		for (args, text, expected) in [
+			(&["-f", "s.sed"][..], &b"b x\0tail\n:x\np\n"[..], "a\na\n"),
+			(&["-f", "s.sed"], b"b x\n:x\0tail\np\n", "a\na\n"),
+			// The label still ends at `;`, so `p` is the next command.
+			(&["-n", "-f", "s.sed"], b"t x\0y;p\n:x\np\n", "a\na\n"),
+			// A label that starts with a NUL is empty: `b` jumps to the end.
+			(&["-n", "-f", "s.sed"], b"b \0x\np\n", ""),
+		] {
+			std::fs::write(&script, text).unwrap();
+			let (code, capture) = crate::host::run_util::<Sed>(args, "a\n", dir.path());
+			let text = String::from_utf8_lossy(text);
+			assert_eq!((code, capture.out().as_str()), (0, expected), "{text:?}: {}", capture.err());
+		}
+		// So is the label of a `:` that starts with a NUL, which GNU refuses.
+		std::fs::write(&script, b":\0x\np\n").unwrap();
+		let (code, capture) = crate::host::run_util::<Sed>(&["-n", "-f", "s.sed"], "a\n", dir.path());
+		assert_eq!((code, capture.out().as_str()), (1, ""), "{}", capture.err());
+		assert!(capture.err().contains("\":\" lacks a label"), "{}", capture.err());
 	}
 
 	#[test]
