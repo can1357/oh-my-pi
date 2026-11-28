@@ -7960,8 +7960,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * Keeps a subagent transcript's latest `session_init` on the base prompt and work-pool yield items
 	 * its model calls are built from, appending a newer one when either changes: signed thinking is
 	 * bound to the system prompt and tools, so cold revival must replay them. A per-turn override is
-	 * stored as the base its hook was given, since the revived turn re-runs the hook. Transcripts
-	 * without a `session_init` are left alone.
+	 * stored as the base its hook was given: the transcript's prompt records restore the override on
+	 * that base. Transcripts without a `session_init` are left alone.
 	 */
 	#recordModelCallSystemPrompt(prompt: string[]): void {
 		const sessionFile = this.sessionManager.getSessionFile();
@@ -10061,8 +10061,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					if (result?.systemPrompt !== undefined) {
 						this.#tools.setTurnSystemPromptOverride(result.systemPrompt, basePreparation.systemPrompt);
 					} else {
-						this.#tools.clearTurnSystemPromptOverride();
-						this.agent.setSystemPrompt(this.#tools.baseSystemPrompt);
+						this.#tools.setTurnBaseSystemPrompt();
 					}
 					return messages;
 				},
@@ -13856,7 +13855,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return;
 		}
 		// The rewound turn's reply is the exploration branch's newest, so this records its prompt.
-		const explorationPromptDigest = this.#tools.recordedPromptDigest();
+		const explorationPrompt = this.#tools.recordedPrompt();
 		this.#bash.withBranchTransition(() => {
 			try {
 				this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, {
@@ -13894,7 +13893,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				if (calls.length > 0) {
 					const callIds = new Set(calls.map(call => call.id));
 					// The rewind branch ends at the checkpoint, whose recorded prompt may predate this reply's.
-					this.#tools.recordPromptDigest(explorationPromptDigest);
+					this.#tools.recordPrompt(explorationPrompt);
 					this.sessionManager.appendMessage(
 						sanitizeAssistantForReparentedHistory({ ...turn.message, content: calls }),
 					);

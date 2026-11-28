@@ -67,7 +67,7 @@ describe("AgentSession turn started by a triggered custom message", () => {
 		return { session, systemPrompts, hookCalls: () => hookCalls };
 	}
 
-	it("applies the before_agent_start system prompt to a user-attributed message, then drops it", async () => {
+	it("applies the before_agent_start prompt to a user-attributed message and keeps it on its base", async () => {
 		const { session, systemPrompts } = createSession(async () => ({ systemPrompt: [OVERRIDE] }));
 
 		await session.sendCustomMessage(
@@ -77,8 +77,9 @@ describe("AgentSession turn started by a triggered custom message", () => {
 		await session.waitForIdle();
 
 		expect(systemPrompts).toEqual([[OVERRIDE]]);
+		// A rebuild that leaves the base unchanged keeps the prompt the turn sent.
 		await session.refreshBaseSystemPrompt();
-		expect(session.systemPrompt).toEqual(["base"]);
+		expect(session.systemPrompt).toEqual([OVERRIDE]);
 	});
 
 	it("leaves an agent-attributed wake unprepared", async () => {
