@@ -131,6 +131,11 @@ export interface Host {
 	 * repaint (always false natively, where nothing retires).
 	 */
 	retired(node: UiNode): boolean;
+	/**
+	 * Whether the terminal acknowledged rows of `node`'s own content in history, not only the
+	 * separator above it (always false natively).
+	 */
+	contentInHistory(node: UiNode): boolean;
 	/** Redraw terminal history from the current main region (its retired rows changed or went away). */
 	replayHistory(): void;
 	/**
@@ -250,6 +255,7 @@ type Renderer = Pick<
 	| "native"
 	| "hour12"
 	| "retired"
+	| "contentInHistory"
 	| "replayHistory"
 	| "redescribe"
 	| "dispatch"
@@ -388,6 +394,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 				return connection.hello.hour12;
 			},
 			retired: () => false,
+			contentInHistory: () => false,
 			replayHistory: () => {},
 			redescribe: node => backend.redescribe(node),
 			dispatch: event => backend.dispatch(event),
@@ -460,6 +467,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 			native: false,
 			hour12: undefined,
 			retired: node => backend.retired(node),
+			contentInHistory: node => backend.contentInHistory(node),
 			replayHistory: () => driver.resetDisplay(),
 			redescribe: () => {},
 			dispatch: event => backend.dispatch(event),
@@ -514,6 +522,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
 		},
 		driver,
 		retired: node => renderer.retired(node),
+		contentInHistory: node => renderer.contentInHistory(node),
 		replayHistory: () => renderer.replayHistory(),
 		redescribe: node => renderer.redescribe(node),
 		dispatch: event => renderer.dispatch(event),

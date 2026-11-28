@@ -415,6 +415,7 @@ import { appInterruptKeys } from "../config/keybindings/matchers";
 import { setExtensionLinkClicksProvider } from "../extensibility/extensions/link-clicks";
 import { getAssistantMessageLinkTargets } from "../session/transcript/link-targets";
 import { onTranscriptPresentersChanged } from "../session/transcript/transcript-presentation";
+import { followsViewportOnly } from "../session/transcript/tool-execution";
 import type { TurnAct } from "../session/transcript/transcript-actions";
 import type { Composer } from "../ui/composer";
 import type { DialogVim } from "../ui/composer/vim-editor";
@@ -4098,14 +4099,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		const preservedLiveToolCallIds = new Set<string>();
 		// A preserved call whose result already landed in the replayed transcript is drawn by the
 		// replay itself (#6516); keeping its live block too would draw the call twice. A background
-		// job's `running` result keeps its live block (later frames still fill it), and a read group
-		// another pending read still shares stays as one block.
+		// job's `running` result keeps its live block (later frames still fill it), unless the card
+		// follows the viewport only: the replay redraws it in place from the job's latest frame, so
+		// it stays above later replies. A read group another pending read still shares stays as one block.
+		const native = this.shell.native();
 		for (const message of context.messages) {
 			if (message.role !== "toolResult") continue;
 			const resolved = livePendingTools.get(message.toolCallId);
 			if (!resolved) continue;
 			const details = message.details as { async?: { state?: string } } | undefined;
-			if (details?.async?.state === "running") {
+			if (details?.async?.state === "running" && !followsViewportOnly(message.toolName, native)) {
 				preservedLiveToolCallIds.add(message.toolCallId);
 				continue;
 			}
