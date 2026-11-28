@@ -46,6 +46,7 @@ import * as cliGcSettings from "../cli/gc-settings";
 import * as telemetrySettings from "../telemetry-settings";
 import * as spotlightSettings from "../spotlight/settings";
 import * as auxiliaryModelPolicy from "./auxiliary-model-policy";
+import * as decisionSettings from "../decision/settings";
 
 const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	configModelSettings,
@@ -88,6 +89,7 @@ const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 	cliGcSettings,
 	spotlightSettings,
 	auxiliaryModelPolicy,
+	decisionSettings,
 ];
 
 /** Domains listed immediately before `before` (a setting of a DOMAINS entry) instead of in DOMAINS order. */

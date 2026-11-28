@@ -15,6 +15,9 @@ If a skill applies, you MUST read `skill://<name>` before proceeding.
 {{/each}}
 </skills>
 {{/if}}
+{{#if skillDiscoveryInstruction}}
+{{skillDiscoveryInstruction}}
+{{/if}}
 {{#if hasSkillUriAccess}}
 {{#unless skills.length}}
 Loaded skills remain addressable as `skill://<name>`.

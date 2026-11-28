@@ -102,6 +102,7 @@ import { LiveImageUrlService } from "./blob-broker/live-service";
 import { resolveProviderFileCredential } from "./blob-broker/provider-file-credential";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
+import { progressiveSkillProjection } from "./decision/skill-projection";
 import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
@@ -4643,6 +4644,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				modelSystemPromptTemplates: systemPromptTemplatePatterns.get(settings),
 				skills: cfgSkillful.get(settings) ? (session?.promptSkills ?? skills) : [],
 				skillDescriptions,
+				// Only the main agent receives per-turn skill hints, so only it may list fewer skills.
+				progressiveSkills:
+					agentKind === "main"
+						? promptSkills => progressiveSkillProjection(settings, promptSkills)?.mandatory
+						: undefined,
 				contextFiles,
 				tools: promptTools,
 				toolNames,

@@ -9,6 +9,7 @@ import { shouldInlineToolDescriptors } from "../config/inline-tool-descriptors-m
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import type { ToolPreflightSource } from "../decision/tool-preflight";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { clearPluginRootsAndCaches } from "../discovery/helpers";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
@@ -923,6 +924,11 @@ export class SessionTools {
 	/** Names currently presented as tool commands. */
 	getMountedToolCommandNames(): string[] {
 		return [...(this.#toolCommands?.mountedNames ?? [])];
+	}
+
+	/** Active tool commands and enabled tool names for decision-layer tool preflight. */
+	toolPreflightSource(): ToolPreflightSource {
+		return { toolCommands: this.activeToolCommands, enabledNames: this.getEnabledToolNames() };
 	}
 
 	/** Enabled MCP tools presented as eval namespace methods (`mcp.evalNamespaces`); the SDK builds their preludes. */
