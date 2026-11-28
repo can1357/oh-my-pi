@@ -207,7 +207,9 @@ mod tests {
 
 	#[test]
 	fn text_survives_a_generic_family_naming_a_missing_font() {
-		let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"><text y="15">label</text></svg>"#;
+		// `serif`, not usvg's default family: hosts with Times New Roman
+		// installed would otherwise render the text without any generic.
+		let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="20"><text y="15" font-family="serif">label</text></svg>"#;
 		// A text node can survive parsing and still paint nothing; the
 		// consumer sees the rendered PNG, so count the pixels it inks.
 		let draws_text = |database: Database| {

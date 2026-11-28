@@ -16,7 +16,7 @@
  * fallbacks cover unmatched targets.
  */
 import { Effort, THINKING_EFFORTS } from "../effort";
-import { hostMatchesUrl, modelMatchesHost } from "../hosts";
+import { classifyEndpointHosts, hostMatchesUrl, modelMatchesHost } from "../hosts";
 import type {
 	Api,
 	CatalogPolicyInputs,
@@ -42,7 +42,13 @@ import {
 } from "./anthropic";
 import { applyCompatOverrides } from "./apply";
 import { API_COMPAT_RECORDS, AXES, type CompatRecordName } from "./axes";
-import { hasModelScopedEffortsRule, resolveCascade } from "./cascade";
+import {
+	catalogAxisProviders,
+	hasModelScopedEffortsRule,
+	resolveCascade,
+	resolveCascadeCatalog,
+	resolveCascadeCatalogAxis,
+} from "./cascade";
 import { compareRevision, parseRevision, type Revision } from "./revision";
 import { classifyModel, stripThinkingVariantSuffix } from "./taxonomy";
 import type { ModelIdentity, RequestPolicy, ResolvedAxes, ResolveTarget } from "./types";
@@ -328,8 +334,43 @@ function isOfficialOpenAIEndpoint(provider: string, baseUrl: string): boolean {
 	}
 }
 
+/** Endpoint facts shared by a provider's catalog rows; model identity stays row-specific. */
+class OpenAIEndpoint {
+	readonly hosts;
+	readonly official: boolean;
+	readonly loopback: boolean;
+
+	constructor(provider: string, baseUrl: string) {
+		this.hosts = classifyEndpointHosts(provider, baseUrl);
+		this.official = isOfficialOpenAIEndpoint(provider, baseUrl);
+		this.loopback = hasLocalLoopbackBaseUrl(baseUrl);
+	}
+}
+
+// Both inputs matter: a custom provider on the same URL inherits URL matches, not a native provider's flags.
+const endpointsByUrl = new Map<string, Map<string, OpenAIEndpoint>>();
+const MAX_ENDPOINTS = 256;
+let endpointCount = 0;
+
+function openAIEndpoint(provider: string, baseUrl: string): OpenAIEndpoint {
+	let providers = endpointsByUrl.get(baseUrl);
+	const cached = providers?.get(provider);
+	if (cached) return cached;
+	if (endpointCount >= MAX_ENDPOINTS) {
+		endpointsByUrl.clear();
+		endpointCount = 0;
+		providers = undefined;
+	}
+	if (!providers) endpointsByUrl.set(baseUrl, (providers = new Map()));
+	const endpoint = new OpenAIEndpoint(provider, baseUrl);
+	providers.set(provider, endpoint);
+	endpointCount++;
+	return endpoint;
+}
+
 interface OpenAIDetection {
 	facts: IdentityFacts;
+	endpoint: OpenAIEndpoint;
 	isZai: boolean;
 	isZhipu: boolean;
 	isMoonshotNative: boolean;
@@ -353,34 +394,34 @@ function detectOpenAI(
 ): OpenAIDetection {
 	const provider = spec.provider;
 	const backendProvider = spec.providerType ?? provider;
-	const baseUrl = spec.baseUrl;
-	const hostModel = { provider, baseUrl };
-	const isZai = modelMatchesHost(hostModel, "zai");
-	const isZhipu = modelMatchesHost(hostModel, "zhipu");
-	const isMoonshotNative = modelMatchesHost(hostModel, "moonshotNative");
-	const isXiaomiHost = modelMatchesHost(hostModel, "xiaomi");
-	const isDirectDeepseekApi = modelMatchesHost(hostModel, "deepseekDirect");
-	const isDeepseekFamily = modelMatchesHost(hostModel, "deepseekFamily") || facts.is("deepseek");
+	const endpoint = openAIEndpoint(provider, spec.baseUrl);
+	const isZai = endpoint.hosts.model.zai;
+	const isZhipu = endpoint.hosts.model.zhipu;
+	const isMoonshotNative = endpoint.hosts.model.moonshotNative;
+	const isXiaomiHost = endpoint.hosts.model.xiaomi;
+	const isDirectDeepseekApi = endpoint.hosts.model.deepseekDirect;
+	const isDeepseekFamily = endpoint.hosts.model.deepseekFamily || facts.is("deepseek");
 	const isDeepseekReasoning = isDeepseekFamily && reasoningCapable;
 	const isLocalOpenAICompatBackend =
 		PROXY_OPENAI_COMPAT_PROVIDERS[backendProvider] !== true &&
-		(LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true || hasLocalLoopbackBaseUrl(baseUrl));
+		(LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true || endpoint.loopback);
 	return {
 		facts,
+		endpoint,
 		isZai,
 		isZhipu,
 		isMoonshotNative,
-		isOpenCodeHost: modelMatchesHost(hostModel, "opencode"),
+		isOpenCodeHost: endpoint.hosts.model.opencode,
 		isOpenCodeProvider: provider === "opencode-go" || provider === "opencode-zen",
 		isDirectDeepseekApi,
 		isDeepseekReasoning,
 		isDirectDeepseekReasoning: isDirectDeepseekApi && isDeepseekReasoning,
-		isVenice: modelMatchesHost(hostModel, "venice"),
+		isVenice: endpoint.hosts.model.venice,
 		requiresEnabledThinking: isMoonshotNative && facts.is("kimi") && facts.family("k2.7-code"),
 		isXiaomiMimo: isXiaomiHost && facts.is("mimo"),
 		isLocalOpenAICompatBackend,
-		isLocalServingBackend: isLocalOpenAICompatBackend || hasLocalLoopbackBaseUrl(baseUrl),
-		isOpenRouter: modelMatchesHost(hostModel, "openrouter"),
+		isLocalServingBackend: isLocalOpenAICompatBackend || endpoint.loopback,
+		isOpenRouter: endpoint.hosts.model.openrouter,
 	};
 }
 
@@ -396,31 +437,29 @@ function detectOpenAICompat(
 	reasoningCapable: boolean,
 ): ResolvedOpenAICompat {
 	const provider = spec.provider;
-	const baseUrl = spec.baseUrl;
-	const hostModel = { provider, baseUrl };
-	const facts = d.facts;
-	const isCerebras = modelMatchesHost(hostModel, "cerebras");
-	const isCerebrasHost = hostMatchesUrl(baseUrl, "cerebras");
-	const isKilo = modelMatchesHost(hostModel, "kilo");
-	const isAlibaba = modelMatchesHost(hostModel, "alibabaDashscope");
-	const isXiaomiHost = modelMatchesHost(hostModel, "xiaomi");
-	const isGrok = modelMatchesHost(hostModel, "xai");
-	const isMistral = modelMatchesHost(hostModel, "mistral");
-	const isGoogleAistudioOpenAI = hostMatchesUrl(baseUrl, "googleAistudio");
-	const isOpenAIHost = modelMatchesHost(hostModel, "openai");
-	const isAzureHost = modelMatchesHost(hostModel, "azureOpenAI");
-	const isVercelGateway = modelMatchesHost(hostModel, "vercelAIGateway");
-	const isTogether = modelMatchesHost(hostModel, "together");
-	const isFireworks = hostMatchesUrl(baseUrl, "fireworks");
-	const isGroqHost = modelMatchesHost(hostModel, "groq");
-	const isMiniMaxHost = modelMatchesHost(hostModel, "minimax");
-	const isQwenPortal = modelMatchesHost(hostModel, "qwenPortal");
+	const { endpoint, facts } = d;
+	const isCerebras = endpoint.hosts.model.cerebras;
+	const isCerebrasHost = endpoint.hosts.url.cerebras;
+	const isKilo = endpoint.hosts.model.kilo;
+	const isAlibaba = endpoint.hosts.model.alibabaDashscope;
+	const isXiaomiHost = endpoint.hosts.model.xiaomi;
+	const isGrok = endpoint.hosts.model.xai;
+	const isMistral = endpoint.hosts.model.mistral;
+	const isGoogleAistudioOpenAI = endpoint.hosts.url.googleAistudio;
+	const isOpenAIHost = endpoint.hosts.model.openai;
+	const isAzureHost = endpoint.hosts.model.azureOpenAI;
+	const isVercelGateway = endpoint.hosts.model.vercelAIGateway;
+	const isTogether = endpoint.hosts.model.together;
+	const isFireworks = endpoint.hosts.url.fireworks;
+	const isGroqHost = endpoint.hosts.model.groq;
+	const isMiniMaxHost = endpoint.hosts.model.minimax;
+	const isQwenPortal = endpoint.hosts.model.qwenPortal;
 	const isMoonshotKimi = facts.is("kimi") && d.isMoonshotNative;
 	const isMoonshotKimiK3 = isMoonshotKimi && facts.family("k3");
 	const usesMoonshotKimiPreservedThinking = isMoonshotKimi && facts.family("k2.6");
-	const isAnthropicModel = modelMatchesHost(hostModel, "anthropic") || facts.is("anthropic");
+	const isAnthropicModel = endpoint.hosts.model.anthropic || facts.is("anthropic");
 	const isQwen = facts.is("qwen");
-	const isDeepseekFamily = modelMatchesHost(hostModel, "deepseekFamily") || facts.is("deepseek");
+	const isDeepseekFamily = endpoint.hosts.model.deepseekFamily || facts.is("deepseek");
 	const supportsZaiReasoningEffort = (d.isZai || d.isZhipu) && facts.is("glm") && facts.revGte("5.2");
 
 	const isNonStandard =
@@ -428,8 +467,8 @@ function detectOpenAICompat(
 		isGrok ||
 		isMistral ||
 		isGoogleAistudioOpenAI ||
-		hostMatchesUrl(baseUrl, "chutes") ||
-		hostMatchesUrl(baseUrl, "deepseekFamily") ||
+		endpoint.hosts.url.chutes ||
+		endpoint.hosts.url.deepseekFamily ||
 		isFireworks ||
 		isAlibaba ||
 		d.isZai ||
@@ -445,12 +484,11 @@ function detectOpenAICompat(
 		d.isMoonshotNative ||
 		d.isZai ||
 		d.isZhipu ||
-		hostMatchesUrl(baseUrl, "chutes") ||
+		endpoint.hosts.url.chutes ||
 		isFireworks ||
 		d.isDirectDeepseekApi;
 
-	const supportsPromptCacheBreakpoints =
-		isOfficialOpenAIEndpoint(provider, baseUrl) && facts.is("openai") && facts.revGte("5.6");
+	const supportsPromptCacheBreakpoints = endpoint.official && facts.is("openai") && facts.revGte("5.6");
 
 	const supportsMultipleSystemMessagesDefault =
 		!isMiniMaxHost &&
@@ -479,39 +517,39 @@ function detectOpenAICompat(
 		facts.is("glm") &&
 		facts.revGte("5") &&
 		!facts.family("vision") &&
-		(hostMatchesUrl(baseUrl, "zai") || hostMatchesUrl(baseUrl, "zhipu") || hostMatchesUrl(baseUrl, "opencode"))
+		(endpoint.hosts.url.zai || endpoint.hosts.url.zhipu || endpoint.hosts.url.opencode)
 			? GLM_CODING_PLAN_STREAM_IDLE_TIMEOUT_MS
-			: facts.is("mimo") && hostMatchesUrl(baseUrl, "xiaomi")
+			: facts.is("mimo") && endpoint.hosts.url.xiaomi
 				? 300_000
 				: reasoningCapable &&
 					  facts.is("kimi") &&
 					  (facts.family("k3") || facts.family("k2.7-code")) &&
-					  hostMatchesUrl(baseUrl, "moonshotNative")
+					  endpoint.hosts.url.moonshotNative
 					? 300_000
-					: reasoningCapable && facts.is("deepseek") && hostMatchesUrl(baseUrl, "deepseekDirect")
+					: reasoningCapable && facts.is("deepseek") && endpoint.hosts.url.deepseekDirect
 						? 300_000
 						: d.isLocalServingBackend
 							? LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS
 							: undefined;
 
-	const wireModelIdMode: ResolvedOpenAISharedCompat["wireModelIdMode"] = hostMatchesUrl(baseUrl, "openrouter")
+	const wireModelIdMode: ResolvedOpenAISharedCompat["wireModelIdMode"] = endpoint.hosts.url.openrouter
 		? "openrouter"
 		: "raw";
 
 	// Provider and lineage formats are rule-owned; endpoint-only dialects remain here.
 	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] =
-		(facts.is("kimi") && !facts.family("k3") && hostMatchesUrl(baseUrl, "moonshotNative")) ||
-		hostMatchesUrl(baseUrl, "zai") ||
-		hostMatchesUrl(baseUrl, "zhipu") ||
-		(facts.is("mimo") && hostMatchesUrl(baseUrl, "xiaomi"))
+		(facts.is("kimi") && !facts.family("k3") && endpoint.hosts.url.moonshotNative) ||
+		endpoint.hosts.url.zai ||
+		endpoint.hosts.url.zhipu ||
+		(facts.is("mimo") && endpoint.hosts.url.xiaomi)
 			? "zai"
-			: hostMatchesUrl(baseUrl, "openrouter")
+			: endpoint.hosts.url.openrouter
 				? "openrouter"
-				: isQwen && hostMatchesUrl(baseUrl, "nvidia")
+				: isQwen && endpoint.hosts.url.nvidia
 					? "qwen-chat-template"
-					: isQwen && (isFireworks || hostMatchesUrl(baseUrl, "venice"))
+					: isQwen && (isFireworks || endpoint.hosts.url.venice)
 						? "openai"
-						: hostMatchesUrl(baseUrl, "alibabaDashscope") || isQwen
+						: endpoint.hosts.url.alibabaDashscope || isQwen
 							? "qwen"
 							: "openai";
 
@@ -574,12 +612,12 @@ function detectOpenAICompat(
 		wireModelIdMode,
 		isVercelGatewayHost: isVercelGateway,
 		supportsStrictMode:
-			hostMatchesUrl(baseUrl, "openai") ||
-			hostMatchesUrl(baseUrl, "azureOpenAI") ||
-			hostMatchesUrl(baseUrl, "cerebras") ||
-			hostMatchesUrl(baseUrl, "together") ||
-			hostMatchesUrl(baseUrl, "openrouter") ||
-			hostMatchesUrl(baseUrl, "deepseekFamily"),
+			endpoint.hosts.url.openai ||
+			endpoint.hosts.url.azureOpenAI ||
+			endpoint.hosts.url.cerebras ||
+			endpoint.hosts.url.together ||
+			endpoint.hosts.url.openrouter ||
+			endpoint.hosts.url.deepseekFamily,
 		extraBody: undefined,
 		toolStrictMode: isCerebrasHost ? "all_strict" : "mixed",
 		toolSchemaFlavor:
@@ -595,12 +633,12 @@ function detectOpenAICompat(
 		// Present as a key so models.yml `compat` can set it; unset unless a rule assigns it.
 		stripThinkingHistory: undefined,
 		// URL-derived like the Responses field; unset off the official OpenAI API.
-		officialEndpoint: isOfficialOpenAIEndpoint(spec.provider, baseUrl) || undefined,
-		streamMarkupHealingPattern: detectStreamMarkupHealing(spec.provider, facts, baseUrl),
+		officialEndpoint: endpoint.official || undefined,
+		streamMarkupHealingPattern: detectStreamMarkupHealing(spec.provider, facts, endpoint),
 		reasoningDeltasMayBeCumulative: false,
 		emptyLengthFinishIsContextError: false,
 		usesOpenAIToolCallIdLimit: false,
-		promptCacheSessionHeader: detectPromptCacheSessionHeader(baseUrl),
+		promptCacheSessionHeader: detectPromptCacheSessionHeader(endpoint),
 		dropThinkingWhenReasoningEffort: false,
 		nativeKimiK3Reasoning: false,
 		zaiReasoningEffortDialect: false,
@@ -614,10 +652,10 @@ function detectOpenAICompat(
 
 /** Worker-affinity header a host routes on to keep a conversation on its cached prefix. */
 function detectPromptCacheSessionHeader(
-	baseUrl: string | undefined,
+	endpoint: OpenAIEndpoint,
 ): ResolvedOpenAISharedCompat["promptCacheSessionHeader"] {
-	if (hostMatchesUrl(baseUrl, "xai")) return "x-grok-conv-id";
-	if (hostMatchesUrl(baseUrl, "morph")) return "x-session-id";
+	if (endpoint.hosts.url.xai) return "x-grok-conv-id";
+	if (endpoint.hosts.url.morph) return "x-session-id";
 	return undefined;
 }
 
@@ -631,7 +669,7 @@ function detectPromptCacheSessionHeader(
 function detectStreamMarkupHealing(
 	provider: string,
 	facts: IdentityFacts,
-	baseUrl: string,
+	endpoint: OpenAIEndpoint,
 ): ResolvedOpenAISharedCompat["streamMarkupHealingPattern"] {
 	// The dedicated Kimi grammar targets the K2 chat template; K3 and unranked
 	// Kimi ids keep the generic healer, matching the census. The Kimi Code
@@ -640,7 +678,7 @@ function detectStreamMarkupHealing(
 	const isKimiK2 = facts.is("kimi") && facts.identity.family?.startsWith("k2") === true;
 	if (provider === "moonshot" || isKimiK2) return "kimi";
 	if (facts.is("deepseek")) return "dsml";
-	if (isOfficialOpenAIEndpoint(provider, baseUrl)) return undefined;
+	if (endpoint.official) return undefined;
 	return "thinking";
 }
 
@@ -726,47 +764,43 @@ function resolveOpenAIResponsesPolicy(
 	const baseUrl = spec.baseUrl ?? "";
 	const provider = spec.provider;
 	const backendProvider = spec.providerType ?? provider;
-	const hostModel = { provider, baseUrl };
-	const isAzure = modelMatchesHost(hostModel, "azureOpenAI");
-	const isOpenRouter = modelMatchesHost(hostModel, "openrouter");
-	const isOpenAIUrl = hostMatchesUrl(baseUrl, "openai");
-	const isVercelGateway = modelMatchesHost(hostModel, "vercelAIGateway");
-	const isXaiHost = modelMatchesHost(hostModel, "xai");
-	const supportsPromptCacheBreakpoints =
-		isOfficialOpenAIEndpoint(provider, baseUrl) && facts.is("openai") && facts.revGte("5.6");
+	const endpoint = openAIEndpoint(provider, baseUrl);
+	const isAzure = endpoint.hosts.model.azureOpenAI;
+	const isOpenRouter = endpoint.hosts.model.openrouter;
+	const isOpenAIUrl = endpoint.hosts.url.openai;
+	const isVercelGateway = endpoint.hosts.model.vercelAIGateway;
+	const isXaiHost = endpoint.hosts.model.xai;
+	const supportsPromptCacheBreakpoints = endpoint.official && facts.is("openai") && facts.revGte("5.6");
 	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] = isOpenRouter ? "openrouter" : "openai";
 	const reasoningCapable = compatReasoning(spec, axes);
 	const isLocalServingBackend =
 		(PROXY_OPENAI_COMPAT_PROVIDERS[backendProvider] !== true &&
 			LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true) ||
-		hasLocalLoopbackBaseUrl(baseUrl);
+		endpoint.loopback;
 	const isAnthropicModel = facts.is("anthropic");
 	const isDeepseekFamily = facts.is("deepseek");
 
 	const compat: ResolvedOpenAIResponsesCompat = {
-		supportsDeveloperRole: isAzure || isOpenAIUrl || hostMatchesUrl(baseUrl, "githubCopilot"),
+		supportsDeveloperRole: isAzure || isOpenAIUrl || endpoint.hosts.url.githubCopilot,
 		supportsStrictMode:
 			isAzure ||
-			hostMatchesUrl(baseUrl, "openai") ||
-			hostMatchesUrl(baseUrl, "azureOpenAI") ||
-			hostMatchesUrl(baseUrl, "cerebras") ||
-			hostMatchesUrl(baseUrl, "together") ||
-			hostMatchesUrl(baseUrl, "openrouter") ||
-			hostMatchesUrl(baseUrl, "deepseekFamily"),
+			endpoint.hosts.url.openai ||
+			endpoint.hosts.url.azureOpenAI ||
+			endpoint.hosts.url.cerebras ||
+			endpoint.hosts.url.together ||
+			endpoint.hosts.url.openrouter ||
+			endpoint.hosts.url.deepseekFamily,
 		supportsReasoningEffort: !isXaiHost,
 		trustExplicitThinkingOnly: undefined,
 		supportsLongPromptCacheRetention: isOpenAIUrl,
 		supportsPromptCacheBreakpoints,
 		promptCacheBreakpointTtl: supportsPromptCacheBreakpoints ? "30m" : undefined,
 		// Provider ids are rule-owned; the URL arm keeps custom Azure endpoints paired.
-		strictResponsesPairing: hostMatchesUrl(baseUrl, "azureOpenAI"),
+		strictResponsesPairing: endpoint.hosts.url.azureOpenAI,
 		// Azure's provider id alone only implies support while its endpoint is
 		// resolved at runtime; an explicit non-Azure baseUrl is a proxy, like Codex.
 		supportsImageDetailOriginal:
-			isOpenAIUrl ||
-			hostMatchesUrl(baseUrl, "azureOpenAI") ||
-			(isAzure && !baseUrl) ||
-			hostMatchesUrl(baseUrl, "openaiCodex"),
+			isOpenAIUrl || endpoint.hosts.url.azureOpenAI || (isAzure && !baseUrl) || endpoint.hosts.url.openaiCodex,
 		supportsReasoningSummary: !isXaiHost,
 		statefulResponses: undefined,
 		supportsAllTurnsReasoningContext: false,
@@ -816,25 +850,23 @@ function resolveOpenAIResponsesPolicy(
 		alwaysSendMaxTokens: facts.is("kimi"),
 		clampOutputToModelMax:
 			PROXY_OPENAI_COMPAT_PROVIDERS[backendProvider] !== true &&
-			(LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true || hasLocalLoopbackBaseUrl(baseUrl)),
+			(LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true || endpoint.loopback),
 		supportsObfuscationOptOut: isOpenAIUrl || provider === "openai",
 		storeResponses: false,
 		connectionBoundNativeHistory: false,
 		// The Codex backend is official at the URL its requests default to when `baseUrl` is unset, and at paths
 		// under it such as `/codex` and `/codex/responses`, which its requests resolve to the same endpoint.
-		officialEndpoint:
-			isOfficialOpenAIEndpoint(provider, baseUrl) ||
-			(api === "openai-codex-responses" && isOfficialCodexApiUrl(baseUrl)),
+		officialEndpoint: endpoint.official || (api === "openai-codex-responses" && isOfficialCodexApiUrl(baseUrl)),
 		harmonyLeakMitigation: false,
 		rejectRootObjectUnion: false,
 		retryWithoutStrictOnGrammarError: false,
 		cacheControlFormat: isOpenRouter && isAnthropicModel ? "anthropic" : undefined,
 		stripDeepseekSpecialTokens: false,
-		streamMarkupHealingPattern: detectStreamMarkupHealing(provider, facts, baseUrl),
+		streamMarkupHealingPattern: detectStreamMarkupHealing(provider, facts, endpoint),
 		reasoningDeltasMayBeCumulative: false,
 		emptyLengthFinishIsContextError: false,
 		usesOpenAIToolCallIdLimit: false,
-		promptCacheSessionHeader: detectPromptCacheSessionHeader(baseUrl),
+		promptCacheSessionHeader: detectPromptCacheSessionHeader(endpoint),
 		streamFirstEventTimeoutMs: isLocalServingBackend ? 0 : spec.compat?.streamFirstEventTimeoutMs,
 		streamIdleTimeoutMs: isLocalServingBackend
 			? LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS
@@ -887,6 +919,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 		storeResponses: compat.storeResponses,
 		toolNamePrefix: compat.toolNamePrefix,
+		reasoningSummaryDefault: compat.reasoningSummaryDefault,
 		connectionBoundNativeHistory: compat.connectionBoundNativeHistory,
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
 		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
@@ -956,6 +989,7 @@ function resolveAnthropicPolicy(
 		// Present as keys so models.yml `compat` can set them; unset unless a rule assigns them.
 		stripThinkingHistory: undefined,
 		fastMode: undefined,
+		additiveSessionHeader: undefined,
 		disabledThinking: undefined,
 		streamIdleTimeoutMs: spec.compat?.streamIdleTimeoutMs,
 	};
@@ -1384,7 +1418,18 @@ export function resolveDiscoveryApi(spec: ModelSpec<Api>, providerType: string):
 export function resolveCatalogAxes(spec: CatalogPolicyInputs, route?: ResolveRoute): Record<string, unknown> {
 	const target = buildResolveTarget(spec, resolveIdentity(spec));
 	target.upstream = route?.upstream;
-	return resolveCascade(target).catalog;
+	return resolveCascadeCatalog(target);
+}
+
+/** One catalog assignment for a built model; skip identity and rule resolution for ineligible providers. */
+export function resolveCatalogAxis(model: CatalogPolicyInputs, axis: string): unknown {
+	const provider = model.providerType ?? model.provider;
+	const providers = catalogAxisProviders(axis);
+	if (providers && !providers.has(provider)) return undefined;
+	const target = buildResolveTarget(model, resolveIdentity(model), provider);
+	// A built row's provisional thinking ladder is not evidence of reasoning capability.
+	if (model.thinking?.unverified) target.reasoning = false;
+	return resolveCascadeCatalogAxis(target, axis);
 }
 
 /**

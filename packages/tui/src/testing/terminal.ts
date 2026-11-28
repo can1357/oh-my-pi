@@ -13,6 +13,7 @@
  * term.dispose();
  * ```
  */
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { FramePlan, InputEvent, MouseEvent, TerminalCapabilities, TerminalDriver } from "../driver/contract";
 import type { KeyEvent } from "../events";
 import type { UiNode } from "../node";
@@ -209,7 +210,7 @@ export function createTestTerminal(template: () => SurfaceTemplate, options: Tes
 			});
 		},
 		type(text) {
-			for (const { segment } of new Intl.Segmenter().segment(text)) {
+			for (const { segment } of segmentGraphemes(text)) {
 				const id =
 					segment === " "
 						? "space"

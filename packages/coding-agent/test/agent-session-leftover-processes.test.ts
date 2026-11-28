@@ -13,7 +13,7 @@ import * as services from "@oh-my-pi/pi-coding-agent/launch/services";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { listProcessesWithEnv, processInfo } from "@oh-my-pi/pi-natives";
+import { listProcessesWithEnvPrefix, processInfo } from "@oh-my-pi/pi-natives";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -90,7 +90,9 @@ describe.skipIf(process.platform === "win32")("AgentSession leftover background 
 	function sessionProcesses() {
 		const sessionId = sessionManager.getSessionId();
 		const held = heldShellProcesses(sessionId).map(proc => proc.pid);
-		return [...listProcessesWithEnv(BASH_SESSION_ENV, bashSessionTag(sessionId)), ...processInfo(held)];
+		const tag = bashSessionTag(sessionId);
+		const tagged = listProcessesWithEnvPrefix(BASH_SESSION_ENV, tag).filter(proc => proc.envValue === tag);
+		return [...tagged, ...processInfo(held)];
 	}
 
 	async function pidOf(match: (command: string) => boolean, what: string): Promise<number> {

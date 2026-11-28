@@ -150,7 +150,7 @@ impl GitRepo {
 			let id = reference
 				.peel_to_id()
 				.map_err(|err| Error::backend("git tags", err))?;
-			if id.to_string() == target
+			if id == target
 				&& let Some(name) = reference
 					.name()
 					.as_bstr()
@@ -493,22 +493,22 @@ impl GitRepo {
 		let Some(config) = load_local_config(common_dir.join("config"), common_dir)? else {
 			return Ok(common_dir.file_name().is_none_or(|n| n != ".git"));
 		};
-		let wt_has_worktree = if matches!(config.boolean("extensions.worktreeConfig"), Some(Ok(true)))
+		let wt_has_worktree = if matches!(config.boolean("extensions.worktreeConfig"), Ok(Some(true)))
 			&& let Some(wt) = load_local_config(common_dir.join("config.worktree"), common_dir)?
 		{
 			match wt.boolean("core.bare") {
-				Some(Ok(bare)) => return Ok(bare),
-				Some(Err(err)) => return Err(Error::backend("git config", err)),
-				None => {},
+				Ok(Some(bare)) => return Ok(bare),
+				Err(err) => return Err(Error::backend("git config", err)),
+				Ok(None) => {},
 			}
 			wt.string("core.worktree").is_some()
 		} else {
 			false
 		};
 		match config.boolean("core.bare") {
-			Some(Ok(bare)) => Ok(bare),
-			Some(Err(err)) => Err(Error::backend("git config", err)),
-			None => Ok(!wt_has_worktree
+			Ok(Some(bare)) => Ok(bare),
+			Err(err) => Err(Error::backend("git config", err)),
+			Ok(None) => Ok(!wt_has_worktree
 				&& config.string("core.worktree").is_none()
 				&& common_dir.file_name().is_none_or(|n| n != ".git")),
 		}
@@ -723,11 +723,10 @@ impl GitRepo {
 			.rev_parse_single(b)
 			.map_err(|err| Error::backend("git merge-base", err))?
 			.detach();
-		match repo.merge_base(a_id, b_id) {
-			Ok(id) => Ok(Some(id.detach().to_string())),
-			Err(gix::repository::merge_base::Error::NotFound { .. }) => Ok(None),
-			Err(err) => Err(Error::backend("git merge-base", err)),
-		}
+		repo
+			.merge_base(a_id, b_id)
+			.map(|id| id.map(|id| id.detach().to_string()))
+			.map_err(|err| Error::backend("git merge-base", err))
 	}
 
 	/// List commits touching `file`, newest first.
@@ -1349,9 +1348,7 @@ fn parse_worktree_cli(raw: &str) -> Vec<WorktreeEntry> {
 	}
 	out
 }
-fn commit_subject(
-	commit: &gix::Commit<'_>,
-) -> std::result::Result<String, gix::object::commit::Error> {
+fn commit_subject(commit: &gix::Commit<'_>) -> gix::Result<String> {
 	Ok(commit
 		.message()?
 		.title
@@ -1431,7 +1428,7 @@ fn cap_bytes(mut bytes: Vec<u8>, max: Option<usize>) -> ShowResult {
 fn load_local_config(
 	path: std::path::PathBuf,
 	common_dir: &Path,
-) -> Result<Option<gix::config::File<'static>>> {
+) -> Result<Option<gix::config::File>> {
 	match std::fs::metadata(&path) {
 		Ok(_) => {},
 		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),

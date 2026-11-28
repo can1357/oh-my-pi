@@ -347,3 +347,12 @@ it("can override ambient aliases", () => {
 	expect(types.foo({ bar: 1 })).toEqual({ bar: 1 });
 	expect(types.foo({ bar: "1" }).toString()).toBe("bar must be a number (was a string)");
 });
+
+it("resolves keyword array elements in their own scope, even with a warm global definition", () => {
+	const global = type("string[]");
+	const scoped = scope({ string: type.number, list: "string[]" }).export().list;
+	expect(scoped.allows([1])).toBe(true);
+	expect(scoped.allows([""])).toBe(false);
+	expect(global.allows([""])).toBe(true);
+	expect(type("string[]").allows([1])).toBe(false);
+});

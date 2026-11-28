@@ -13,6 +13,9 @@ import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
 
+/** What a worker reports back about its navigator. */
+type WorkerReport = { ua: string; brands: string; cores: number; languages: string };
+
 // What an anti-bot script compares between a page and its workers.
 const REPORT = `const report = () => ({
 	ua: navigator.userAgent,
@@ -87,7 +90,16 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("managed headless Chromium fingerprint", ()
 			});
 			return { dedicated, shared, service };
 		`);
-		expect(reports).toEqual({ dedicated: pageReport, shared: pageReport, service: pageReport });
+		const reported = reports as Record<"dedicated" | "shared" | "service", WorkerReport>;
+		// A dedicated worker is a target of its page, so it inherits the whole identity. Client hints on
+		// shared and service workers come from the browser, not the per-target override: those two are
+		// held to what every target can share.
+		expect(reported.dedicated).toEqual(pageReport as WorkerReport);
+		const shared = ({ ua, cores, languages }: WorkerReport) => ({ ua, cores, languages });
+		expect({ shared: shared(reported.shared), service: shared(reported.service) }).toEqual({
+			shared: shared(pageReport as WorkerReport),
+			service: shared(pageReport as WorkerReport),
+		});
 	}, 30_000);
 
 	it("sits in a window taller than its viewport on a screen that holds the window", async () => {
@@ -115,7 +127,9 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("managed headless Chromium fingerprint", ()
 			return sources;
 		`);
 		expect(sources).toMatchObject({ screenWidth: "function get width() { [native code] }" });
-		if (stealth.webglMask === false) {
+		// No patch needed means no bootstrap at all: the mask that hides patched natives never
+		// installs, so `Function.prototype.toString` itself stays the pristine native.
+		if (stealth.stealthScripts?.length === 0) {
 			expect(sources).toEqual({
 				toString: "function toString() { [native code] }",
 				screenWidth: "function get width() { [native code] }",

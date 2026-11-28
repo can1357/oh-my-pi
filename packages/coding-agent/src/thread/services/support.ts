@@ -84,8 +84,9 @@ export class PeerCleanups {
 	/** Run and forget every cleanup tracked for `threadId`. */
 	release(threadId: ThreadId): void {
 		const cleanups = this.#byPeer.get(threadId);
+		if (!cleanups) return;
 		this.#byPeer.delete(threadId);
-		for (const stop of Array.from(cleanups ?? [])) {
+		for (const stop of cleanups) {
 			try {
 				stop();
 			} catch (error) {

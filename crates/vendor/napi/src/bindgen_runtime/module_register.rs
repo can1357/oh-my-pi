@@ -1,6 +1,4 @@
-use std::cell::{LazyCell, RefCell};
-#[cfg(not(feature = "noop"))]
-use std::collections::HashSet;
+use std::cell::RefCell;
 #[cfg(not(feature = "noop"))]
 use std::ffi::CStr;
 #[cfg(all(not(feature = "noop"), feature = "node_version_detect"))]
@@ -16,12 +14,18 @@ use std::sync::{
 };
 use std::{any::TypeId, collections::HashMap};
 
+#[cfg(not(feature = "noop"))]
 use rustc_hash::FxBuildHasher;
 
+#[cfg(all(
+  not(feature = "noop"),
+  any(feature = "napi4", feature = "node_version_detect")
+))]
+use crate::check_status_or_throw;
 #[cfg(all(not(feature = "noop"), feature = "node_version_detect"))]
 use crate::NodeVersion;
 #[cfg(not(feature = "noop"))]
-use crate::{check_status, check_status_or_throw, JsError};
+use crate::{check_status, Error, JsError, Status};
 use crate::{sys, Property, Result};
 
 // #[napi] fn
@@ -78,6 +82,7 @@ struct ClassRegistration {
 
 // Stores class metadata registered by napi macros.
 // Since class properties do not contain any napi_value, ModuleClassProperty is thread-safe.
+// `register_class` rejects accessor closures and JS values/names, so their non-thread-safe owners stay empty.
 // This structure is shared between the main JS thread and worker threads.
 #[cfg(not(feature = "noop"))]
 #[derive(Default)]
@@ -128,143 +133,476 @@ static FIRST_MODULE_REGISTERED: AtomicBool = AtomicBool::new(false);
   not(feature = "noop")
 ))]
 static ENV_CLEANUP_HOOK_COOKIE: AtomicUsize = AtomicUsize::new(1);
-thread_local! {
-  static REGISTERED_CLASSES: LazyCell<RegisteredClasses> = LazyCell::new(Default::default);
-}
-// Per-env custom-GC infrastructure (#3357). One `CustomGcHandle` is created + unref'd per isolate in
-// `create_custom_gc`, and every Buffer/TypedArray drop routes through it.
-// `AtomicPtr<_>` + `RwLock<bool>` are auto `Send + Sync`, so no `unsafe impl` is required.
-// No `impl Drop`: freeing the `Arc` touches zero Node/V8 resources; Node owns the TSFN (created +
-// unref'd at module load, destroyed at env teardown which fires `custom_gc_handle_finalize`).
+// Per-env custom-GC infrastructure (#3357). One `CustomGcHandle` is created per env (per load of
+// this addon) in `create_custom_gc`. Every Buffer/TypedArray/Error/FunctionRef/native-borrow
+// reference released off its env's JS thread goes through it.
+//
+// References never travel through the TSFN: they wait in `pending`, and the TSFN only wakes the
+// JS thread, with at most one wake in flight (`wake`). Node-API is called on `pending` only on
+// the env's JS thread with the env alive, from three places:
+//   1. the TSFN callback (`custom_gc`), while the env runs, at most `MAX_DRAIN` references per
+//      call;
+//   2. the registration record's cleanup hook (`CustomGcHandle::close`), which also moves the
+//      phase to `Closing`;
+//   3. the late sentinel's finalizer (`custom_gc_sentinel_finalize`), which moves the phase to
+//      `Dead`.
+// A reference is either with its owner or in `pending`, never both.
+//
+// Why not through the TSFN: at env teardown Node's `RunCleanup` first runs `CleanupHandles`,
+// whose `uv_run(UV_RUN_ONCE)` still delivers queued TSFN items (up to 999 per dispatch) with a
+// live env. Only then do the cleanup hooks run, and the TSFN's own hook hands every item still
+// queued to the callback with a null env, where nothing can be deleted. One reference per item
+// leaked all of that overflow (48 B each on Node). Now only a wake token can be queued, and the
+// record's hook, which runs before the TSFN's, deletes what is pending.
+//
+// The late sentinel is for references released after the hook, while Node finalizes the env's
+// wrapped objects: a `#[napi]` class instance whose field holds a Buffer or TypedArray drops it
+// in its finalizer, on the JS thread, at env teardown. The sentinel is a plain object wrapped
+// with `napi_wrap` and kept by a strong reference, so its finalizer runs only at env teardown.
+// It is created before any module-init code, so it is older than every entry that code adds to
+// the env's finalizer list. Node runs that list newest first (`RefTracker::Link` inserts at the
+// head, and `FinalizeAll` finalizes from the head), so the sentinel's finalizer runs after every
+// class instance finalizer, and before Node resets the plain references, so deleting them is
+// still allowed. Bun runs its finalizers last first too (`NapiEnv::runFinalizers`). That order
+// is not documented. If a runtime runs the sentinel earlier, or never, the references released
+// after it leak, as they did before: nothing is ever deleted twice, or after the env is gone, so
+// it is the old leak, never a crash. It is a wrapped object kept by a strong reference, not an
+// external: Node frees an external's `ExternalWrapper` only from a GC weak callback, which never
+// runs for an external still alive at env teardown, so an external would leak 48 B per env.
+//
+// What still leaks, 48 B per reference on Node:
+// * a value still held when its env is freed (an `async fn` future still running, a static
+//   cache, a value sent to another thread): after that no Node-API call can free it. Closing
+//   that needs a registry of every live reference per env on the hot path, or a reference API
+//   whose references the env frees at teardown (Node has none today).
+// * on Bun, a value held in instance data: Bun finalizes instance data after every finalizer,
+//   so after the sentinel.
+// * on Deno, every reference still held at worker teardown. Deno runs the cleanup hook when a
+//   worker exits or is terminated while idle, but finalizes no wrapped object there, so neither
+//   the class instances nor the sentinel are finalized; a worker terminated while its JavaScript
+//   runs does not run the hook either, so the references waiting in `pending` leak too. The
+//   sentinel's own wrap, wrap data (a `Weak` and an `Arc`, about 40 B) and reference stay with
+//   Deno's env.
+// * on wasm, references released after the hook: there is no sentinel, because a strongly
+//   referenced object would keep the whole emnapi instance alive.
+//
+// The env's registration record (`env_registration`) holds a strong `Arc` until its cleanup
+// hook runs. After that, the first reference that waits for the sentinel hands one to the handle
+// itself (`teardown_keep_alive`), which the sentinel takes back, so the handle and `pending`
+// outlive every class instance finalizer. The sentinel's wrap data (`CustomGcSentinel`) holds
+// only a `Weak` of the handle, and nothing waits for a sentinel that never runs unless a
+// reference was released after the hook, so on Deno nothing keeps the handle alive longer than
+// before. The wrap data also shares the sentinel's strong reference with the handle, so the
+// finalizer deletes that reference even when the handle is already gone, which is the usual
+// case: no value holds the handle after the hook. Otherwise every env would leak that reference
+// (48 B on Node), because Node never frees a reference the addon created, not even at teardown.
 #[cfg(all(feature = "napi4", not(feature = "noop")))]
 pub(crate) struct CustomGcHandle {
+  /// Null once the TSFN is released.
   tsfn: std::sync::atomic::AtomicPtr<sys::napi_threadsafe_function__>,
-  aborted: std::sync::RwLock<bool>,
+  /// Only moves forward. A drop holds the read lock while it adds to `pending` and calls the
+  /// TSFN, so a phase change (under the write lock) waits for it, and nothing is added between
+  /// taking `pending` and changing the phase.
+  phase: RwLock<CustomGcPhase>,
+  /// References released off the JS thread, as addresses, waiting for the JS thread.
+  pending: std::sync::Mutex<Vec<usize>>,
+  /// Whether a wake is in flight. The callback clears it, under the `pending` lock, when it takes
+  /// the last references, so a reference added after that sends a new wake.
+  wake: AtomicBool,
+  /// Strong reference to the late sentinel, shared with the sentinel's wrap data. Null when
+  /// there is none (creating it failed, or it was given up at registration), and once its
+  /// finalizer ran. Whoever swaps it out deletes it.
+  #[cfg(not(target_family = "wasm"))]
+  sentinel_ref: std::sync::Arc<std::sync::atomic::AtomicPtr<sys::napi_ref__>>,
+  /// The handle itself, from the first reference that waits for the sentinel to the sentinel's
+  /// finalizer.
+  #[cfg(not(target_family = "wasm"))]
+  teardown_keep_alive: std::sync::Mutex<Option<std::sync::Arc<CustomGcHandle>>>,
+}
+
+#[cfg(all(feature = "napi4", not(feature = "noop")))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CustomGcPhase {
+  /// The env runs. A drop on its JS thread deletes its reference right away; a drop anywhere
+  /// else adds it to `pending` and wakes the JS thread.
+  Open,
+  /// The registration record's cleanup hook ran (or, as a backstop, Node closed the TSFN): the
+  /// TSFN is released. A drop on any thread, the JS thread too, adds its reference to `pending`,
+  /// for the late sentinel. Without a sentinel it leaks the reference instead, as in `Dead`.
+  Closing,
+  /// The late sentinel ran: the env is about to be freed. A drop leaks its reference: env
+  /// teardown resets the reference's V8 handle, but Node frees only references it owns, so the
+  /// `napi_ref` box (48 B on Node) stays.
+  Dead,
+}
+
+/// The most references one custom-GC callback deletes (Node's TSFN dispatch also stops after
+/// 1000 items, `kMaxIterationCount`), so each callback stays short. A larger backlog wakes the JS
+/// thread again. That wake is sent from inside the callback, and Node runs it in the same
+/// dispatch, after the callback's microtasks (`Send` while the dispatch runs only sets
+/// `kDispatchPending`). So this bounds one callback, not one event-loop turn: one dispatch runs
+/// up to 999 callbacks, about a million references. Measured in a Node 26 worker, a backlog of 1e6
+/// references dropped off-thread is deleted in one turn of about 13 ms; one TSFN item per
+/// reference spread it over many turns of about 1 to 2 ms, but cost about 70 ms in all.
+#[cfg(all(feature = "napi4", not(feature = "noop")))]
+const MAX_DRAIN: usize = 1000;
+
+static REFS_DELETED_RUNNING: std::sync::atomic::AtomicUsize =
+  std::sync::atomic::AtomicUsize::new(0);
+static REFS_DELETED_AT_TEARDOWN: std::sync::atomic::AtomicUsize =
+  std::sync::atomic::AtomicUsize::new(0);
+static REFS_LEAKED_AFTER_CLOSE: std::sync::atomic::AtomicUsize =
+  std::sync::atomic::AtomicUsize::new(0);
+static REFS_LEFT_PENDING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static DRAIN_CALLBACKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static LARGEST_DRAIN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SENTINEL_REFS_DELETED: std::sync::atomic::AtomicUsize =
+  std::sync::atomic::AtomicUsize::new(0);
+
+/// What happened to the references released through the custom-GC handles of this process, on
+/// every env and every load of this addon. See [`custom_gc_ref_counters`].
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CustomGcRefCounters {
+  /// Deleted by the custom-GC callback while their env ran.
+  pub deleted_while_running: usize,
+  /// Deleted at env teardown.
+  pub deleted_at_teardown: usize,
+  /// Released too late in env teardown to be deleted: leaked (48 B each on Node).
+  pub leaked_at_teardown: usize,
+  /// Still waiting when their handle was freed: leaked.
+  pub left_pending: usize,
+  /// Custom-GC callbacks that deleted references.
+  pub drain_callbacks: usize,
+  /// The most references one custom-GC callback deleted.
+  pub largest_drain: usize,
+  /// Strong references to late sentinels deleted (one per env that had a sentinel, at its
+  /// teardown or when it was given up at registration).
+  pub sentinel_refs_deleted: usize,
+}
+
+/// Introspection hook for napi-rs' own tests. No stability guarantee.
+#[doc(hidden)]
+pub fn custom_gc_ref_counters() -> CustomGcRefCounters {
+  CustomGcRefCounters {
+    deleted_while_running: REFS_DELETED_RUNNING.load(std::sync::atomic::Ordering::Relaxed),
+    deleted_at_teardown: REFS_DELETED_AT_TEARDOWN.load(std::sync::atomic::Ordering::Relaxed),
+    leaked_at_teardown: REFS_LEAKED_AFTER_CLOSE.load(std::sync::atomic::Ordering::Relaxed),
+    left_pending: REFS_LEFT_PENDING.load(std::sync::atomic::Ordering::Relaxed),
+    drain_callbacks: DRAIN_CALLBACKS.load(std::sync::atomic::Ordering::Relaxed),
+    largest_drain: LARGEST_DRAIN.load(std::sync::atomic::Ordering::Relaxed),
+    sentinel_refs_deleted: SENTINEL_REFS_DELETED.load(std::sync::atomic::Ordering::Relaxed),
+  }
+}
+
+#[cfg(all(feature = "napi4", not(feature = "noop")))]
+impl Drop for CustomGcHandle {
+  fn drop(&mut self) {
+    // Only counts what was never deleted; there is no env to delete it with.
+    let left = self.pending.get_mut().map_or_else(
+      |poisoned| poisoned.into_inner().len(),
+      |pending| pending.len(),
+    );
+    if left != 0 {
+      REFS_LEFT_PENDING.fetch_add(left, Ordering::Relaxed);
+    }
+  }
 }
 
 #[cfg(all(feature = "napi4", not(feature = "noop")))]
 impl CustomGcHandle {
-  pub(crate) fn get_raw(&self) -> sys::napi_threadsafe_function {
-    self.tsfn.load(std::sync::atomic::Ordering::SeqCst)
-  }
-  // drop path: read-lock held ACROSS the napi_call so finalize's write-lock blocks until the call returns
-  pub(crate) fn with_read_aborted<RT>(&self, f: impl FnOnce(bool) -> RT) -> RT {
-    let g = self
-      .aborted
-      .read()
-      .expect("custom gc aborted lock poisoned");
-    f(*g)
-  }
-  fn set_aborted(&self) {
-    *self
-      .aborted
-      .write()
-      .expect("custom gc aborted lock poisoned") = true;
-  }
-}
-
-// INVARIANT: this per-OS-thread slot relies on ONE `napi_env` per OS thread, which holds for every
-// supported runtime — Node's main thread, each `worker_threads` worker (its own V8 isolate + env +
-// loop thread), and Electron. `create_custom_gc` installs the handle once per env on its registering
-// thread, and `FromNapiValue` always runs on that same thread for that env, so a captured handle is
-// always the value's OWNING env. An embedder hosting multiple `napi_env` on a single shared OS thread
-// is out of scope: the per-env `Arc` identity (see `current_thread_owns_custom_gc`) is immune to
-// env-pointer reuse, and the single public `Env::set_instance_data` slot is reserved for addon authors
-// so it cannot be co-opted to key the handle by env.
-thread_local! {
-  #[cfg(all(feature = "napi4", not(feature = "noop")))]
-  // Per-thread "this isolate's custom-GC handle".
-  pub(crate) static CURRENT_CUSTOM_GC_HANDLE:
-    std::cell::RefCell<Option<std::sync::Arc<CustomGcHandle>>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(all(feature = "napi4", not(feature = "noop")))]
-pub(crate) fn current_custom_gc_handle() -> Option<std::sync::Arc<CustomGcHandle>> {
-  // clone = one refcount inc, at from_napi_value capture
-  CURRENT_CUSTOM_GC_HANDLE.with(|c| c.borrow().clone())
-}
-
-#[cfg(all(feature = "napi4", not(feature = "noop")))]
-pub(crate) fn current_thread_owns_custom_gc(handle: &std::sync::Arc<CustomGcHandle>) -> bool {
-  // same-isolate-JS-thread test by ALLOCATION identity (immune to env-pointer reuse).
-  // `is_some_and` (NOT `map_or(false, ..)`): clippy::unnecessary_map_or is denied by
-  // `#![deny(clippy::all)]` and would turn CI's `cargo clippy` red.
-  CURRENT_CUSTOM_GC_HANDLE.with(|c| {
-    c.borrow()
-      .as_ref()
-      .is_some_and(|cur| std::sync::Arc::ptr_eq(cur, handle))
-  })
-}
-
-// The env that last registered on this OS thread and has not been torn down since:
-// `live_env_cleanup`, an env-cleanup hook, clears it at teardown. The per-thread slots
-// below (`REGISTERED_CLASSES`, `CURRENT_CUSTOM_GC_HANDLE`, the `Reflect` cache in
-// `error.rs`) assume one env per OS thread and simply overwrite the previous env's
-// entry on re-registration, because under that assumption the previous env is gone and
-// its teardown reclaimed everything. Bun breaks the assumption: `bun test --isolate`
-// (implied by `--parallel`) gives every test file a fresh global object and `napi_env`
-// on the same thread and never tears the old one down. The overwritten strong references
-// then pin every earlier realm (its global object and full module graph) for the life of
-// the process. A slot that still names a different env at registration therefore proves
-// that env is alive, and its handles are released through it (see
-// `release_superseded_env`). Under Node the slot is always cleared by teardown before a
-// new env registers on the thread, so this path never runs there.
-#[cfg(all(feature = "napi3", not(feature = "noop"), not(target_family = "wasm")))]
-thread_local! {
-  static LIVE_ENV: std::cell::Cell<sys::napi_env> = const { std::cell::Cell::new(ptr::null_mut()) };
-}
-
-#[cfg(all(feature = "napi3", not(feature = "noop"), not(target_family = "wasm")))]
-unsafe extern "C" fn live_env_cleanup(arg: *mut std::ffi::c_void) {
-  LIVE_ENV.with(|slot| {
-    if slot.get().cast::<std::ffi::c_void>() == arg {
-      slot.set(ptr::null_mut());
+  pub(crate) fn new() -> Self {
+    Self {
+      tsfn: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
+      phase: RwLock::new(CustomGcPhase::Open),
+      pending: std::sync::Mutex::new(Vec::new()),
+      wake: AtomicBool::new(false),
+      #[cfg(not(target_family = "wasm"))]
+      sentinel_ref: std::sync::Arc::new(std::sync::atomic::AtomicPtr::new(ptr::null_mut())),
+      #[cfg(not(target_family = "wasm"))]
+      teardown_keep_alive: std::sync::Mutex::new(None),
     }
-  });
-}
-
-/// Marks `env` as this thread's live env and, when a different env that was never torn
-/// down still holds the slot, releases the per-thread handles that pin that env's realm:
-/// its class constructor references, its custom-GC threadsafe function, and its cached
-/// `Reflect` pair. Must run before any of those slots is overwritten for `env`.
-#[cfg(all(feature = "napi3", not(feature = "noop"), not(target_family = "wasm")))]
-fn release_superseded_env(env: sys::napi_env) {
-  let previous = LIVE_ENV.with(|slot| slot.replace(env));
-  if previous == env {
-    // Same env re-registering (`delete require.cache` + re-`require`): its hook is
-    // already installed, and Node aborts on a duplicate `(fn, arg)` pair.
-    return;
   }
-  if !previous.is_null() {
-    REGISTERED_CLASSES.with(|cell| {
-      cell.borrow_mut(|map| {
-        for (_, ctor_ref) in map.drain() {
-          unsafe { sys::napi_delete_reference(previous, ctor_ref) };
+
+  fn read_phase(&self) -> std::sync::RwLockReadGuard<'_, CustomGcPhase> {
+    self
+      .phase
+      .read()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  fn write_phase(&self) -> std::sync::RwLockWriteGuard<'_, CustomGcPhase> {
+    self
+      .phase
+      .write()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  fn lock_pending(&self) -> std::sync::MutexGuard<'_, Vec<usize>> {
+    self
+      .pending
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  /// Whether the env is not torn down yet: its cleanup hook has not run.
+  #[cfg(feature = "web_stream")]
+  pub(crate) fn is_open(&self) -> bool {
+    *self.read_phase() == CustomGcPhase::Open
+  }
+
+  /// Releases `reference`, created in this handle's env at refcount 1. On the env's JS thread
+  /// while the env runs, calls `direct`, which must unref and delete it right now. Anywhere
+  /// else, it waits for the env's JS thread.
+  pub(crate) fn release_ref(
+    handle: &std::sync::Arc<Self>,
+    reference: sys::napi_ref,
+    direct: impl FnOnce(),
+  ) {
+    let phase = handle.read_phase();
+    match *phase {
+      CustomGcPhase::Open if current_thread_owns_custom_gc(handle) => direct(),
+      phase => handle.defer(phase, reference),
+    }
+  }
+
+  /// Like [`Self::release_ref`], but never deletes right away, even on the env's JS thread.
+  pub(crate) fn defer_ref(handle: &std::sync::Arc<Self>, reference: sys::napi_ref) {
+    let phase = handle.read_phase();
+    handle.defer(*phase, reference);
+  }
+
+  /// The caller holds the phase read lock, and `phase` is what it read.
+  fn defer(self: &std::sync::Arc<Self>, phase: CustomGcPhase, reference: sys::napi_ref) {
+    match phase {
+      CustomGcPhase::Open => {
+        self.lock_pending().push(reference as usize);
+        if !self.wake.swap(true, Ordering::SeqCst) && !self.send_wake() {
+          // The reference waits for the next wake or for the cleanup hook.
+          self.wake.store(false, Ordering::SeqCst);
         }
-      })
-    });
-    #[cfg(feature = "napi4")]
-    if let Some(handle) = CURRENT_CUSTOM_GC_HANDLE.with(|c| c.borrow_mut().take()) {
-      let tsfn = handle.get_raw();
-      if !tsfn.is_null() {
-        // Abort first: values still holding this handle then take the `aborted` no-op
-        // drop path instead of calling into a threadsafe function that is closing.
-        handle.set_aborted();
-        unsafe {
-          sys::napi_release_threadsafe_function(tsfn, sys::ThreadsafeFunctionReleaseMode::abort)
-        };
+      }
+      CustomGcPhase::Closing if self.has_sentinel() => {
+        self.lock_pending().push(reference as usize);
+        self.keep_alive_until_sentinel();
+      }
+      CustomGcPhase::Closing | CustomGcPhase::Dead => {
+        REFS_LEAKED_AFTER_CLOSE.fetch_add(1, Ordering::Relaxed);
       }
     }
-    crate::error::release_reflect_intrinsics(previous);
   }
-  unsafe { sys::napi_add_env_cleanup_hook(env, Some(live_env_cleanup), env.cast()) };
+
+  /// Keeps the handle, and so `pending`, alive until the sentinel's finalizer takes it back.
+  fn keep_alive_until_sentinel(self: &std::sync::Arc<Self>) {
+    #[cfg(not(target_family = "wasm"))]
+    self
+      .teardown_keep_alive
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .get_or_insert_with(|| self.clone());
+  }
+
+  fn has_sentinel(&self) -> bool {
+    #[cfg(not(target_family = "wasm"))]
+    return !self.sentinel_ref.load(Ordering::SeqCst).is_null();
+    #[cfg(target_family = "wasm")]
+    false
+  }
+
+  /// Queues one wake. The caller holds the phase read lock, in `Open`, so the TSFN is not
+  /// released meanwhile. The token is a `Weak`, consumed by the callback on every path.
+  fn send_wake(self: &std::sync::Arc<Self>) -> bool {
+    let tsfn = self.tsfn.load(Ordering::SeqCst);
+    if tsfn.is_null() {
+      return false;
+    }
+    let token = std::sync::Arc::downgrade(self).into_raw();
+    let status = unsafe {
+      sys::napi_call_threadsafe_function(
+        tsfn,
+        token.cast_mut().cast(),
+        sys::ThreadsafeFunctionCallMode::nonblocking,
+      )
+    };
+    if status != sys::Status::napi_ok {
+      drop(unsafe { std::sync::Weak::from_raw(token) });
+      return false;
+    }
+    true
+  }
+
+  /// From the custom-GC callback: deletes up to [`MAX_DRAIN`] pending references, and wakes the
+  /// JS thread again when more are left. On `env`'s JS thread, env alive.
+  fn drain_while_running(self: &std::sync::Arc<Self>, env: sys::napi_env) {
+    let batch = {
+      let phase = self.read_phase();
+      if *phase == CustomGcPhase::Dead {
+        return;
+      }
+      let mut pending = self.lock_pending();
+      if pending.len() <= MAX_DRAIN {
+        // Under the `pending` lock: a reference added after this sends a new wake.
+        self.wake.store(false, Ordering::SeqCst);
+        std::mem::take(&mut *pending)
+      } else {
+        let keep = pending.len() - MAX_DRAIN;
+        let batch = pending.split_off(keep);
+        drop(pending);
+        // `wake` stays set while the next wake is in flight. In `Closing` no wake is sent; the
+        // sentinel deletes the rest.
+        if *phase != CustomGcPhase::Open || !self.send_wake() {
+          self.wake.store(false, Ordering::SeqCst);
+        }
+        batch
+      }
+    };
+    if batch.is_empty() {
+      return;
+    }
+    let deleted = delete_refs(env, batch);
+    REFS_DELETED_RUNNING.fetch_add(deleted, Ordering::Relaxed);
+    DRAIN_CALLBACKS.fetch_add(1, Ordering::Relaxed);
+    LARGEST_DRAIN.fetch_max(deleted, Ordering::Relaxed);
+  }
+
+  /// Moves the phase to `Closing`, releases the TSFN's only thread count with `mode`, and
+  /// deletes every pending reference. Called from the registration record's cleanup hook, or
+  /// right at registration when there is no record (after [`Self::give_up_sentinel`]).
+  ///
+  /// It must run before Node closes the TSFN at env teardown: the record's hook runs before the
+  /// TSFN's own (hooks run newest first), so the release only drops the thread count to 0.
+  /// Taking the write lock waits for any drop that is calling the TSFN right now, and no drop
+  /// calls it afterwards. The pointer is swapped out under the lock, so the release happens at
+  /// most once. Returns the release status, or `napi_ok` when there was nothing left to release.
+  ///
+  /// # Safety
+  ///
+  /// On `env`'s JS thread, while `env` can still delete references.
+  pub(crate) unsafe fn close(
+    &self,
+    env: sys::napi_env,
+    mode: sys::napi_threadsafe_function_release_mode,
+  ) -> sys::napi_status {
+    let (tsfn, refs) = {
+      let mut phase = self.write_phase();
+      if *phase != CustomGcPhase::Dead {
+        *phase = CustomGcPhase::Closing;
+      }
+      (
+        self.tsfn.swap(ptr::null_mut(), Ordering::SeqCst),
+        std::mem::take(&mut *self.lock_pending()),
+      )
+    };
+    let status = if tsfn.is_null() {
+      sys::Status::napi_ok
+    } else {
+      unsafe { sys::napi_release_threadsafe_function(tsfn, mode) }
+    };
+    let deleted = delete_refs(env, refs);
+    REFS_DELETED_AT_TEARDOWN.fetch_add(deleted, Ordering::Relaxed);
+    status
+  }
+
+  /// Backstop for when Node closes the TSFN: no drop calls it again.
+  fn mark_closing(&self) {
+    let mut phase = self.write_phase();
+    if *phase == CustomGcPhase::Open {
+      *phase = CustomGcPhase::Closing;
+    }
+  }
+
+  /// Deletes the sentinel's strong reference, so it is collected as an ordinary object and does
+  /// nothing then. For a handle no registration record owns: nothing would keep it alive.
+  ///
+  /// # Safety
+  ///
+  /// On `env`'s JS thread, env alive.
+  pub(crate) unsafe fn give_up_sentinel(&self, env: sys::napi_env) {
+    #[cfg(not(target_family = "wasm"))]
+    {
+      let sentinel_ref = self.sentinel_ref.swap(ptr::null_mut(), Ordering::SeqCst);
+      if !sentinel_ref.is_null() {
+        delete_sentinel_ref(env, sentinel_ref);
+      }
+    }
+    #[cfg(target_family = "wasm")]
+    let _ = env;
+  }
+
+  /// From the late sentinel's finalizer, after it took the sentinel's reference: moves the phase
+  /// to `Dead` and deletes every pending reference. On `env`'s JS thread, at env teardown.
+  #[cfg(not(target_family = "wasm"))]
+  fn finish_teardown(&self, env: sys::napi_env) {
+    let (refs, keep_alive) = {
+      let mut phase = self.write_phase();
+      *phase = CustomGcPhase::Dead;
+      (
+        std::mem::take(&mut *self.lock_pending()),
+        self
+          .teardown_keep_alive
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .take(),
+      )
+    };
+    let deleted = delete_refs(env, refs);
+    REFS_DELETED_AT_TEARDOWN.fetch_add(deleted, Ordering::Relaxed);
+    drop(keep_alive);
+  }
 }
 
-type RegisteredClasses = PersistedPerInstanceHashMap<
-  /* export name */ String,
-  /* constructor */ sys::napi_ref,
-  FxBuildHasher,
->;
+/// Deletes the sentinel's strong reference, which the caller swapped out of `sentinel_ref`, so it
+/// is deleted once. On `env`'s JS thread, env alive or tearing down: the reference is on the env's
+/// plain-reference list, which Node finalizes after the list of wrapped objects
+/// (`napi_env__::DeleteMe`), so deleting it from the sentinel's finalizer is allowed.
+#[cfg(all(feature = "napi4", not(feature = "noop"), not(target_family = "wasm")))]
+fn delete_sentinel_ref(env: sys::napi_env, sentinel_ref: sys::napi_ref) {
+  if unsafe { sys::napi_delete_reference(env, sentinel_ref) } == sys::Status::napi_ok {
+    SENTINEL_REFS_DELETED.fetch_add(1, Ordering::Relaxed);
+  }
+}
+
+/// Unrefs each reference and deletes it at refcount 0, as each was created at refcount 1. Returns
+/// how many were deleted. On `env`'s JS thread, env alive. Neither call has a `NAPI_PREAMBLE`, on
+/// Node or on emnapi, so this works while the env refuses JavaScript.
+#[cfg(all(feature = "napi4", not(feature = "noop")))]
+fn delete_refs(env: sys::napi_env, refs: Vec<usize>) -> usize {
+  let mut deleted = 0;
+  for reference in refs {
+    let reference = reference as sys::napi_ref;
+    let mut ref_count = 0;
+    if unsafe { sys::napi_reference_unref(env, reference, &mut ref_count) } == sys::Status::napi_ok
+      && ref_count == 0
+      && unsafe { sys::napi_delete_reference(env, reference) } == sys::Status::napi_ok
+    {
+      deleted += 1;
+    }
+  }
+  deleted
+}
+
+/// The custom-GC handle of `env`, to capture when a value takes a reference in `env`. Call it on
+/// `env`'s JS thread.
+///
+/// Keyed by env, not by thread: one addon image can be registered into several live envs on one
+/// thread (`process.dlopen` twice, a hardlinked `.node`, Electron frames), and each load has its
+/// own TSFN that is released at its own env's teardown. `None` when `env` has no live
+/// registration record (registration failed, or teardown already ran).
+#[cfg(all(feature = "napi4", not(feature = "noop")))]
+pub(crate) fn custom_gc_handle_for_env(
+  env: sys::napi_env,
+) -> Option<std::sync::Arc<CustomGcHandle>> {
+  // clone = one refcount inc, at from_napi_value capture
+  crate::bindgen_runtime::env_registration::custom_gc(env)
+}
+
+/// Whether the current thread is the JS thread of `handle`'s env and that env is not torn down:
+/// a live registration record on this thread holds this exact handle. Compares allocations, so it
+/// is immune to env-pointer reuse.
+#[cfg(all(feature = "napi4", not(feature = "noop")))]
+pub(crate) fn current_thread_owns_custom_gc(handle: &std::sync::Arc<CustomGcHandle>) -> bool {
+  crate::bindgen_runtime::env_registration::holds_custom_gc(handle)
+}
 
 #[cfg(all(feature = "compat-mode", not(feature = "noop")))]
 // compatibility for #[module_exports]
@@ -328,9 +666,32 @@ pub fn register_module_export_hook(cb: ExportRegisterHookCallback) {
 #[doc(hidden)]
 pub fn register_module_export_hook(_cb: ExportRegisterHookCallback) {}
 
+/// The constructor reference of the `#[napi]` class `js_name` (its JS name with a trailing
+/// NUL) that this addon defined in `env`.
+///
+/// Every load of the addon (`process.dlopen` twice, a cache-busted `require`, a hardlinked
+/// `.node`, Electron frames) gets its own env and defines its own classes, so the lookup is by
+/// env: a load builds, validates and checks instances of its own classes only. `None` when
+/// `env` has no live registration (never registered, or already torn down) or that load
+/// defined no such class.
+#[doc(hidden)]
+pub fn get_class_constructor_in_env(
+  env: sys::napi_env,
+  js_name: &'static str,
+) -> Option<sys::napi_ref> {
+  crate::bindgen_runtime::env_registration::class_constructor_in_env(env, js_name)
+}
+
+/// Legacy lookup, for code generated by napi-derive older than `get_class_constructor_in_env`.
+///
+/// Returns the constructor reference of class `js_name` from the newest live registration of
+/// this addon on the current thread. When the addon is loaded into several envs on one thread,
+/// that can be another env's class, so old generated code can still mix up two loads' classes.
+/// It never returns a deleted reference: a registration is removed from the lookups before its
+/// references are deleted at env teardown.
 #[doc(hidden)]
 pub fn get_class_constructor(js_name: &'static str) -> Option<sys::napi_ref> {
-  REGISTERED_CLASSES.with(|cell| cell.borrow_mut(|map| map.get(js_name).copied()))
+  crate::bindgen_runtime::env_registration::class_constructor_on_thread(js_name)
 }
 
 #[cfg(not(feature = "noop"))]
@@ -342,6 +703,17 @@ pub fn register_class(
   props: Vec<Property>,
   implement_iterator: bool,
 ) {
+  // Worker threads read this registry, and closure owners and retained JS values
+  // are not thread-safe.
+  #[cfg(feature = "napi5")]
+  assert!(
+    !props.iter().any(|prop| prop.has_owned_closure()),
+    "register_class does not accept closure-backed properties"
+  );
+  assert!(
+    !props.iter().any(|prop| prop.has_js_value()),
+    "register_class does not accept properties with JS values or names"
+  );
   MODULE_CLASS_PROPERTIES.borrow_mut(|inner| {
     let val = inner.entry(rust_type_id).or_default();
     let val = val.entry(js_mod).or_insert_with(|| ClassRegistration {
@@ -950,22 +1322,76 @@ pub unsafe extern "C" fn napi_register_module_v1(
     wait_first_thread_registered();
   }
 
-  // Install the per-env custom-GC handle (#3357) BEFORE running ANY module-init
+  // Create the per-env custom-GC handle (#3357) BEFORE running ANY module-init
   // callback below (the export-register callbacks, `module_register_hook_callback`,
   // and the compat `MODULE_EXPORTS` callbacks). Those callbacks can capture a
-  // `Buffer`/`TypedArray` via `from_napi_value`, which snapshots the thread-local
-  // `CURRENT_CUSTOM_GC_HANDLE`. If the handle were installed afterwards (as it was
+  // `Buffer`/`TypedArray` via `from_napi_value`, which looks up this env's handle
+  // in its registration record. If the handle were stored afterwards (as it was
   // originally), such a value would record `None`; because `Buffer`/`TypedArray`
   // are `Send`, dropping it later on a non-JS thread would fall through to a direct
   // `napi_reference_unref(env, ..)` on the WRONG thread — the cross-isolate
   // use-after-free this change exists to prevent. `create_custom_gc` only needs a
-  // valid `env` (it creates a dummy function + the per-env TSFN and never reads
-  // `exports`), so running it this early is safe.
+  // valid `env` (it creates the per-env TSFN with no JS callback and never reads
+  // `exports`), so running it this early is safe. It must also run BEFORE
+  // `env_registration::begin` below, so the record's cleanup hook (added later)
+  // runs before Node's own cleanup for the TSFN (added by its creation).
+  // Local change: release the records of earlier envs on this thread that were
+  // never torn down (see `env_registration::release_superseded_envs`).
   #[cfg(all(feature = "napi3", not(target_family = "wasm")))]
-  release_superseded_env(env);
+  crate::bindgen_runtime::env_registration::release_superseded_envs(env);
 
   #[cfg(feature = "napi4")]
-  create_custom_gc(env);
+  let custom_gc = create_custom_gc(env);
+
+  // Record this load's per-env state and add the one env cleanup hook that
+  // tears it down. Keep this AFTER `create_custom_gc` and BEFORE the first
+  // module-init callback: hooks run newest first, so the record's hook then runs
+  // after every hook the module's exports add (they can still use the record)
+  // and before Node's own custom-GC TSFN cleanup. `None` means teardown cannot
+  // be observed, so nothing may be cached for this env, and the load fails: the
+  // export callbacks, the classes and the module-init hooks below are skipped,
+  // because class lookups read the record. The async runtime and its cleanup hook
+  // still run, because `MODULE_COUNT` was already bumped above and
+  // `thread_cleanup` is its only decrement.
+  let registration = crate::bindgen_runtime::env_registration::begin(env);
+  // The record stays marked as registering until this function returns, on every path. How
+  // this env's `AsyncTask` promises settle is picked at its first task after that (see
+  // `crate::async_work::promise`): the check reads `process.versions`, whose getter may load
+  // another addon, and Node holds its addon-loader lock, which is not re-entrant, while this
+  // addon registers. Tasks that the module-init callbacks below create take the thenable path.
+  let _registering =
+    registration.map(crate::bindgen_runtime::env_registration::RegisteringGuard::new);
+  if registration.is_none() {
+    unsafe {
+      sys::napi_throw_error(
+        env,
+        ptr::null_mut(),
+        c"Failed to add env cleanup hook".as_ptr(),
+      )
+    };
+  }
+
+  // Hand the custom-GC handle to the record, which releases the TSFN from its
+  // cleanup hook. Without a record nothing would ever release it (and on Node
+  // >= 24.13.1, >= 25.4.0 and emnapi it would never be freed), so release it
+  // right away instead. No value can capture it, because captures look the
+  // handle up in the record: values captured in this env then record no
+  // handle, as when `create_custom_gc` fails.
+  #[cfg(feature = "napi4")]
+  if let Some(custom_gc) = custom_gc {
+    let unowned = match registration {
+      Some(registration) => {
+        crate::bindgen_runtime::env_registration::set_custom_gc(registration, custom_gc).err()
+      }
+      None => Some(custom_gc),
+    };
+    if let Some(custom_gc) = unowned {
+      unsafe {
+        custom_gc.give_up_sentinel(env);
+        custom_gc.close(env, sys::ThreadsafeFunctionReleaseMode::abort);
+      }
+    }
+  }
 
   // Resolve and cache this env's `Reflect.getOwnPropertyDescriptor` pair NOW,
   // at registration, so `Error::from_unknown_without_coercion` never reads
@@ -974,14 +1400,17 @@ pub unsafe extern "C" fn napi_register_module_v1(
   // a per-capture read would run that accessor — arbitrary user code, free to
   // reenter the addon — while an error is unwinding. Registration is the
   // defined moment where the one unavoidable `[[Get]]` may happen. Best effort:
-  // a failure leaves capture degrading to an empty reason/cause.
-  crate::error::cache_reflect_intrinsics_for_env(env);
+  // a failure, or no registration record, leaves capture degrading to an empty
+  // reason/cause.
+  if let Some(registration) = registration {
+    crate::error::cache_reflect_intrinsics_for_env(env, registration);
+  }
 
   // Registration keys are compile-time strings. Avoid `RandomState` so WASI module
   // registration does not request randomness during workerd global initialization.
-  let mut exports_objects: HashSet<String, FxBuildHasher> = HashSet::with_hasher(FxBuildHasher);
+  let mut namespaces = Namespaces::default();
 
-  {
+  if registration.is_some() {
     let mut register_callback = MODULE_REGISTER_CALLBACK
       .write()
       .expect("Write MODULE_REGISTER_CALLBACK in napi_register_module_v1 failed");
@@ -1004,57 +1433,11 @@ pub unsafe extern "C" fn napi_register_module_v1(
       )
       .iter()
       .for_each(|(js_mod, items)| {
-        let mut exports_js_mod = ptr::null_mut();
-        if let Some(js_mod_str) = js_mod {
-          let mod_name_c_str =
-            unsafe { CStr::from_bytes_with_nul_unchecked(js_mod_str.as_bytes()) };
-          if exports_objects.contains(*js_mod_str) {
-            check_status_or_throw!(
-              env,
-              unsafe {
-                sys::napi_get_named_property(
-                  env,
-                  exports,
-                  mod_name_c_str.as_ptr(),
-                  &mut exports_js_mod,
-                )
-              },
-              "Get mod {} from exports failed",
-              js_mod_str,
-            );
-          } else {
-            check_status_or_throw!(
-              env,
-              unsafe { sys::napi_create_object(env, &mut exports_js_mod) },
-              "Create export JavaScript Object [{}] failed",
-              js_mod_str
-            );
-            check_status_or_throw!(
-              env,
-              unsafe {
-                sys::napi_set_named_property(env, exports, mod_name_c_str.as_ptr(), exports_js_mod)
-              },
-              "Set exports Object [{}] into exports object failed",
-              js_mod_str
-            );
-            exports_objects.insert(js_mod_str.to_string());
-          }
-        }
         for (name, callback) in items {
           unsafe {
-            let js_name = CStr::from_bytes_with_nul_unchecked(name.as_bytes());
-            if let Err(e) = callback(env).and_then(|v| {
-              let exported_object = if exports_js_mod.is_null() {
-                exports
-              } else {
-                exports_js_mod
-              };
-              check_status!(
-                sys::napi_set_named_property(env, exported_object, js_name.as_ptr(), v),
-                "Failed to register export `{}`",
-                name,
-              )
-            }) {
+            if let Err(e) = callback(env)
+              .and_then(|v| namespaces.export(env, exports, *js_mod, name, v, "export"))
+            {
               JsError::from(e).throw_into(env)
             }
           }
@@ -1062,124 +1445,87 @@ pub unsafe extern "C" fn napi_register_module_v1(
       });
   }
 
-  let mut registered_classes = HashMap::default();
-
-  MODULE_CLASS_PROPERTIES.borrow(|inner| {
-    inner.iter().for_each(|(_, js_mods)| {
-      for (js_mod, class_registration) in js_mods {
-        let mut exports_js_mod = ptr::null_mut();
-        unsafe {
-          let js_name = class_registration.js_name;
-          let props = &class_registration.props;
-          if let Some(js_mod_str) = js_mod {
-            let mod_name_c_str = CStr::from_bytes_with_nul_unchecked(js_mod_str.as_bytes());
-            if exports_objects.contains(*js_mod_str) {
-              check_status_or_throw!(
-                env,
-                sys::napi_get_named_property(
-                  env,
-                  exports,
-                  mod_name_c_str.as_ptr(),
-                  &mut exports_js_mod,
-                ),
-                "Get mod {} from exports failed",
-                js_mod_str,
-              );
-            } else {
-              check_status_or_throw!(
-                env,
-                sys::napi_create_object(env, &mut exports_js_mod),
-                "Create export JavaScript Object [{}] failed",
-                js_mod_str
-              );
-              check_status_or_throw!(
-                env,
-                sys::napi_set_named_property(env, exports, mod_name_c_str.as_ptr(), exports_js_mod),
-                "Set exports Object [{}] into exports object failed",
-                js_mod_str
-              );
-              exports_objects.insert(js_mod_str.to_string());
-            }
-          }
-          let (ctor, props): (Vec<_>, Vec<_>) = props.iter().partition(|prop| prop.is_ctor);
-
-          let ctor = ctor
-            .first()
-            .map(|c| c.raw().method.unwrap())
-            .unwrap_or(noop);
-          let raw_props: Vec<_> = props.iter().map(|prop| prop.raw()).collect();
-
-          let js_class_name = CStr::from_bytes_with_nul_unchecked(js_name.as_bytes());
-          let mut class_ptr = ptr::null_mut();
-
-          check_status_or_throw!(
-            env,
-            sys::napi_define_class(
-              env,
-              js_class_name.as_ptr(),
-              js_name.len() as isize - 1,
-              Some(ctor),
-              ptr::null_mut(),
-              raw_props.len(),
-              raw_props.as_ptr(),
-              &mut class_ptr,
-            ),
-            "Failed to register class `{}`",
-            &js_name,
-          );
-
-          if class_registration.implement_iterator {
-            crate::bindgen_runtime::iterator::setup_iterator_class(env, class_ptr);
-          }
-
-          let mut ctor_ref = ptr::null_mut();
-          sys::napi_create_reference(env, class_ptr, 1, &mut ctor_ref);
-
-          registered_classes.insert(js_name.to_string(), ctor_ref);
-
-          check_status_or_throw!(
-            env,
-            sys::napi_set_named_property(
-              env,
-              if exports_js_mod.is_null() {
-                exports
-              } else {
-                exports_js_mod
-              },
-              js_class_name.as_ptr(),
-              class_ptr
-            ),
-            "Failed to register class `{}`",
-            &js_name,
-          );
-        }
+  // Class registration is all or nothing. Each load keeps its classes in its own
+  // registration record, which is what every class lookup of that load reads
+  // (class-returning exports, strict and `Either` validation, `instance_of`), so a
+  // load never reads or replaces another load's classes. A load that fails part way
+  // stops at the first failure, deletes the constructor references it made, and
+  // leaves its record without classes, so its lookups fail with a clean "Failed to
+  // get constructor". The module-init hooks below assume a complete registration
+  // and are skipped too; the async runtime and its cleanup hook still run, because
+  // `MODULE_COUNT` was already bumped above and `thread_cleanup` is its only
+  // decrement.
+  //
+  // The record's cleanup hook deletes the references at env teardown, after it has
+  // removed the record from the lookups.
+  let classes_registered = registration.is_some_and(|registration| {
+    let mut ctor_refs = Vec::new();
+    if let Err(error) = unsafe { register_classes(env, exports, &mut namespaces, &mut ctor_refs) } {
+      for (_, ctor_ref) in ctor_refs {
+        unsafe { sys::napi_delete_reference(env, ctor_ref) };
       }
-    });
-  });
-
-  REGISTERED_CLASSES.with(|cell| {
-    cell.borrow_mut(|map| {
-      *map = registered_classes;
-    })
-  });
-
-  let module_register_hook_callback = MODULE_REGISTER_HOOK_CALLBACK
-    .read()
-    .expect("Read MODULE_REGISTER_HOOK_CALLBACK failed");
-  if let Some(cb) = module_register_hook_callback.as_ref() {
-    if let Err(e) = cb(env, exports) {
-      JsError::from(e).throw_into(env);
+      unsafe { JsError::from(error).throw_into(env) };
+      return false;
     }
-  }
+    let mut classes = crate::bindgen_runtime::env_registration::ClassConstructors::default();
+    for (js_name, ctor_ref) in ctor_refs {
+      // Two classes under one JS name: the last one wins the lookup, as it always
+      // did, and the reference nothing can find any more is deleted.
+      if let Some(superseded) = classes.insert(js_name, ctor_ref) {
+        unsafe { sys::napi_delete_reference(env, superseded) };
+      }
+    }
+    match crate::bindgen_runtime::env_registration::set_classes(registration, classes) {
+      Ok(()) => true,
+      // Unreachable: the record was created above on this thread and only its own
+      // env's teardown removes it.
+      Err(classes) => {
+        for ctor_ref in classes.into_values() {
+          unsafe { sys::napi_delete_reference(env, ctor_ref) };
+        }
+        unsafe {
+          sys::napi_throw_error(
+            env,
+            ptr::null_mut(),
+            c"Failed to record the classes of this addon".as_ptr(),
+          )
+        };
+        false
+      }
+    }
+  });
 
-  #[cfg(feature = "compat-mode")]
-  {
-    let module_exports = MODULE_EXPORTS.read().expect("Read MODULE_EXPORTS failed");
-    module_exports.iter().for_each(|callback| unsafe {
-      if let Err(e) = callback(env, exports) {
+  // Namespaces go on after every top-level export and class, so a namespace merges into the
+  // value exported under its name instead of replacing it, whatever the registration order.
+  // Skipped when the classes failed: that path has already thrown, and the load fails.
+  let namespaces_attached = classes_registered
+    && match unsafe { namespaces.attach(env, exports) } {
+      Ok(()) => true,
+      Err(error) => {
+        unsafe { JsError::from(error).throw_into(env) };
+        false
+      }
+    };
+
+  if namespaces_attached {
+    let module_register_hook_callback = MODULE_REGISTER_HOOK_CALLBACK
+      .read()
+      .expect("Read MODULE_REGISTER_HOOK_CALLBACK failed");
+    if let Some(cb) = module_register_hook_callback.as_ref() {
+      if let Err(e) = cb(env, exports) {
         JsError::from(e).throw_into(env);
       }
-    })
+    }
+
+    #[cfg(feature = "compat-mode")]
+    {
+      let module_exports = MODULE_EXPORTS.read().expect("Read MODULE_EXPORTS failed");
+      module_exports.iter().for_each(|callback| unsafe {
+        if let Err(e) = callback(env, exports) {
+          JsError::from(e).throw_into(env);
+        }
+      })
+    }
   }
 
   #[cfg(feature = "napi4")]
@@ -1228,6 +1574,339 @@ pub unsafe extern "C" fn napi_register_module_v1(
   exports
 }
 
+/// The namespaced exports of one load, kept until every top-level export and class exists.
+#[cfg(not(feature = "noop"))]
+#[derive(Default)]
+struct Namespaces {
+  /// The members of each namespace by path (`"a.b"`, no trailing NUL), in registration order.
+  /// Member names keep their trailing NUL.
+  members: HashMap<&'static str, Vec<(&'static str, sys::napi_value)>, FxBuildHasher>,
+}
+
+#[cfg(not(feature = "noop"))]
+impl Namespaces {
+  /// Sets a top-level export (`js_mod` is `None`) on `exports` now, or keeps a namespaced one
+  /// for [`Namespaces::attach`]. `name` ends with a NUL.
+  unsafe fn export(
+    &mut self,
+    env: sys::napi_env,
+    exports: sys::napi_value,
+    js_mod: Option<&'static str>,
+    name: &'static str,
+    value: sys::napi_value,
+    kind: &str,
+  ) -> Result<()> {
+    if let Some(js_mod) = js_mod {
+      self
+        .members
+        .entry(strip_nul(js_mod))
+        .or_default()
+        .push((name, value));
+      return Ok(());
+    }
+    let js_name = unsafe { CStr::from_bytes_with_nul_unchecked(name.as_bytes()) };
+    check_status!(
+      unsafe { sys::napi_set_named_property(env, exports, js_name.as_ptr(), value) },
+      "Failed to register {} `{}`",
+      kind,
+      strip_nul(name),
+    )
+  }
+
+  /// Puts every namespace on `exports`, parents before children, and then its members.
+  ///
+  /// When the path of a namespace already holds a function or an object as an own property
+  /// (a `#[napi]` function, a class, an enum or another namespace), the namespace merges into
+  /// that value, the way TypeScript merges `function f` with `namespace f`. The generated d.ts
+  /// already declares both. These fail the load instead of dropping or replacing a value:
+  /// - the path holds a primitive, such as a `const` (TypeScript rejects it too, TS2451);
+  /// - the value is a function and the namespace or a member would replace one of its own
+  ///   properties, such as a class static or `prototype` (TS2300).
+  ///
+  /// In a plain object (a namespace or an enum), a member replaces an own property of the
+  /// same name, as a set did before. So a second load into the same `module.exports` works.
+  unsafe fn attach(&self, env: sys::napi_env, exports: sys::napi_value) -> Result<()> {
+    let paths = namespace_paths(self.members.keys().copied())?;
+    // Each namespace's object, and whether it is a function (a `#[napi]` function or a class).
+    let mut objects: HashMap<&str, (sys::napi_value, bool), FxBuildHasher> =
+      HashMap::with_capacity_and_hasher(paths.len(), FxBuildHasher);
+    for path in paths {
+      let (parent, name) = match path.rsplit_once('.') {
+        // The parent is shallower, so it is already in `objects`.
+        Some((parent_path, name)) => {
+          let (parent, parent_is_function) = objects[parent_path];
+          let key = unsafe { property_key(env, name) }?;
+          // Under a function, only a member of the parent namespace can hold this namespace.
+          // Any other own property (a class static, `prototype`, `name`) belongs to the class.
+          if parent_is_function
+            && !self.is_member(parent_path, name)
+            && unsafe { has_own(env, parent, key, path) }?
+          {
+            return Err(Error::new(
+              Status::InvalidArg,
+              format!(
+                "Cannot export namespace `{path}`: `{parent_path}` already has a property `{name}`"
+              ),
+            ));
+          }
+          (parent, name)
+        }
+        None => (exports, path),
+      };
+      let key = unsafe { property_key(env, name) }?;
+      let mut value_type = sys::ValueType::napi_object;
+      let object = if unsafe { has_own(env, parent, key, path) }? {
+        let mut value = ptr::null_mut();
+        check_status!(
+          unsafe { sys::napi_get_property(env, parent, key, &mut value) },
+          "Failed to read export `{}`",
+          path
+        )?;
+        check_status!(
+          unsafe { sys::napi_typeof(env, value, &mut value_type) },
+          "Failed to read export `{}`",
+          path
+        )?;
+        if value_type != sys::ValueType::napi_object && value_type != sys::ValueType::napi_function
+        {
+          return Err(Error::new(
+            Status::InvalidArg,
+            format!(
+              "Cannot export namespace `{path}`: `{path}` already holds a value that is not a function or an object"
+            ),
+          ));
+        }
+        value
+      } else {
+        let mut object = ptr::null_mut();
+        check_status!(
+          unsafe { sys::napi_create_object(env, &mut object) },
+          "Create export JavaScript Object [{}] failed",
+          path
+        )?;
+        unsafe { define_property(env, parent, ptr::null(), key, object, path) }?;
+        object
+      };
+      let is_function = value_type == sys::ValueType::napi_function;
+      objects.insert(path, (object, is_function));
+
+      let members = self.members.get(path).map_or(&[][..], Vec::as_slice);
+      for (i, &(member, value)) in members.iter().enumerate() {
+        let full_name = format!("{path}.{}", strip_nul(member));
+        // A member must not replace a property of a function, such as a class static or
+        // `prototype` (TypeScript rejects it too, TS2300). A repeat of a member replaces the
+        // earlier one, as it always did.
+        if is_function && !members[..i].iter().any(|(earlier, _)| *earlier == member) {
+          let member_key = unsafe { property_key(env, strip_nul(member)) }?;
+          if unsafe { has_own(env, object, member_key, &full_name) }? {
+            return Err(Error::new(
+              Status::InvalidArg,
+              format!(
+                "Cannot export `{full_name}`: `{path}` already has a property `{}`",
+                strip_nul(member)
+              ),
+            ));
+          }
+        }
+        let utf8name = unsafe { CStr::from_bytes_with_nul_unchecked(member.as_bytes()) };
+        unsafe {
+          define_property(
+            env,
+            object,
+            utf8name.as_ptr(),
+            ptr::null_mut(),
+            value,
+            &full_name,
+          )
+        }?;
+      }
+    }
+    Ok(())
+  }
+
+  fn is_member(&self, path: &str, name: &str) -> bool {
+    self
+      .members
+      .get(path)
+      .is_some_and(|members| members.iter().any(|(member, _)| strip_nul(member) == name))
+  }
+}
+
+#[cfg(not(feature = "noop"))]
+unsafe fn has_own(
+  env: sys::napi_env,
+  object: sys::napi_value,
+  key: sys::napi_value,
+  path: &str,
+) -> Result<bool> {
+  let mut has = false;
+  check_status!(
+    unsafe { sys::napi_has_own_property(env, object, key, &mut has) },
+    "Failed to read export `{}`",
+    path
+  )?;
+  Ok(has)
+}
+
+/// Every namespace path in `paths` and all of its parents, parents first. Within one depth the
+/// paths are in name order, so the first error is the same on every load.
+#[cfg(not(feature = "noop"))]
+fn namespace_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Result<Vec<&'a str>> {
+  let mut all = Vec::new();
+  for mut path in paths {
+    loop {
+      all.push(path);
+      match path.rsplit_once('.') {
+        Some((parent, _)) => path = parent,
+        None => break,
+      }
+    }
+  }
+  all.sort_unstable_by_key(|path| (path.matches('.').count(), *path));
+  all.dedup();
+  if let Some(path) = all.iter().find(|path| path.contains('\0')) {
+    return Err(Error::new(
+      Status::InvalidArg,
+      format!("Namespace `{}` contains a NUL byte", path.escape_debug()),
+    ));
+  }
+  Ok(all)
+}
+
+#[cfg(not(feature = "noop"))]
+fn strip_nul(name: &'static str) -> &'static str {
+  name.strip_suffix('\0').unwrap_or(name)
+}
+
+#[cfg(not(feature = "noop"))]
+unsafe fn property_key(env: sys::napi_env, name: &str) -> Result<sys::napi_value> {
+  let mut key = ptr::null_mut();
+  check_status!(
+    unsafe {
+      sys::napi_create_string_utf8(env, name.as_ptr().cast(), name.len() as isize, &mut key)
+    },
+    "Failed to create the property key `{}`",
+    name
+  )?;
+  Ok(key)
+}
+
+/// Defines a writable, enumerable and configurable data property, as a set would make. A set
+/// would also run an inherited setter, such as `Function.prototype.caller` on a merged
+/// function, which drops the value. The name is `utf8name` when it is not null, else `key`.
+#[cfg(not(feature = "noop"))]
+unsafe fn define_property(
+  env: sys::napi_env,
+  object: sys::napi_value,
+  utf8name: *const std::ffi::c_char,
+  key: sys::napi_value,
+  value: sys::napi_value,
+  path: &str,
+) -> Result<()> {
+  let descriptor = sys::napi_property_descriptor {
+    utf8name,
+    name: key,
+    method: None,
+    getter: None,
+    setter: None,
+    value,
+    attributes: sys::PropertyAttributes::writable
+      | sys::PropertyAttributes::enumerable
+      | sys::PropertyAttributes::configurable,
+    data: ptr::null_mut(),
+  };
+  check_status!(
+    unsafe { sys::napi_define_properties(env, object, 1, &descriptor) },
+    "Failed to register export `{}`",
+    path
+  )
+}
+
+/// Defines every registered class and sets it on `exports`, or adds it to the members of
+/// its `js_mod` namespace for `Namespaces::attach`.
+///
+/// Stops at the first failure and returns it without throwing. Every constructor
+/// reference made before that point is in `ctor_refs`, so the caller can delete them.
+#[cfg(not(feature = "noop"))]
+unsafe fn register_classes(
+  env: sys::napi_env,
+  exports: sys::napi_value,
+  namespaces: &mut Namespaces,
+  ctor_refs: &mut Vec<(&'static str, sys::napi_ref)>,
+) -> Result<()> {
+  MODULE_CLASS_PROPERTIES.borrow(|inner| {
+    for js_mods in inner.values() {
+      for (js_mod, class_registration) in js_mods {
+        unsafe {
+          let js_name = class_registration.js_name;
+          let props = &class_registration.props;
+          let (ctor, props): (Vec<_>, Vec<_>) = props.iter().partition(|prop| prop.is_ctor);
+
+          let ctor = ctor
+            .first()
+            .map(|c| c.raw(env))
+            .transpose()?
+            .and_then(|c| c.method)
+            .unwrap_or(noop);
+          let raw_props = props
+            .iter()
+            .map(|prop| prop.raw(env))
+            .collect::<Result<Vec<_>>>()?;
+
+          let js_class_name = CStr::from_bytes_with_nul_unchecked(js_name.as_bytes());
+          let mut class_ptr = ptr::null_mut();
+
+          check_status!(
+            sys::napi_define_class(
+              env,
+              js_class_name.as_ptr(),
+              js_name.len() as isize - 1,
+              Some(ctor),
+              ptr::null_mut(),
+              raw_props.len(),
+              raw_props.as_ptr(),
+              &mut class_ptr,
+            ),
+            "Failed to register class `{}`",
+            &js_name,
+          )?;
+
+          if class_registration.implement_iterator {
+            crate::bindgen_runtime::iterator::setup_iterator_class(env, class_ptr);
+            // `setup_iterator_class` throws instead of returning its error.
+            let mut is_pending = false;
+            check_status!(
+              sys::napi_is_exception_pending(env, &mut is_pending),
+              "Failed to register class `{}`",
+              &js_name,
+            )?;
+            if is_pending {
+              return Err(Error::new(
+                Status::PendingException,
+                format!("Failed to set up the iterator of class `{}`", js_name),
+              ));
+            }
+          }
+
+          let mut ctor_ref = ptr::null_mut();
+          check_status!(
+            sys::napi_create_reference(env, class_ptr, 1, &mut ctor_ref),
+            "Failed to register class `{}`",
+            &js_name,
+          )?;
+
+          ctor_refs.push((js_name, ctor_ref));
+
+          // A namespaced class reaches `exports` only in `Namespaces::attach`, so it is
+          // never left on `exports` when a later class fails.
+          namespaces.export(env, exports, *js_mod, js_name, class_ptr, "class")?;
+        }
+      }
+    }
+    Ok(())
+  })
+}
+
 #[cfg(not(feature = "noop"))]
 pub(crate) unsafe extern "C" fn noop(
   env: sys::napi_env,
@@ -1245,42 +1924,32 @@ pub(crate) unsafe extern "C" fn noop(
   ptr::null_mut()
 }
 
+/// Creates this env's custom-GC TSFN and its handle. Publishes nothing and adds no hook: the
+/// caller hands the handle to the env's registration record, whose cleanup hook releases the
+/// TSFN. `None` when the TSFN could not be created (an exception is then pending).
 #[cfg(all(feature = "napi4", not(feature = "noop")))]
-fn create_custom_gc(env: sys::napi_env) {
-  // Per-env custom-GC TSFN (#3357): created for EVERY isolate. It is `napi_unref`'d so it never pins
-  // the event loop (worker terminate/exit cannot hang), and Node owns it (torn down via
-  // `custom_gc_handle_finalize` at env teardown).
-  let mut custom_gc_fn = ptr::null_mut();
-  check_status_or_throw!(
-    env,
-    unsafe {
-      sys::napi_create_function(
-        env,
-        c"custom_gc".as_ptr(),
-        9,
-        Some(empty),
-        ptr::null_mut(),
-        &mut custom_gc_fn,
-      )
-    },
-    "Create Custom GC Function in napi_register_module_v1 failed"
-  );
+fn create_custom_gc(env: sys::napi_env) -> Option<std::sync::Arc<CustomGcHandle>> {
+  // Per-env custom-GC TSFN (#3357): created for EVERY env. It is `napi_unref`'d so it never pins
+  // the event loop (worker terminate/exit cannot hang), and passes null for `func` because
+  // `custom_gc` never invokes a JS callback — avoiding an unused JS function allocation and
+  // strong root per load on modern runtimes (Node >= 10.17 / >= 12.6, Bun, Deno, emnapi).
+  // Early Node-API 4 hosts (Node 10.6–10.16, 12.0–12.5) reject a null `func` with
+  // `napi_invalid_arg`, so we fall back to a dummy JS function only on that error. Its initial
+  // thread count of 1 is released by the registration record's cleanup hook; Node then closes it
+  // at env teardown and calls `custom_gc_handle_finalize`.
   let mut async_resource_name = ptr::null_mut();
   check_status_or_throw!(
     env,
     unsafe { sys::napi_create_string_utf8(env, c"CustomGC".as_ptr(), 8, &mut async_resource_name) },
     "Create async resource string in napi_register_module_v1"
   );
-  let handle = std::sync::Arc::new(CustomGcHandle {
-    tsfn: std::sync::atomic::AtomicPtr::new(ptr::null_mut()),
-    aborted: std::sync::RwLock::new(false),
-  });
+  let handle = std::sync::Arc::new(CustomGcHandle::new());
   let weak_ptr = std::sync::Arc::downgrade(&handle).into_raw();
   let mut custom_gc_tsfn = ptr::null_mut();
-  let status = unsafe {
+  let mut status = unsafe {
     sys::napi_create_threadsafe_function(
       env,
-      custom_gc_fn,
+      ptr::null_mut(),
       ptr::null_mut(),
       async_resource_name,
       0,
@@ -1292,6 +1961,42 @@ fn create_custom_gc(env: sys::napi_env) {
       &mut custom_gc_tsfn,
     )
   };
+  if status == sys::Status::napi_invalid_arg {
+    let mut is_pending = false;
+    if unsafe { sys::napi_is_exception_pending(env, &mut is_pending) } == sys::Status::napi_ok
+      && !is_pending
+    {
+      let mut custom_gc_fn = ptr::null_mut();
+      if unsafe {
+        sys::napi_create_function(
+          env,
+          c"custom_gc".as_ptr(),
+          9,
+          Some(empty),
+          ptr::null_mut(),
+          &mut custom_gc_fn,
+        )
+      } == sys::Status::napi_ok
+      {
+        custom_gc_tsfn = ptr::null_mut();
+        status = unsafe {
+          sys::napi_create_threadsafe_function(
+            env,
+            custom_gc_fn,
+            ptr::null_mut(),
+            async_resource_name,
+            0,
+            1,
+            weak_ptr.cast_mut().cast(),
+            Some(custom_gc_handle_finalize),
+            ptr::null_mut(),
+            Some(custom_gc),
+            &mut custom_gc_tsfn,
+          )
+        };
+      }
+    }
+  }
   if status != sys::Status::napi_ok || custom_gc_tsfn.is_null() {
     // reclaim the leaked weak count before bailing
     drop(unsafe { std::sync::Weak::from_raw(weak_ptr) });
@@ -1300,20 +2005,100 @@ fn create_custom_gc(env: sys::napi_env) {
       status,
       "Create Custom GC ThreadsafeFunction in napi_register_module_v1 failed"
     );
-    // `napi_create_threadsafe_function` only fails under resource exhaustion; `check_status_or_throw!`
-    // above leaves a pending exception, which aborts the addon load (`require` throws). No user
-    // `#[napi]` code then runs, so no Buffer/TypedArray is ever created with this env's (unset) handle.
-    return;
+    // `napi_create_threadsafe_function` only fails under resource exhaustion;
+    // `check_status_or_throw!` above leaves a pending exception. Values captured in this env then
+    // record no handle.
+    return None;
   }
   handle
     .tsfn
     .store(custom_gc_tsfn, std::sync::atomic::Ordering::SeqCst);
+  // Unreachable in practice: Node and emnapi (with threads) both return `napi_ok` for a TSFN
+  // they just created. The handle is still returned, so the record releases the TSFN at teardown.
   check_status_or_throw!(
     env,
     unsafe { sys::napi_unref_threadsafe_function(env, custom_gc_tsfn) },
     "Unref Custom GC ThreadsafeFunction in napi_register_module_v1 failed"
   );
-  CURRENT_CUSTOM_GC_HANDLE.with(|c| *c.borrow_mut() = Some(handle));
+  #[cfg(not(target_family = "wasm"))]
+  create_custom_gc_sentinel(env, &handle);
+  Some(handle)
+}
+
+/// Wrap data of a late sentinel.
+#[cfg(all(feature = "napi4", not(feature = "noop"), not(target_family = "wasm")))]
+struct CustomGcSentinel {
+  /// Only a `Weak`: the sentinel must not keep the handle alive (on Deno it is never finalized).
+  handle: std::sync::Weak<CustomGcHandle>,
+  /// The handle's `sentinel_ref`. The finalizer deletes the reference through it even when the
+  /// handle is gone.
+  sentinel_ref: std::sync::Arc<std::sync::atomic::AtomicPtr<sys::napi_ref__>>,
+}
+
+/// Adds the late sentinel of `handle` (see `CustomGcHandle`): a plain object wrapped with
+/// `napi_wrap`, whose wrap data is a `CustomGcSentinel`, kept by a strong reference. Called
+/// before any module-init code. Best effort: without it, references released after the cleanup
+/// hook leak, as they did before.
+#[cfg(all(feature = "napi4", not(feature = "noop"), not(target_family = "wasm")))]
+fn create_custom_gc_sentinel(env: sys::napi_env, handle: &std::sync::Arc<CustomGcHandle>) {
+  let mut object = ptr::null_mut();
+  if unsafe { sys::napi_create_object(env, &mut object) } != sys::Status::napi_ok {
+    return;
+  }
+  let data = Box::into_raw(Box::new(CustomGcSentinel {
+    handle: std::sync::Arc::downgrade(handle),
+    sentinel_ref: handle.sentinel_ref.clone(),
+  }));
+  if unsafe {
+    sys::napi_wrap(
+      env,
+      object,
+      data.cast(),
+      Some(custom_gc_sentinel_finalize),
+      ptr::null_mut(),
+      ptr::null_mut(),
+    )
+  } != sys::Status::napi_ok
+  {
+    drop(unsafe { Box::from_raw(data) });
+    return;
+  }
+  let mut sentinel_ref = ptr::null_mut();
+  // Without the reference the object is collected some time later, and its finalizer, finding no
+  // `sentinel_ref`, does nothing.
+  if unsafe { sys::napi_create_reference(env, object, 1, &mut sentinel_ref) }
+    == sys::Status::napi_ok
+  {
+    handle.sentinel_ref.store(sentinel_ref, Ordering::SeqCst);
+  }
+}
+
+/// Finalizer of the late sentinel. Kept by a strong reference, it runs at env teardown, on the
+/// env's JS thread, while the env can still delete references. `data` is the `CustomGcSentinel`.
+#[cfg(all(feature = "napi4", not(feature = "noop"), not(target_family = "wasm")))]
+unsafe extern "C" fn custom_gc_sentinel_finalize(
+  env: sys::napi_env,
+  data: *mut std::ffi::c_void,
+  _hint: *mut std::ffi::c_void,
+) {
+  if data.is_null() {
+    return;
+  }
+  let sentinel = unsafe { Box::from_raw(data.cast::<CustomGcSentinel>()) };
+  // Taken first, as before the phase change: a drop that finds no sentinel leaks its reference
+  // instead of waiting. Null when the sentinel was given up at registration and then collected
+  // as an ordinary object, or never got its reference: nothing to do.
+  let sentinel_ref = sentinel
+    .sentinel_ref
+    .swap(ptr::null_mut(), Ordering::SeqCst);
+  if sentinel_ref.is_null() {
+    return;
+  }
+  if let Some(handle) = sentinel.handle.upgrade() {
+    handle.finish_teardown(env);
+  }
+  // Deleted whether or not the handle is still alive.
+  delete_sentinel_ref(env, sentinel_ref);
 }
 
 #[cfg(all(
@@ -1328,14 +2113,16 @@ unsafe extern "C" fn thread_cleanup(_data: *mut std::ffi::c_void) {
 }
 
 #[cfg(all(feature = "napi4", not(feature = "noop")))]
-#[allow(unused)]
-unsafe extern "C" fn empty(env: sys::napi_env, info: sys::napi_callback_info) -> sys::napi_value {
+unsafe extern "C" fn empty(_env: sys::napi_env, _info: sys::napi_callback_info) -> sys::napi_value {
   ptr::null_mut()
 }
 
-// Per-env custom-GC finalize (#3357): sets the per-handle `aborted` flag when Node tears down the
-// owner env's TSFN. `finalize_data` is the `Weak<CustomGcHandle>` smuggled in via
-// `thread_finalize_data`; we reclaim that weak count here.
+// Per-env custom-GC finalize (#3357): moves the handle to `Closing` when Node closes the TSFN.
+// `CustomGcHandle::close` (from the registration record's cleanup hook, or right at registration
+// when there is no record) has already done it; this is a backstop. `finalize_data` is the
+// `Weak<CustomGcHandle>` smuggled in via `thread_finalize_data`; we reclaim that weak count here.
+// It stays a `Weak`, so a runtime that never runs TSFN finalizers (Deno at worker terminate) does
+// not leak the handle.
 #[cfg(all(feature = "napi4", not(feature = "noop")))]
 unsafe extern "C" fn custom_gc_handle_finalize(
   _env: sys::napi_env,
@@ -1348,41 +2135,32 @@ unsafe extern "C" fn custom_gc_handle_finalize(
   if let Some(handle) =
     unsafe { std::sync::Weak::<CustomGcHandle>::from_raw(finalize_data.cast()) }.upgrade()
   {
-    // owner env gone, ref already invalidated by V8 -> mark aborted (write-lock)
-    handle.set_aborted();
+    handle.mark_closing();
   }
   // temp Weak dropped here -> reclaims the weak count
 }
 
 #[cfg(all(feature = "napi4", not(feature = "noop")))]
-// recycle a napi_ref (ArrayBuffer/Buffer/Error) that is not dropped on the main thread
+// The custom-GC TSFN's wake: deletes pending references on the env's JS thread. `data` is a
+// `Weak<CustomGcHandle>` token, one per wake, consumed on every path (a `Weak` drop needs no env).
 extern "C" fn custom_gc(
   env: sys::napi_env,
   _js_callback: sys::napi_value,
   _context: *mut std::ffi::c_void,
   data: *mut std::ffi::c_void,
 ) {
-  // env can be null while the owning env/TSFN is shutting down and Node drains the
-  // queue (mirrors the generic call_js_cb guard in threadsafe_function.rs). The owner
-  // env is gone and V8 has already invalidated the ref, so this is a safe no-op.
-  if env.is_null() || data.is_null() {
+  if data.is_null() {
     return;
   }
-  let mut ref_count = 0;
-  check_status_or_throw!(
-    env,
-    unsafe { sys::napi_reference_unref(env, data.cast(), &mut ref_count) },
-    "Failed to unref reference in Custom GC"
-  );
-  // Both ArrayBuffer/Buffer and `Error` references reach 0 here: each is created
-  // at refcount 1 and routed through this TSFN exactly once, by its owner's drop
-  // (for `Error`, the last `Arc<ErrorRef>`), so the unref above always hits 0.
-  if ref_count == 0 {
-    check_status_or_throw!(
-      env,
-      unsafe { sys::napi_delete_reference(env, data.cast()) },
-      "Failed to delete reference in Custom GC"
-    );
+  let token = unsafe { std::sync::Weak::<CustomGcHandle>::from_raw(data.cast()) };
+  // A null env: Node empties the queue while it closes the TSFN at env teardown (mirrors the
+  // generic call_js_cb guard in threadsafe_function.rs). Nothing is lost: references wait in
+  // `pending`, never in the queue, for the cleanup hook (which ran before) or the sentinel.
+  if env.is_null() {
+    return;
+  }
+  if let Some(handle) = token.upgrade() {
+    handle.drain_while_running(env);
   }
 }
 
@@ -1533,3 +2311,28 @@ fn retain_current_module() {
   ))
 ))]
 fn retain_current_module() {}
+
+#[cfg(all(test, not(feature = "noop")))]
+mod namespace_tests {
+  use super::namespace_paths;
+
+  #[test]
+  fn parents_come_first_in_name_order() {
+    assert_eq!(
+      namespace_paths(["a.b.c", "x", "a.d", "a"]).unwrap(),
+      ["a", "x", "a.b", "a.d", "a.b.c"]
+    );
+  }
+
+  #[test]
+  fn empty_segments_are_kept() {
+    assert_eq!(namespace_paths([".lead"]).unwrap(), ["", ".lead"]);
+    assert_eq!(namespace_paths(["m..n"]).unwrap(), ["m", "m.", "m..n"]);
+  }
+
+  #[test]
+  fn a_nul_byte_names_the_namespace() {
+    let error = namespace_paths(["ok", "nul\0x.y"]).unwrap_err();
+    assert_eq!(error.reason, "Namespace `nul\\0x` contains a NUL byte");
+  }
+}
