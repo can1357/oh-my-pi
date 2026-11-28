@@ -63,7 +63,15 @@ import {
 import { convertMessageToLlm } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import type { AssistantMessage, ImageContent, Message, Model, TextContent, UserMessage } from "@oh-my-pi/pi-ai";
 import { copyPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
+import {
+	ContainerPath,
+	isRecord,
+	jsonDeepEquals,
+	logger,
+	type NestedWalk,
+	prompt,
+	runNested,
+} from "@oh-my-pi/pi-utils";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import { readerIncludesThinking } from "@oh-my-pi/snapcompact";
 import liveEndedTemplate from "../live/prompts/live-ended.md" with { type: "text" };
@@ -280,13 +288,15 @@ export function titleContextWordCount(message: AssistantMessage): number {
 
 /**
  * Compares session messages by provider-replay semantics, ignoring runtime-only
- * fields that do not change a restored request.
+ * fields that do not change a restored request. Both the normal form and the
+ * comparison keep their own stack, so a message as deep as a transcript line
+ * holds (a tool call's arguments are any JSON) compares.
  */
 export function didSessionMessagesChange(previousMessages: AgentMessage[], nextMessages: AgentMessage[]): boolean {
 	if (previousMessages.length !== nextMessages.length) return true;
 	return previousMessages.some(
 		(message, i) =>
-			!Bun.deepEquals(
+			!jsonDeepEquals(
 				normalizeSessionMessageForProviderReplay(message),
 				normalizeSessionMessageForProviderReplay(nextMessages[i]),
 			),
@@ -329,16 +339,31 @@ function titleConversationTurnFromMessage(message: AgentMessage): TitleConversat
 	return { role: message.role, ...(text ? { text } : {}), ...(thinking ? { thinking } : {}) };
 }
 
+/** `value` as plain data: each object a plain object of its own enumerable string keys, each array an array. */
 function normalizeProviderReplayValue(value: unknown): unknown {
+	return value && typeof value === "object" ? runNested(normalizedReplayNode(value, new ContainerPath())) : value;
+}
+
+/** {@link normalizeProviderReplayValue} of `value`, an object `path` is inside of; each child object is a nested step. */
+function* normalizedReplayNode(value: object, path: ContainerPath): NestedWalk {
+	path.enter(value);
 	if (Array.isArray(value)) {
-		return value.map(normalizeProviderReplayValue);
+		const items: unknown[] = [];
+		for (const item of value) {
+			items.push(item && typeof item === "object" ? yield normalizedReplayNode(item, path) : item);
+		}
+		path.leave(value);
+		return items;
 	}
-	if (value && typeof value === "object") {
-		return Object.fromEntries(
-			Object.entries(value).map(([key, entryValue]) => [key, normalizeProviderReplayValue(entryValue)]),
-		);
+	const entries: Array<[string, unknown]> = [];
+	for (const [key, entryValue] of Object.entries(value)) {
+		entries.push([
+			key,
+			entryValue && typeof entryValue === "object" ? yield normalizedReplayNode(entryValue, path) : entryValue,
+		]);
 	}
-	return value;
+	path.leave(value);
+	return Object.fromEntries(entries);
 }
 
 function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknown {

@@ -51,6 +51,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@oh-my-pi/collab-web": "workspace:*",
+        "@oh-my-pi/omp-stats": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
         "@oh-my-pi/pi-wire": "catalog:",
         "gifenc": "1.0.3",

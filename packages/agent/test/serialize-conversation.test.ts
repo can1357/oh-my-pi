@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { serializeConversation, serializeConversationForSummary } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Message, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
+import { DEEP_LEVELS, nestedChain, nestedChainJson } from "../../ai/test/helpers/deep-nesting";
 
 const ZERO_USAGE: Usage = {
 	input: 0,
@@ -165,5 +166,34 @@ describe("serializeConversation — useless pairs", () => {
 
 		expect(out).toContain(reasoning);
 		expect(out).toContain("<thinking>");
+	});
+});
+
+describe("serializeConversation — deep arguments", () => {
+	// A tool call's arguments are any JSON, as deep as JSON.parse reads; a summary writes each call.
+	const deepCall = (): Message[] => [
+		assistantMessage([{ type: "toolCall", id: "c-deep", name: "read", arguments: { note: nestedChain() } }]),
+		toolResultMessage("c-deep", "read it"),
+	];
+
+	test("writes a tool call whose argument nests past JSON.stringify's reach", () => {
+		expect(serializeConversation(deepCall())).toContain(`[Tool Call]: read(note=${nestedChainJson()})`);
+	});
+
+	// Summary compaction renders the conversation in the model's dialect; most dialects write arguments as JSON.
+	test("renders such a call in a dialect that writes arguments as JSON", () => {
+		expect(serializeConversationForSummary(deepCall(), "xml")).toContain(nestedChainJson());
+	});
+
+	test("renders such a call in a dialect that writes arguments as Python literals", () => {
+		expect(serializeConversationForSummary(deepCall(), "gemini")).toContain(
+			`read(note=${'{"next": '.repeat(DEEP_LEVELS)}{"leaf": "bottom"}${"}".repeat(DEEP_LEVELS)})`,
+		);
+	});
+
+	test("renders such a call in Gemma's argument syntax", () => {
+		expect(serializeConversationForSummary(deepCall(), "gemma")).toContain(
+			`note:${"{next:".repeat(DEEP_LEVELS)}{leaf:<|"|>bottom<|"|>}${"}".repeat(DEEP_LEVELS)}`,
+		);
 	});
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { encodeRpcFrame, MAX_RPC_FRAME_BYTES } from "../src/modes/rpc/rpc-frame";
 import { pageRpcMessages, type RpcMessageSnapshot } from "../src/modes/rpc/rpc-messages";
+import { nestedChain } from "../../ai/test/helpers/deep-nesting";
 
 function message(index: number, bytes = 32 * 1024): AgentMessage {
 	return { role: "user", content: `${index}:${"x".repeat(bytes)}`, timestamp: index };
@@ -60,5 +61,31 @@ describe("RPC message pagination", () => {
 
 		expect(first.messages).toEqual([messages[0]]);
 		expect(first.nextCursor).toBeDefined();
+	});
+
+	// A tool result's details nest as deep as JSON.parse reads (millions of levels); JSON.stringify gives out at 40,000.
+	it("pages past a message nested deeper than JSON.stringify recurses, counting its bytes", () => {
+		const details = nestedChain({ leaf: "bottom" });
+		const deep: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "inspect",
+			content: [{ type: "text", text: "inspected" }],
+			details,
+			isError: false,
+			timestamp: 1,
+		};
+		// About 410 KB, then about 450 KB for `deep`: the two together pass the 768 KB a page holds.
+		const messages = [message(0, 400 * 1024), deep, message(2, 128)];
+		const deepSnapshot = { sessionId: "session-3", leafId: "leaf-3", messageCount: messages.length };
+
+		const first = pageRpcMessages(messages, deepSnapshot);
+		const second = pageRpcMessages(messages, deepSnapshot, { cursor: first.nextCursor });
+
+		expect(first.messages).toEqual([messages[0]]);
+		expect(second.messages).toHaveLength(2);
+		expect(second.messages[0]).toBe(deep);
+		expect(second.messages[1]).toEqual(messages[2]);
+		expect(second.nextCursor).toBeUndefined();
 	});
 });

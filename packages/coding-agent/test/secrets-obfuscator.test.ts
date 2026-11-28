@@ -53,6 +53,7 @@ import { regexRematchesInContext } from "@oh-my-pi/pi-coding-agent/secrets/repla
 import { buildAsyncResultBatchMessage } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { getActiveProfile, getAgentDir, setProfile } from "@oh-my-pi/pi-utils/dirs";
+import { DEEP_LEVELS, nestedChain, nestedChainJson, nestingOf } from "../../ai/test/helpers/deep-nesting";
 
 describe("compileSecretRegex", () => {
 	it("adds global flag when not provided", () => {
@@ -3447,6 +3448,43 @@ describe("SecretObfuscator cross-turn cache stability", () => {
 		expect(JSON.stringify(obfuscateToolArguments(obfuscator, obfuscated))).toEqual(serialized);
 	});
 
+	// A tool call's arguments nest as deep as JSON.parse reads (millions of levels); a recursive walk stops near 22,000.
+	it("hides and restores a secret at the bottom of tool-call arguments nested deeper than a recursive walk reaches", () => {
+		const obfuscator = new SecretObfuscator([{ type: "regex", content: "tok_[a-z0-9]+" }]);
+		const args = { root: nestedChain({ leaf: "tok_abc123" }) };
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-deep", name: "inspect", arguments: args }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+
+		const obfuscated = obfuscateToolArguments(obfuscator, args);
+		const hidden = nestingOf(obfuscated.root);
+		expect(hidden).toEqual({ levels: DEEP_LEVELS, bottom: { leaf: expect.not.stringContaining("tok_abc123") } });
+		expect(nestingOf(deobfuscateToolArguments(obfuscator, obfuscated).root)).toEqual({
+			levels: DEEP_LEVELS,
+			bottom: { leaf: "tok_abc123" },
+		});
+
+		// The request a provider gets: the replayed assistant turn's arguments with the secret hidden.
+		const [sent] = obfuscateMessages(obfuscator, [assistant]);
+		const call = (sent as AssistantMessage).content[0];
+		if (call.type !== "toolCall") throw new Error("expected the tool call");
+		expect(nestingOf(call.arguments.root)).toEqual(hidden);
+	});
+
 	it("strips a stale friendly prefix from persisted assistant history once a later message reveals the colliding regex secret", () => {
 		// Regression: `obfuscateAssistantContentForReplay` only scans
 		// the assistant content passed to THIS call. If an earlier turn already
@@ -4491,6 +4529,36 @@ describe("native replay secret obfuscation", () => {
 		expect(JSON.parse(nextReplay.providerPayload.items[0]?.arguments as string).token).not.toBe("tok_abc123");
 		expect(nextReplay.providerPayload.items[1]).toBe(opaque);
 		expect(obfuscateMessages(obfuscator, next)).toBe(next);
+	});
+
+	// If this regresses, a request whose native replay holds a tool call's arguments, as text, nested past the 40,000
+	// levels JSON.stringify writes fails with "Maximum call stack size exceeded" once a secret in them is hidden.
+	it("hides a secret at the bottom of native function-call arguments nested deeper than JSON.stringify recurses", () => {
+		const obfuscator = new SecretObfuscator([{ type: "regex", content: "tok_[a-z0-9]+" }]);
+		const item = {
+			type: "function_call",
+			call_id: "call-deep",
+			name: "inspect",
+			// JSON.parse reads millions of levels; JSON.stringify could not have written this text.
+			arguments: nestedChainJson({ leaf: "tok_abc123" }),
+		};
+		const messages: Message[] = [
+			{
+				role: "developer",
+				attribution: "agent",
+				content: "native replay",
+				timestamp: 1,
+				providerPayload: { type: "openaiResponsesHistory", provider: "openai", items: [item] },
+			},
+		];
+
+		const [sent] = obfuscateMessages(obfuscator, messages);
+		if (sent?.role !== "developer" || sent.providerPayload?.type !== "openaiResponsesHistory")
+			throw new Error("Missing native replay");
+		expect(nestingOf(JSON.parse(sent.providerPayload.items[0]?.arguments as string))).toEqual({
+			levels: DEEP_LEVELS,
+			bottom: { leaf: expect.not.stringContaining("tok_abc123") },
+		});
 	});
 });
 

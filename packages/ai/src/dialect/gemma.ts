@@ -1,3 +1,4 @@
+import { ContainerPath, type NestedWalk, runNested } from "@oh-my-pi/pi-utils";
 import type { Message, ToolCall } from "../types";
 import { mintToolCallId, partialSuffixOverlap, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./gemma.md" with { type: "text" };
@@ -380,17 +381,53 @@ function renderTranscript(messages: readonly Message[], options: DialectRenderOp
 	return out;
 }
 
+/**
+ * A value in Gemma's argument syntax. The walk keeps its own stack ({@link runNested}): a tool
+ * call's arguments and a tool's JSON result are any JSON, as deep as `JSON.parse` reads.
+ */
 function gemmaValue(value: unknown): string {
+	return value !== null && typeof value === "object"
+		? runNested(gemmaContainer(value, new ContainerPath()))
+		: gemmaScalar(value);
+}
+
+/** {@link gemmaValue} of a value that is not an object or array. */
+function gemmaScalar(value: unknown): string {
 	if (value === null || value === undefined) return "null";
 	if (typeof value === "boolean") return value ? "true" : "false";
 	if (typeof value === "number") return String(value);
 	if (typeof value === "string") return `${STRING}${value}${STRING}`;
-	if (Array.isArray(value)) return `[${value.map(gemmaValue).join(",")}]`;
-	if (typeof value === "object") {
-		const entries = Object.entries(value as Record<string, unknown>);
-		return `{${entries.map(([key, val]) => `${key}:${gemmaValue(val)}`).join(",")}}`;
-	}
 	return `${STRING}${String(value)}${STRING}`;
+}
+
+/** {@link gemmaValue} of an array or object `path` is inside of; each nested one is a nested step. */
+function* gemmaContainer(value: object, path: ContainerPath): NestedWalk<string> {
+	path.enter(value);
+	const parts: string[] = [];
+	if (Array.isArray(value)) {
+		for (let index = 0; index < value.length; index++) {
+			// A hole renders empty, as `Array.prototype.map` then `join` leave it.
+			if (!(index in value)) {
+				parts.push("");
+				continue;
+			}
+			const item: unknown = value[index];
+			parts.push(
+				item !== null && typeof item === "object"
+					? ((yield gemmaContainer(item, path)) as string)
+					: gemmaScalar(item),
+			);
+		}
+		path.leave(value);
+		return `[${parts.join(",")}]`;
+	}
+	for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+		const rendered =
+			item !== null && typeof item === "object" ? ((yield gemmaContainer(item, path)) as string) : gemmaScalar(item);
+		parts.push(`${key}:${rendered}`);
+	}
+	path.leave(value);
+	return `{${parts.join(",")}}`;
 }
 
 function parseMaybeJson(text: string): unknown {

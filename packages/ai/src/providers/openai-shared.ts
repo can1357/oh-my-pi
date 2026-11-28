@@ -34,6 +34,7 @@ import {
 	logger,
 	parseImageMetadata,
 	parseStreamingJsonThrottled,
+	stringifyDeepJson,
 	stringifyJson,
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
@@ -2758,6 +2759,14 @@ function ensureRequiredResponsesReasoningReplay(
 	return changed ? repaired : items;
 }
 
+/**
+ * A rebuilt turn writes its tool calls' arguments, which are any JSON, on every request that replays it
+ * (another model's turn, a resumed connection-bound session): arguments nested past `JSON.stringify`'s
+ * recursion skip the attempt that would run out of stack (1.5 s or more each time) and go to the deep
+ * writer. A bigint is written as its decimal string, as `stringifyJson` writes it.
+ */
+const REBUILT_ARGUMENTS_JSON = { bigintAsString: true, probeDepth: true } as const;
+
 export function convertResponsesAssistantMessage<TApi extends Api>(
 	assistantMsg: AssistantMessage,
 	model: Model<TApi>,
@@ -2923,7 +2932,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 			call_id: normalized.callId,
 			name: encodeResponsesToolName(functionName, toolNaming),
 			...(block.namespace ? { namespace: block.namespace } : {}),
-			arguments: stringifyJson(block.arguments) ?? "null",
+			arguments: stringifyDeepJson(block.arguments, REBUILT_ARGUMENTS_JSON) ?? "null",
 		});
 	}
 

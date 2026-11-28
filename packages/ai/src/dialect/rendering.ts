@@ -1,4 +1,4 @@
-import { stringifyJson as stringifyJsonValue } from "@oh-my-pi/pi-utils";
+import { ContainerPath, type NestedWalk, runNested, stringifyDeepJson } from "@oh-my-pi/pi-utils";
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from "../types";
 import { buildArgShapes, type ToolArgShape } from "./coercion";
 import type { DialectRenderOptions, DialectToolResult } from "./types";
@@ -16,8 +16,15 @@ export function harmonyRecipient(name: string): string {
 	return name.startsWith("functions.") ? name : `functions.${name}`;
 }
 
+/**
+ * A transcript writes every tool call's arguments, which are any JSON: arguments nested past
+ * `JSON.stringify`'s recursion skip the attempt that would run out of stack (1.5 s or more each
+ * time) and go to the deep writer. A bigint is written as its decimal string.
+ */
+const TRANSCRIPT_JSON = { bigintAsString: true, probeDepth: true } as const;
+
 export function stringifyJson(value: unknown): string {
-	return stringifyJsonValue(value) ?? "null";
+	return stringifyDeepJson(value, TRANSCRIPT_JSON) ?? "null";
 }
 
 /**
@@ -46,22 +53,57 @@ function pyArgValue(value: unknown): string {
 	return pyValue(value);
 }
 
-/** Render a JSON-ish value as a Python literal (`True`/`False`/`None`, escaped strings, lists, dicts). */
+/**
+ * Render a JSON-ish value as a Python literal (`True`/`False`/`None`, escaped strings, lists, dicts).
+ * The walk keeps its own stack ({@link runNested}): a tool call's arguments are any JSON, as deep
+ * as `JSON.parse` reads.
+ */
 export function pyValue(value: unknown): string {
+	return value !== null && typeof value === "object"
+		? runNested(pyContainer(value, new ContainerPath()))
+		: pyScalar(value);
+}
+
+/** {@link pyValue} of a value that is not an object or array. */
+function pyScalar(value: unknown): string {
 	if (value === null || value === undefined) return "None";
 	if (typeof value === "boolean") return value ? "True" : "False";
 	if (typeof value === "number") return Number.isFinite(value) ? String(value) : pyString(String(value));
 	if (typeof value === "string") return pyString(value);
-	if (Array.isArray(value)) return `[${value.map(pyValue).join(", ")}]`;
-	if (typeof value === "object") {
+	return pyString(String(value));
+}
+
+/** {@link pyValue} of a list or dict `path` is inside of; each nested list or dict is a nested step. */
+function* pyContainer(value: object, path: ContainerPath): NestedWalk<string> {
+	path.enter(value);
+	let text: string;
+	if (Array.isArray(value)) {
+		const items: string[] = [];
+		for (let index = 0; index < value.length; index++) {
+			// A hole renders empty, as `Array.prototype.map` then `join` leave it.
+			if (!(index in value)) {
+				items.push("");
+				continue;
+			}
+			const item: unknown = value[index];
+			items.push(
+				item !== null && typeof item === "object" ? ((yield pyContainer(item, path)) as string) : pyScalar(item),
+			);
+		}
+		text = `[${items.join(", ")}]`;
+	} else {
 		const record = value as Record<string, unknown>;
 		let entries = "";
 		for (const key in record) {
-			entries += `${entries ? ", " : ""}${pyString(key)}: ${pyValue(record[key])}`;
+			const item = record[key];
+			const rendered =
+				item !== null && typeof item === "object" ? ((yield pyContainer(item, path)) as string) : pyScalar(item);
+			entries += `${entries ? ", " : ""}${pyString(key)}: ${rendered}`;
 		}
-		return `{${entries}}`;
+		text = `{${entries}}`;
 	}
-	return pyString(String(value));
+	path.leave(value);
+	return text;
 }
 
 function pyString(value: string): string {

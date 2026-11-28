@@ -429,6 +429,12 @@
         return p;
       }
 
+      // pi-utils' JSON writer, which the viewer bundle exposes (`collab-web/src/export-standalone.ts`).
+      // It keeps its own stack, so a value nested deeper than the browser's `JSON.stringify` reaches
+      // (a session entry is as deep as `JSON.parse` reads) is still written, and with a `limit` a
+      // label stops at its cut instead of writing the whole value on each render.
+      const { stringifyJsonIteratively } = globalThis.ompJson;
+
       function formatToolCall(name, args) {
         switch (name) {
           case 'read': {
@@ -461,8 +467,8 @@
           case 'ls':
             return `[ls: ${shortenPath(String(args.path || '.'))}]`;
           default: {
-            const argsStr = JSON.stringify(args).slice(0, 40);
-            return `[${name}: ${argsStr}${JSON.stringify(args).length > 40 ? '...' : ''}]`;
+            const argsHead = stringifyJsonIteratively(args, { limit: 40 }) ?? '';
+            return `[${name}: ${argsHead.slice(0, 40)}${argsHead.length > 40 ? '...' : ''}]`;
           }
         }
       }
@@ -1268,7 +1274,7 @@
         if (entry.type === 'custom_message' && entry.display) {
           return `<div class="hook-message" id="${entryId}">${tsHtml}
             <div class="hook-type">[${escapeHtml(entry.customType)}]</div>
-            <div class="markdown-content">${safeMarkedParse(typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content))}</div>
+            <div class="markdown-content">${safeMarkedParse(typeof entry.content === 'string' ? entry.content : (stringifyJsonIteratively(entry.content) ?? ''))}</div>
           </div>`;
         }
 

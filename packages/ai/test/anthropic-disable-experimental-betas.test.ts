@@ -4,6 +4,7 @@ import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { withEnv } from "./helpers";
+import { DEEP_LEVELS, nestedChain, nestingOf } from "./helpers/deep-nesting";
 
 const BINDING_BETA = "thinking-binding-controls-2026-08-01";
 const CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";
@@ -35,7 +36,7 @@ interface CapturedRequest {
 		context_management?: unknown;
 		fallback_credit_token?: string;
 		fallbacks?: unknown;
-		messages?: unknown;
+		messages?: Array<{ role: string; content: string | Array<Record<string, unknown>> }>;
 		output_config?: { effort?: string; task_budget?: unknown };
 		tools?: Array<Record<string, unknown>>;
 	};
@@ -205,6 +206,68 @@ describe("CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS", () => {
 			expect(request.beta).not.toContain(CONTEXT_MANAGEMENT_BETA);
 			// The fresh body's own betas ride, not the saved list describing the old body.
 			expect(request.beta).toContain("effort-2025-11-24");
+		});
+	});
+
+	// A frozen request replays the conversation, whose tool calls' arguments are any JSON, as deep as a transcript
+	// line holds; `structuredClone` runs out of stack near 40,000 levels.
+	it("redeems a frozen fallback-credit request whose tool arguments nest 50,000 levels", async () => {
+		const input = nestedChain();
+		await withEnv({ ...GATEWAY_ENV, CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1" }, async () => {
+			const request = await captureRequest(anthropicModel(), {
+				fallbackCreditRedemption: {
+					token: "fct_frozen",
+					prefillClaim: false,
+					params: {
+						model: "claude-fable-5-1",
+						messages: [
+							{ role: "user", content: "hi" },
+							{ role: "assistant", content: [{ type: "tool_use", id: "toolu_1", name: "inspect", input }] },
+							{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] },
+						],
+						max_tokens: 1024,
+						stream: true,
+					},
+					betas: [],
+					expiresAt: Date.now() + 60_000,
+				},
+			});
+			// The frozen body carries no withheld field, so it is redeemed as frozen.
+			expect(request.body.fallback_credit_token).toBe("fct_frozen");
+			const replayed = request.body.messages?.[1]?.content;
+			expect(nestingOf(typeof replayed === "string" ? undefined : replayed?.[0]?.input)).toEqual({
+				levels: DEEP_LEVELS,
+				bottom: { leaf: "bottom" },
+			});
+		});
+	}, 30_000);
+
+	// The check compares the body with a copy the switch's fields were withheld from: the copy keeps a value that is
+	// not JSON data (a `Date` stays one), so a body that holds one, and nothing withheld, equals its copy.
+	it("redeems a frozen fallback-credit request whose tool arguments hold a value that is not JSON data", async () => {
+		await withEnv({ ...GATEWAY_ENV, CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1" }, async () => {
+			const request = await captureRequest(anthropicModel(), {
+				fallbackCreditRedemption: {
+					token: "fct_frozen",
+					prefillClaim: false,
+					params: {
+						model: "claude-fable-5-1",
+						messages: [
+							{ role: "user", content: "hi" },
+							{
+								role: "assistant",
+								content: [{ type: "tool_use", id: "toolu_1", name: "inspect", input: { when: new Date(0) } }],
+							},
+							{ role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "ok" }] },
+						],
+						max_tokens: 1024,
+						stream: true,
+					},
+					betas: [],
+					expiresAt: Date.now() + 60_000,
+				},
+			});
+			expect(request.body.fallback_credit_token).toBe("fct_frozen");
 		});
 	});
 

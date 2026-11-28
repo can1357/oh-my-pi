@@ -8,7 +8,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { presentNarrationAsAnswer } from "@oh-my-pi/pi-ai/utils/narration";
-import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { $flag, logger, postmortem, sanitizeText, stringifyDeepJson } from "@oh-my-pi/pi-utils";
 import { HINDSIGHT_NOTICE_SOURCE } from "../hindsight/state";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
@@ -121,6 +121,13 @@ export function printableEvent(sessionEvent: AgentSessionEvent): unknown {
 			return event;
 	}
 }
+
+/**
+ * JSON mode writes every event of the run, the whole conversation again in `agent_end`: an event
+ * nested past `JSON.stringify`'s recursion (a tool call's arguments are any JSON) skips the attempt
+ * that would run out of stack (1.5 s or more each time) and goes to the deep writer.
+ */
+const EVENT_JSON = { probeDepth: true } as const;
 
 /**
  * Serialized print-mode stdout.
@@ -389,7 +396,7 @@ async function runPrintModeCore(
 	session.subscribe(event => {
 		// In JSON mode, output all events
 		if (mode === "json") {
-			stdout.writeLine(`${JSON.stringify(printableEvent(event))}\n`);
+			stdout.writeLine(`${stringifyDeepJson(printableEvent(event), EVENT_JSON)}\n`);
 		} else if (
 			event.type === "notice" &&
 			(event.source === CREDENTIAL_DISABLED_NOTICE_SOURCE ||

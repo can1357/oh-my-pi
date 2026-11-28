@@ -31,15 +31,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
+	deep::{self, SERDE_JSON_MAX_DEPTH, drop_deep, drop_deep_tree_data, nests_deeper_than},
 	frame::{FrameDecoder, MAX_FRAME_BYTES, MAX_REASSEMBLED_BYTES},
 	host_tool::{HostTool, HostToolContext, text_payload},
 	host_uri::{HostUri, HostUriContext, uri_scheme},
 	turn::PromptTurn,
 	wire::{
-		AgentMessage, Command, GetMessagesCommand, GetMessagesPageCommand, HostToolResult,
-		HostUriOperation, HostUriResult, NegotiateProtocolCommand, PromptCommand, PromptResultEvent,
-		ReadyEvent, RpcAgentEvent, RpcInbound, RpcNotification, RpcResponse, RpcServerFrame,
-		SetHostToolsCommand, SetHostUriSchemesCommand,
+		AgentMessage, Command, GetMessagesCommand, GetMessagesPageCommand, GetTreeCommand,
+		HostToolResult, HostUriOperation, HostUriResult, NegotiateProtocolCommand, PromptCommand,
+		PromptResultEvent, ReadyEvent, RpcAgentEvent, RpcInbound, RpcNotification, RpcResponse,
+		RpcServerFrame, SetHostToolsCommand, SetHostUriSchemesCommand,
 	},
 };
 
@@ -117,9 +118,16 @@ pub enum Event {
 	/// Unsolicited frame; unrecognized types arrive as
 	/// [`RpcNotification::Unknown`].
 	Notification(RpcNotification),
-	/// A response whose id matched no pending call.
+	/// A response whose id matched no pending call (one that timed out, among
+	/// others). Its `data` is `None` when it nested deeper than `serde_json`
+	/// reads (128 levels), as a long session's `get_tree` answer does: such a
+	/// value is dropped with [`drop_deep`](crate::drop_deep), since dropping it
+	/// by recursion would overflow the stack.
 	UnmatchedResponse(RpcResponse),
-	/// A known frame type whose payload failed to decode.
+	/// A known frame type whose payload failed to decode. A `get_tree` answer
+	/// here has no `data` when its `data` nested deeper than `serde_json` reads:
+	/// that is dropped with [`drop_deep`](crate::drop_deep), as for
+	/// [`UnmatchedResponse`](Self::UnmatchedResponse).
 	Undecodable { raw: Value, error: String },
 }
 
@@ -369,7 +377,7 @@ impl Shared {
 			if text.is_empty() {
 				continue;
 			}
-			let raw: Value = match serde_json::from_slice(text) {
+			let raw: Value = match deep::parse(text) {
 				Ok(raw) => raw,
 				Err(error) => {
 					return Closure::Protocol(format!("Failed to decode RPC output: {error}"));
@@ -409,9 +417,38 @@ impl Shared {
 			},
 			_ => {},
 		}
+		// A response's `data` is moved into the decoded response, never rebuilt
+		// through serde, which recurses once per level (see `deep`).
+		let is_response = frame.get("type").and_then(Value::as_str) == Some("response");
+		let data = is_response
+			.then(|| frame.as_object_mut()?.remove("data"))
+			.flatten();
 		let decoded = match RpcServerFrame::deserialize(&frame) {
 			Ok(decoded) => decoded,
 			Err(error) => {
+				// The call this response answers fails now, not at its timeout.
+				if is_response
+					&& let Some((_, waiter)) = frame
+						.get("id")
+						.and_then(Value::as_str)
+						.and_then(|id| self.state().pending.remove(id))
+				{
+					let _ = waiter.send(Err(Error::Json(error)));
+					if let Some(data) = data {
+						drop_deep(data);
+					}
+					drop_deep(frame);
+					return;
+				}
+				if let (Some(data), Some(members)) = (data, frame.as_object_mut()) {
+					// Only a get_tree answer's data can nest that deep (see
+					// `deep::parse`).
+					if nests_deeper_than(&data, SERDE_JSON_MAX_DEPTH) {
+						drop_deep(data);
+					} else {
+						members.insert("data".to_owned(), data);
+					}
+				}
 				let error = error.to_string();
 				if frame.get("type").and_then(Value::as_str) == Some("prompt_result")
 					&& let Some(id) = frame.get("id").and_then(Value::as_str)
@@ -425,9 +462,19 @@ impl Shared {
 			},
 		};
 		let event = match decoded {
-			RpcServerFrame::Response(response) => match self.response(response) {
-				Some(response) => Event::UnmatchedResponse(response),
-				None => return,
+			RpcServerFrame::Response(mut response) => {
+				// `data: null` decodes as no data, as serde decodes it.
+				response.data = data.filter(|data| !data.is_null());
+				// A failure's deep data would drop by recursion (see
+				// `deep::parse`).
+				if !response.success {
+					drop_deep_tree_data(&mut response);
+				}
+				let Some(mut response) = self.response(response) else {
+					return;
+				};
+				drop_deep_tree_data(&mut response);
+				Event::UnmatchedResponse(response)
 			},
 			// Host tool and URI frames were consumed above; only malformed ones get here.
 			RpcServerFrame::RpcHostRequest(_) => return,
@@ -438,15 +485,31 @@ impl Shared {
 			RpcServerFrame::Unknown(raw) => Event::Notification(RpcNotification::Unknown(raw)),
 		};
 		// The host may drop the receiver; keep serving calls.
-		let _ = events.send(event);
+		if let Err(mpsc::SendError(Event::UnmatchedResponse(RpcResponse {
+			data: Some(data), ..
+		}))) = events.send(event)
+		{
+			drop_deep(data);
+		}
 	}
 
 	/// Delivers a response to its waiter; returns it when nobody waits for it.
-	fn response(&self, response: RpcResponse) -> Option<RpcResponse> {
+	fn response(&self, mut response: RpcResponse) -> Option<RpcResponse> {
 		let mut state = self.state();
 		if let Some(id) = &response.id {
-			if let Some((_, waiter)) = state.pending.remove(id) {
-				let _ = waiter.send(Ok(response));
+			if let Some((command, waiter)) = state.pending.remove(id) {
+				// Deep data reaches only the get_tree call it answers (see
+				// `deep::parse`).
+				if command != GetTreeCommand::NAME {
+					drop_deep_tree_data(&mut response);
+				}
+				// A call that timed out meanwhile no longer takes it.
+				if let Err(mpsc::SendError(Ok(RpcResponse { data: Some(data), .. }))) =
+					waiter.send(Ok(response))
+				{
+					drop(state);
+					drop_deep(data);
+				}
 				return None;
 			}
 			if !response.success {
@@ -935,6 +998,11 @@ impl Client {
 			Ok(response) => response?,
 			Err(RecvTimeoutError::Timeout) => {
 				self.shared.state().pending.remove(id);
+				// A response the reader sent just before the entry went is still
+				// in the channel: drop its data with the loop, not by recursion.
+				if let Ok(Ok(RpcResponse { data: Some(data), .. })) = rx.try_recv() {
+					drop_deep(data);
+				}
 				return Err(Error::Timeout { command: command.to_owned() });
 			},
 			Err(RecvTimeoutError::Disconnected) => return Err(Error::Closed),

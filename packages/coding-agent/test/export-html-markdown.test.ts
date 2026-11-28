@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as vm from "node:vm";
 import { type Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
+import { stringifyJsonIteratively } from "@oh-my-pi/pi-utils/json";
 import { Marked } from "@oh-my-pi/pi-utils/marked";
 
 const [templateHtml, shellHtml, templateJs] = await Promise.all([
@@ -64,6 +65,7 @@ function renderSession(session: MinimalSession) {
 		window,
 		document,
 		ompMarkdown: { Marked },
+		ompJson: { stringifyJsonIteratively },
 		hljs: {
 			getLanguage: () => false,
 			highlight: () => ({ value: "" }),

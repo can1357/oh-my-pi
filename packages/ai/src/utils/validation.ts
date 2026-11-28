@@ -13,7 +13,14 @@
 
 import { type Type, type } from "@oh-my-pi/omptype";
 import { parseLocalRefPointer } from "@oh-my-pi/omptype";
-import { isRecord, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import {
+	ContainerPath,
+	isRecord,
+	type NestedWalk,
+	runNested,
+	stringifyDeepJson,
+	structuredCloneJSON,
+} from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type { Tool, ToolCall } from "../types";
 import { upgradeJsonSchemaTo202012 } from "./schema/draft";
@@ -139,6 +146,13 @@ function tryCoerceBooleanToNumber(value: unknown, expectedTypes: string[]): { va
 	return { value: value ? 1 : 0, changed: true };
 }
 
+/**
+ * A container written into a string field: one nested past `JSON.stringify`'s recursion skips the attempt
+ * that would run out of stack (1.5 s or more) and goes to the deep writer, as tool arguments nest as deep as
+ * `JSON.parse` reads.
+ */
+const COERCED_STRING_JSON = { probeDepth: true } as const;
+
 function tryCoerceString(
 	value: unknown,
 	expectedTypes: string[],
@@ -154,7 +168,7 @@ function tryCoerceString(
 		// diagnosis — never a union-branch guess.
 		if (!allowLossy) return { value, changed: false };
 		try {
-			const stringified = JSON.stringify(value);
+			const stringified = stringifyDeepJson(value, COERCED_STRING_JSON);
 			if (stringified === undefined) return { value, changed: false };
 			return { value: stringified, changed: true };
 		} catch {
@@ -1113,50 +1127,47 @@ function trimIdentifierStringLeaf(input: unknown): unknown {
 /**
  * Recursively strip trailing line terminators from string values whose property
  * key matches {@link IDENTIFIER_STRING_KEYS}. Runs by property name only so it
- * fires uniformly across ArkType and plain JSON Schema tools.
+ * fires uniformly across ArkType and plain JSON Schema tools. The walk keeps its
+ * own stack ({@link runNested}): a tool call's arguments are any JSON, as deep
+ * as `JSON.parse` reads.
  */
 function normalizeIdentifierStringWhitespace(
 	value: unknown,
 	insideContent = false,
 ): { value: unknown; changed: boolean } {
-	if (insideContent) return { value, changed: false };
-	if (Array.isArray(value)) {
-		let changed = false;
-		let next = value;
-		for (let i = 0; i < value.length; i += 1) {
-			const normalized = normalizeIdentifierStringWhitespace(value[i]);
-			if (!normalized.changed) continue;
-			if (!changed) {
-				next = [...value];
-				changed = true;
-			}
-			next[i] = normalized.value;
-		}
-		return { value: changed ? next : value, changed };
-	}
+	if (insideContent || value === null || typeof value !== "object") return { value, changed: false };
+	const next = runNested(identifierStringsNode(value, new ContainerPath()));
+	return { value: next, changed: next !== value };
+}
 
-	if (value === null || typeof value !== "object") return { value, changed: false };
+/** {@link normalizeIdentifierStringWhitespace} of `value`, an object `path` is inside of: `value` itself when nothing in it changed. */
+function* identifierStringsNode(value: object, path: ContainerPath): NestedWalk {
+	path.enter(value);
+	if (Array.isArray(value)) {
+		let next: unknown[] | undefined;
+		for (let i = 0; i < value.length; i += 1) {
+			const item: unknown = value[i];
+			const normalized = item !== null && typeof item === "object" ? yield identifierStringsNode(item, path) : item;
+			if (normalized === item) continue;
+			next ??= [...value];
+			next[i] = normalized;
+		}
+		path.leave(value);
+		return next ?? value;
+	}
 
 	const source = value as Record<string, unknown>;
-	let changed = false;
-	let out: Record<string, unknown> = source;
+	let out: Record<string, unknown> | undefined;
 	for (const [key, entry] of Object.entries(source)) {
-		let nextEntry = entry;
 		if (Object.hasOwn(CONTENT_CARRYING_KEYS, key)) continue;
-		if (IDENTIFIER_STRING_KEYS.has(key)) {
-			const trimmed = trimIdentifierStringLeaf(entry);
-			if (trimmed !== entry) nextEntry = trimmed;
-		}
-		const nested = normalizeIdentifierStringWhitespace(nextEntry);
-		if (nested.changed) nextEntry = nested.value;
+		let nextEntry = IDENTIFIER_STRING_KEYS.has(key) ? trimIdentifierStringLeaf(entry) : entry;
+		if (nextEntry !== null && typeof nextEntry === "object") nextEntry = yield identifierStringsNode(nextEntry, path);
 		if (nextEntry === entry) continue;
-		if (!changed) {
-			out = { ...source };
-			changed = true;
-		}
+		out ??= { ...source };
 		out[key] = nextEntry;
 	}
-	return { value: changed ? out : value, changed };
+	path.leave(value);
+	return out ?? value;
 }
 
 // ============================================================================
@@ -1206,32 +1217,37 @@ function decodeDoubleEncodedKey(key: string): string | null {
  * time. Schema-agnostic by design: such keys are dropped before any schema pass
  * can map them, so this runs first. A key is only renamed when the decoded name
  * differs and does not already exist on the same object — renaming would
- * otherwise clobber a sibling and silently lose data.
+ * otherwise clobber a sibling and silently lose data. The walk keeps its own
+ * stack ({@link runNested}): a tool call's arguments are any JSON, as deep as
+ * `JSON.parse` reads.
  */
 function normalizeDoubleEncodedKeys(value: unknown): { value: unknown; changed: boolean } {
-	if (Array.isArray(value)) {
-		let changed = false;
-		let next = value;
-		for (let i = 0; i < value.length; i += 1) {
-			const normalized = normalizeDoubleEncodedKeys(value[i]);
-			if (!normalized.changed) continue;
-			if (!changed) {
-				next = [...value];
-				changed = true;
-			}
-			next[i] = normalized.value;
-		}
-		return { value: changed ? next : value, changed };
-	}
-
 	if (value === null || typeof value !== "object") return { value, changed: false };
+	const next = runNested(doubleEncodedKeysNode(value, new ContainerPath()));
+	return { value: next, changed: next !== value };
+}
+
+/** {@link normalizeDoubleEncodedKeys} of `value`, an object `path` is inside of: `value` itself when nothing in it changed. */
+function* doubleEncodedKeysNode(value: object, path: ContainerPath): NestedWalk {
+	path.enter(value);
+	if (Array.isArray(value)) {
+		let next: unknown[] | undefined;
+		for (let i = 0; i < value.length; i += 1) {
+			const item: unknown = value[i];
+			const normalized = item !== null && typeof item === "object" ? yield doubleEncodedKeysNode(item, path) : item;
+			if (normalized === item) continue;
+			next ??= [...value];
+			next[i] = normalized;
+		}
+		path.leave(value);
+		return next ?? value;
+	}
 
 	const source = value as Record<string, unknown>;
 	let changed = false;
 	const out: Record<string, unknown> = {};
 	for (const [key, entry] of Object.entries(source)) {
-		const normalizedChild = normalizeDoubleEncodedKeys(entry);
-		const nextChild = normalizedChild.changed ? normalizedChild.value : entry;
+		const nextChild = entry !== null && typeof entry === "object" ? yield doubleEncodedKeysNode(entry, path) : entry;
 
 		const decodedKey = decodeDoubleEncodedKey(key);
 		// `Object.hasOwn` (not `in`) so a decoded `constructor`/`toString` is not
@@ -1244,7 +1260,7 @@ function normalizeDoubleEncodedKeys(value: unknown): { value: unknown; changed: 
 				? decodedKey
 				: key;
 
-		if (targetKey !== key || normalizedChild.changed) changed = true;
+		if (targetKey !== key || nextChild !== entry) changed = true;
 		// `defineProperty` so a decoded `__proto__` key becomes an own property
 		// instead of mutating the result object's prototype.
 		Object.defineProperty(out, targetKey, {
@@ -1254,8 +1270,8 @@ function normalizeDoubleEncodedKeys(value: unknown): { value: unknown; changed: 
 			configurable: true,
 		});
 	}
-
-	return { value: changed ? out : value, changed };
+	path.leave(value);
+	return changed ? out : value;
 }
 
 // ============================================================================
@@ -1722,6 +1738,7 @@ function coerceArgsFromIssues(
 		if (coercedValue === undefined) continue;
 
 		if (!owned) {
+			// A `Date` or `Map` beside the repaired field stays one, at any depth `JSON.parse` reads.
 			nextArgs = structuredCloneJSON(nextArgs);
 			owned = true;
 			changed = true;
@@ -2018,18 +2035,48 @@ export function validateToolCall(tools: Tool[], toolCall: ToolCall): ToolCall["a
 /** Cap per-field string lengths when embedding received args in an error message. */
 const MAX_ERROR_ARG_STRING_LENGTH = 256;
 
+/**
+ * Received arguments in a validation error are indented by two spaces; a value nested past 1,000
+ * levels is written on one line, where indentation grows with the square of its depth.
+ */
+const ERROR_ARGS_JSON = { space: 2 } as const;
+
+/**
+ * `value` with each string longer than {@link MAX_ERROR_ARG_STRING_LENGTH} cut. The walk keeps its own
+ * stack ({@link runNested}): a tool call's arguments are any JSON, as deep as `JSON.parse` reads.
+ */
 function truncateArgsForError(value: unknown): unknown {
-	if (typeof value === "string") {
-		if (value.length <= MAX_ERROR_ARG_STRING_LENGTH) return value;
-		return `${value.slice(0, MAX_ERROR_ARG_STRING_LENGTH)}… [truncated ${value.length - MAX_ERROR_ARG_STRING_LENGTH} chars]`;
-	}
-	if (Array.isArray(value)) return value.map(truncateArgsForError);
-	if (value !== null && typeof value === "object") {
-		const out: Record<string, unknown> = {};
-		for (const [key, entry] of Object.entries(value)) out[key] = truncateArgsForError(entry);
+	return value !== null && typeof value === "object"
+		? runNested(truncatedArgsNode(value, new ContainerPath()))
+		: truncatedArgLeaf(value);
+}
+
+/** {@link truncateArgsForError} of a value that is not an object: a string cut to its cap, any other as it is. */
+function truncatedArgLeaf(value: unknown): unknown {
+	if (typeof value !== "string" || value.length <= MAX_ERROR_ARG_STRING_LENGTH) return value;
+	return `${value.slice(0, MAX_ERROR_ARG_STRING_LENGTH)}… [truncated ${value.length - MAX_ERROR_ARG_STRING_LENGTH} chars]`;
+}
+
+/** {@link truncateArgsForError} of `value`, an object `path` is inside of; each child object is a nested step. */
+function* truncatedArgsNode(value: object, path: ContainerPath): NestedWalk {
+	path.enter(value);
+	if (Array.isArray(value)) {
+		const out: unknown[] = [];
+		for (const item of value) {
+			out.push(
+				item !== null && typeof item === "object" ? yield truncatedArgsNode(item, path) : truncatedArgLeaf(item),
+			);
+		}
+		path.leave(value);
 		return out;
 	}
-	return value;
+	const out: Record<string, unknown> = {};
+	for (const [key, entry] of Object.entries(value)) {
+		out[key] =
+			entry !== null && typeof entry === "object" ? yield truncatedArgsNode(entry, path) : truncatedArgLeaf(entry);
+	}
+	path.leave(value);
+	return out;
 }
 
 /** Options for {@link validateToolArguments}. */
@@ -2183,7 +2230,7 @@ export function validateToolArguments(
 
 	const errorMessage = `Validation failed for tool "${
 		toolCall.name
-	}":\n${errors}\n\nReceived arguments:\n${JSON.stringify(receivedArgs, null, 2)}`;
+	}":\n${errors}\n\nReceived arguments:\n${stringifyDeepJson(receivedArgs, ERROR_ARGS_JSON)}`;
 
 	throw new AIError.ValidationError(errorMessage);
 }

@@ -1,32 +1,17 @@
+import { jsonDeepEquals } from "@oh-my-pi/pi-utils";
 import type { JsonObject } from "./types";
 import { isJsonObject } from "./types";
 
+/**
+ * Whether two JSON values are equal ({@link jsonDeepEquals}): primitives as
+ * `Object.is` compares them, arrays element by element, and objects with the
+ * same keys holding equal values, at any depth `JSON.parse` reads (`const`,
+ * `enum` and `uniqueItems` compare a tool call's arguments). A value JSON does
+ * not hold (a `Date`, a `Map`, a class instance, a key holding `undefined`)
+ * compares as `Bun.deepEquals` compares it.
+ */
 export function areJsonValuesEqual(left: unknown, right: unknown): boolean {
-	if (Object.is(left, right)) {
-		return true;
-	}
-	if (Array.isArray(left) || Array.isArray(right)) {
-		if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
-			return false;
-		}
-		for (let i = 0; i < left.length; i += 1) {
-			if (!areJsonValuesEqual(left[i], right[i])) {
-				return false;
-			}
-		}
-		return true;
-	}
-	if (!isJsonObject(left) || !isJsonObject(right)) {
-		return false;
-	}
-	let rightLen = 0;
-	for (const _ in right) rightLen++;
-	let leftLen = 0;
-	for (const key in left) {
-		leftLen++;
-		if (!(key in right) || !areJsonValuesEqual(left[key], right[key])) return false;
-	}
-	return leftLen === rightLen;
+	return jsonDeepEquals(left, right);
 }
 
 export function mergeCompatibleEnumSchemas(existing: unknown, incoming: unknown): JsonObject | null {

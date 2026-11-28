@@ -28,6 +28,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { SessionStatsTracker } from "@oh-my-pi/pi-coding-agent/session/session-stats";
 import { formatShakeSummary } from "@oh-my-pi/pi-coding-agent/session/shake-types";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { DEEP_LEVELS, nestedChain, nestingOf } from "../../ai/test/helpers/deep-nesting";
 
 import {
 	cfgCompactionDropUseless,
@@ -88,7 +89,11 @@ describe("AgentSession shake", () => {
 	});
 
 	/** Seed a user → assistant(toolCall) → toolResult turn carrying a heavy bash result. */
-	function seedHeavyToolResult(text: string, toolName = "bash"): void {
+	function seedHeavyToolResult(
+		text: string,
+		toolName = "bash",
+		args: Record<string, unknown> = { command: "ls" },
+	): void {
 		const toolCallId = `call_${toolName}_${Math.random().toString(36).slice(2)}`;
 		sessionManager.appendMessage({
 			role: "user",
@@ -99,7 +104,7 @@ describe("AgentSession shake", () => {
 			role: "assistant",
 			content: [
 				{ type: "text", text: "working" },
-				{ type: "toolCall", id: toolCallId, name: toolName, arguments: { command: "ls" } },
+				{ type: "toolCall", id: toolCallId, name: toolName, arguments: args },
 			],
 			...apiInfo,
 			stopReason: "toolUse",
@@ -155,6 +160,28 @@ describe("AgentSession shake", () => {
 			const text = tr.content.map(b => (b.type === "text" ? b.text : "")).join("");
 			expect(text).toContain(`local://${result.artifactId}.log`);
 			expect(text).toContain("shaken");
+		});
+
+		// A tool call's arguments are any JSON, as deep as JSON.parse reads; shake snapshots the entries it rewrites.
+		it("elides a result whose call's arguments nest past JSON.stringify's reach", async () => {
+			seedHeavyToolResult("X".repeat(4000), "bash", { command: "ls", note: nestedChain() });
+			appendRecentProtectedTail();
+
+			const result = await session.shake("elide");
+
+			expect(result.toolResultsDropped).toBe(1);
+			const [toolResult] = branchToolResults();
+			expect(toolResult.prunedAt).toBeGreaterThan(0);
+			const call = sessionManager
+				.getBranch()
+				.flatMap(entry =>
+					entry.type === "message" && entry.message.role === "assistant" ? entry.message.content : [],
+				)
+				.find(block => block.type === "toolCall");
+			expect(call?.type === "toolCall" && nestingOf(call.arguments.note)).toEqual({
+				levels: DEEP_LEVELS,
+				bottom: { leaf: "bottom" },
+			});
 		});
 
 		it("continues artifact-less when ordinary shake cannot allocate an artifact", async () => {

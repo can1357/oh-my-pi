@@ -97,7 +97,21 @@ func WithHostTools(tools ...HostTool) Option {
 
 type pendingCall struct {
 	command string
-	reply   chan RpcResponse
+	reply   chan callReply
+}
+
+// callReply is what a pending call receives: its response, or why the frame
+// answering it did not decode.
+type callReply struct {
+	response RpcResponse
+	err      error
+}
+
+func (r callReply) data() (json.RawMessage, error) {
+	if r.err != nil {
+		return nil, r.err
+	}
+	return responseData(r.response)
 }
 
 // Client is a connection to an omp RPC server. The embedded Commands provides
@@ -293,7 +307,7 @@ func (c *Client) Call(ctx context.Context, command string, params any, timeout t
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	reply := make(chan RpcResponse, 1)
+	reply := make(chan callReply, 1)
 	c.mu.Lock()
 	if c.cause != nil {
 		c.mu.Unlock()
@@ -311,12 +325,12 @@ func (c *Client) Call(ctx context.Context, command string, params any, timeout t
 		return nil, err
 	}
 	select {
-	case response := <-reply:
-		return responseData(response)
+	case result := <-reply:
+		return result.data()
 	case <-c.closed:
 		select {
-		case response := <-reply:
-			return responseData(response)
+		case result := <-reply:
+			return result.data()
 		default:
 			return nil, c.Err()
 		}
@@ -345,7 +359,7 @@ func commandError(response RpcResponse) *CommandError {
 
 // release removes the pending entry of a call, unless a later call reusing
 // the id (WithRequestID) already owns it.
-func (c *Client) release(id string, reply chan RpcResponse) {
+func (c *Client) release(id string, reply chan callReply) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if call, ok := c.pending[id]; ok && call.reply == reply {
@@ -467,18 +481,25 @@ func (c *Client) handleLine(line []byte) error {
 
 func (c *Client) dispatch(line []byte) {
 	var frame RpcServerFrame
-	if err := json.Unmarshal(line, &frame); err != nil {
+	// Not json.Unmarshal, which first checks the whole line against encoding/json's
+	// nesting limit: a get_tree answer nests deeper (see splitObject).
+	if err := frame.UnmarshalJSON(line); err != nil {
+		// The members of a frame that did not decode as a whole; nil for one that is no object.
+		raw, _ := decodeObject(line, "")
+		tag := stringMember(raw, "type")
+		switch {
 		// Host requests are answered even when malformed (bad arguments or operation).
-		switch tag := peekTag(line, "type"); tag {
-		case "host_tool_call":
+		case tag == "host_tool_call":
 			c.handleHostToolCall(line)
 			return
-		case "host_uri_request":
+		case tag == "host_uri_request":
 			c.handleHostUriRequest(line)
 			return
-		default:
-			frame.Value = UnknownNotification{Type: tag, Raw: line, Err: err}
+		// The call this response answers fails now instead of at its timeout.
+		case tag == "response" && c.failCall(stringMember(raw, "id"), err):
+			return
 		}
+		frame.Value = UnknownNotification{Type: tag, Raw: line, Err: err}
 	}
 	switch value := frame.Value.(type) {
 	case RpcResponse:
@@ -550,7 +571,7 @@ func (c *Client) handleResponse(response RpcResponse) bool {
 	if response.ID != nil {
 		if call, ok := c.pending[*response.ID]; ok {
 			delete(c.pending, *response.ID)
-			call.reply <- response
+			call.reply <- callReply{response: response}
 			return true
 		}
 		if wait := c.prompts[*response.ID]; wait != nil && !response.Success {
@@ -583,7 +604,21 @@ func (c *Client) handleResponse(response RpcResponse) bool {
 	}
 	call := c.pending[target]
 	delete(c.pending, target)
-	call.reply <- response
+	call.reply <- callReply{response: response}
+	return true
+}
+
+// failCall fails the pending call id with the error its response frame did
+// not decode with; false when no call waits for id.
+func (c *Client) failCall(id string, err error) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	call, ok := c.pending[id]
+	if id == "" || !ok {
+		return false
+	}
+	delete(c.pending, id)
+	call.reply <- callReply{err: fmt.Errorf("omprpc: %s response: %w", call.command, err)}
 	return true
 }
 

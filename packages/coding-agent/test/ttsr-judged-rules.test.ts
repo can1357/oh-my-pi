@@ -7,6 +7,7 @@ import { JUDGED_CONTENT_MAX_TOKENS, TtsrManager } from "@oh-my-pi/pi-coding-agen
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "@oh-my-pi/pi-coding-agent/session/ttsr-coordinator";
 import { countTokens, Encoding } from "@oh-my-pi/pi-natives";
+import { nestedChain, nestedChainJson } from "../../ai/test/helpers/deep-nesting";
 
 function judgedRule(name: string, fields: Partial<Rule>): Rule {
 	return {
@@ -176,5 +177,24 @@ describe("TTSR judged rules", () => {
 		expect(tokens).toBeLessThanOrEqual(JUDGED_CONTENT_MAX_TOKENS);
 		expect(tokens).toBeGreaterThan(JUDGED_CONTENT_MAX_TOKENS - 50);
 		expect(sent[1]).toBe(english);
+	});
+
+	it("judges a tool call whose arguments nest past JSON.stringify's reach", async () => {
+		const { judge, requests } = fakeJudge({ [HAS_TODO]: 0.9 });
+		const { coordinator, warnings } = setup(
+			[judgedRule("no-todo", { question: HAS_TODO, scope: ["tool:mcp"] })],
+			judge,
+		);
+		const bottom = { leaf: "TODO: finish later" };
+
+		coordinator.onAssistantMessageEnd(
+			assistant([{ type: "toolCall", id: "call-1", name: "mcp", arguments: nestedChain(bottom) }], "toolUse"),
+		);
+		await coordinator.settleJudgments();
+
+		expect(requests).toHaveLength(1);
+		// The judge reads the arguments' JSON, cut to its state budget.
+		expect(nestedChainJson(bottom).startsWith(sentContent(requests[0]))).toBe(true);
+		expect(warnings.map(warning => warning.rules)).toEqual([["no-todo"]]);
 	});
 });

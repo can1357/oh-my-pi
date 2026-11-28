@@ -5,6 +5,7 @@ import { invalidateMessageCache } from "@oh-my-pi/pi-agent-core/compaction/messa
 import type { AgentContext, AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import type { Message, Tool, ToolExample } from "@oh-my-pi/pi-ai";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { nestedChain, nestingOf } from "../../ai/test/helpers/deep-nesting";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -902,4 +903,29 @@ describe("syncMessages detects tool_calls mutation", () => {
 		const rebuiltTc = (rebuilt.tool_calls as Array<{ function: { arguments: string } }>)[0];
 		expect(rebuiltTc.function.arguments).toBe('{"path":"/b"}');
 	});
+});
+
+// A tool call's arguments are any JSON and a resumed session holds them as deep as a transcript line does; each
+// request digests every synced message.
+describe("syncMessages over a tool call nested 50,000 levels", () => {
+	it("keeps a stable message stable and sees a change at its bottom", () => {
+		const call = (leaf: string) => ({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: "inspect", arguments: nestedChain({ leaf }) }],
+		});
+		const mgr = new AppendOnlyContextManager();
+		mgr.build(makeContext(), BUILD_OPTS);
+		const first = call("a");
+		mgr.syncMessages([{ role: "user", content: "q1" }, first, { role: "user", content: "q2" }]);
+
+		// The same messages again: nothing diverged, so the log keeps all three.
+		mgr.syncMessages([{ role: "user", content: "q1" }, first, { role: "user", content: "q2" }]);
+		expect(mgr.log.length).toBe(3);
+		// The middle message rewritten at its bottom: the log keeps only the prefix before it, then re-syncs.
+		mgr.syncMessages([{ role: "user", content: "q1" }, call("b"), { role: "user", content: "q2" }]);
+		const synced = mgr.log.toMessages() as unknown as Array<{ content: unknown }>;
+		expect(synced).toHaveLength(3);
+		const { bottom } = nestingOf((synced[1]!.content as Array<{ arguments: unknown }>)[0]!.arguments);
+		expect(bottom).toEqual({ leaf: "b" });
+	}, 30_000);
 });

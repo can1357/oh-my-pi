@@ -24,7 +24,7 @@ import {
 	logger,
 	pathIsWithin,
 	spillIdOfFileName,
-	stringifyJson,
+	structuredCloneDeep,
 	toError,
 	withLoopPhase,
 } from "@oh-my-pi/pi-utils";
@@ -132,7 +132,7 @@ import {
 	worktreeSessionDirs,
 	writeTerminalBreadcrumb,
 } from "./session-paths";
-import { forgetExternalizedImages, prepareEntryForPersistence } from "./session-persistence";
+import { forgetExternalizedImages, persistedEntryText } from "./session-persistence";
 import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
 import {
 	FileSessionStorage,
@@ -1733,7 +1733,7 @@ export class SessionManager {
 	}
 
 	#lineFor(entry: FileEntry): string {
-		return `${stringifyJson(prepareEntryForPersistence(entry, this.#blobs)) ?? "null"}\n`;
+		return `${persistedEntryText(entry, this.#blobs)}\n`;
 	}
 	#recordDurableAppend(line: string): void {
 		this.#expectedDiskSize = (this.#expectedDiskSize ?? 0) + Buffer.byteLength(line, "utf8");
@@ -2973,7 +2973,8 @@ export class SessionManager {
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
 		manager.#header.inheritedThroughEntryId = inheritedPrefixEnd(this.#header.inheritedThroughEntryId, this.#entries);
-		manager.#entries = structuredClone(this.#entries);
+		// As `structuredClone` copies (a `Date` or `Map` in a custom entry stays one), as deep as a transcript line holds.
+		manager.#entries = structuredCloneDeep(this.#entries);
 		manager.#index.rebuild(manager.#entries);
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();

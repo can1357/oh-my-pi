@@ -7,7 +7,7 @@
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, stringifyDeepJson } from "@oh-my-pi/pi-utils";
 import type { TtsrMatchContext, TtsrOutput } from "../export/ttsr";
 
 /** Tool surface TTSR reads: identity plus the optional matcher hooks. */
@@ -35,6 +35,21 @@ const OPEN_OBJECT = Symbol("{");
 const OPEN_ARRAY = Symbol("[");
 const CLOSE = Symbol("}");
 const TRUNCATED = Symbol("…");
+
+/**
+ * Every tool call without matcher hooks has its arguments written, on the event path the session
+ * awaits: arguments nested past `JSON.stringify`'s recursion skip the attempt that would run out of
+ * stack (1.5 s or more) and go to the deep writer.
+ */
+const ARGUMENTS_JSON = { probeDepth: true } as const;
+
+/**
+ * The text TTSR matches a tool call's arguments as: a string as it is, any other value its JSON,
+ * as deep as a transcript line holds; undefined for a value with no JSON text.
+ */
+export function toolArgumentsText(args: unknown): string | undefined {
+	return typeof args === "string" ? args : stringifyDeepJson(args, ARGUMENTS_JSON);
+}
 
 /**
  * Every key and primitive value of the arguments tree in walk order, with
@@ -178,8 +193,8 @@ export class TtsrToolInspector {
 				subject: `\`${toolCall.name}\` call on \`${entry.path}\``,
 			}));
 		}
-		const args = toolCall.arguments;
-		const content = this.digest(toolCall) ?? (typeof args === "string" ? args : JSON.stringify(args ?? {}));
+		// Arguments with no JSON text (a `toJSON` that returns undefined) are judged as absent ones are.
+		const content = this.digest(toolCall) ?? toolArgumentsText(toolCall.arguments ?? {}) ?? "{}";
 		const filePath = context.filePaths?.[0];
 		const subject = filePath ? `\`${toolCall.name}\` call on \`${filePath}\`` : `\`${toolCall.name}\` call`;
 		return [{ content, context, subject }];

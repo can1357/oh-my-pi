@@ -9,10 +9,12 @@ import type { ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import { inferCopilotInitiator } from "@oh-my-pi/pi-ai/providers/github-copilot-headers";
 import {
 	convertToLlm,
+	didSessionMessagesChange,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	wrapSteeringForModel,
 } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
+import { nestedChain } from "../../ai/test/helpers/deep-nesting";
 
 function expectAttribution(message: Message | undefined, expected: "user" | "agent" | undefined): void {
 	expect(message).toBeDefined();
@@ -511,5 +513,34 @@ describe("wrapSteeringForModel", () => {
 		expect(wrapped[1]).not.toBe(second);
 		expect(getUserText(wrapped[0])).toContain("first steer");
 		expect(getUserText(wrapped[1])).toContain("second steer");
+	});
+});
+
+// A reload of the same session compares its messages before and after; a tool call's arguments are any JSON,
+// and a transcript line holds them as deep as `JSON.parse` reads.
+describe("didSessionMessagesChange", () => {
+	const assistant = (leaf: string): AgentMessage => {
+		return {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: "inspect", arguments: nestedChain({ leaf }) }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+	};
+
+	it("compares tool calls whose arguments nest 50,000 levels: the same ones are no change, another bottom is", () => {
+		expect(didSessionMessagesChange([assistant("a")], [assistant("a")])).toBe(false);
+		expect(didSessionMessagesChange([assistant("a")], [assistant("b")])).toBe(true);
 	});
 });

@@ -10,6 +10,15 @@
 ### Added
 
 - Added `getBunStubDir()` to expose the cache directory used for the `bun` executable stub in compiled applications.
+- Added `stringifyDeepJson` and `stringifyJsonIteratively`, which write `JSON.stringify`'s bytes for a value nested deeper than it can reach
+- Added a `bigintAsString` option to `stringifyDeepJson` and `stringifyJsonIteratively`, which writes a bigint as its decimal string
+- Added `jsonDeepEquals`, `Bun.deepEquals` for JSON-shaped values of any depth, including a cycle through arrays and plain objects
+- Added a `space` option to `stringifyDeepJson`, which indents a value up to `INDENTED_JSON_LEVELS` (1,000) levels deep and writes a deeper one on one line, and `nestsDeeperThan`, the depth check it uses
+- Added `probeDepth` and `deep` options to `stringifyDeepJson`, which write a value nested past `DEEP_JSON_LEVELS` (10,000), or one the caller knows is deep, without first trying `JSON.stringify`
+- Added a `limit` option to `stringifyJsonIteratively`, which stops writing once the text passes that many characters
+- Added `structuredCloneDeep`, `structuredClone` for a value nested deeper than it can reach; a `Map`, `Set`, `Date` or class instance in such a value is copied by a `structuredClone` call of its own, so an object it shares with the rest of the value becomes two copies
+- Added `isStackOverflow`, which tells the engine's stack overflow from a `RangeError` a value's own code throws
+- Added the `isNonNullObject` and `isJsonRecord` type guards
 
 ### Fixed
 
@@ -18,6 +27,9 @@
 - Fixed 429 retry guidance to honor quota reset timestamps in `rests until <ISO-8601>` responses.
 - Fixed `parseImageMetadata` failing to report dimensions for short lossless WebP (VP8L) headers.
 - Fixed requests using `NODE_EXTRA_CA_CERTS` (including remote MCP HTTP/SSE) dropping system CAs added by `NODE_USE_SYSTEM_CA=1`; the extra bundle now extends the runtime default trust store ([#18556](https://github.com/can1357/oh-my-pi/issues/18556))
+- Fixed `cloneJsonTree` failing with `Maximum call stack size exceeded` on a tree nested more than about 22,500 levels deep; a cycle now throws a `TypeError`
+- Fixed `structuredCloneJSON` failing with `Maximum call stack size exceeded` on a value nested more than about 40,000 levels deep
+- Fixed the ACP `ndJsonStream` transport failing with `Maximum call stack size exceeded` on a message nested more than about 40,000 levels deep
 
 ## [19.2.1] - 2026-11-25
 

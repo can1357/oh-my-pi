@@ -1124,3 +1124,236 @@ fn drop_kills_the_process_group() {
 	within(Duration::from_secs(5), move || drop(client));
 	assert_gone([leader, background]);
 }
+
+// ---- responses ----
+
+// If this regresses, a command whose response frame does not decode waits out
+// its whole deadline instead of failing at once.
+#[test]
+fn a_response_that_cannot_be_decoded_fails_its_call_at_once() {
+	let (mut client, _events, mut server) = connect(ready_v2(), Vec::new());
+	client.set_default_timeout(Duration::from_secs(10));
+	let script = thread::spawn(move || {
+		let frame = server.expect("get_state");
+		server.send(
+			&json!({"type": "response", "id": frame["id"], "command": "get_state", "success": "yes"}),
+		);
+		let frame = server.expect("get_last_assistant_text");
+		server.respond(&frame, json!({"text": "still serving"}));
+		server
+	});
+	let started = std::time::Instant::now();
+	let error = client.call(&GetStateCommand {}).unwrap_err();
+	assert!(matches!(error, Error::Json(_)), "{error:?}");
+	assert!(started.elapsed() < Duration::from_secs(5), "failed after {:?}", started.elapsed());
+	// The client still serves calls.
+	assert_eq!(
+		client
+			.call(&GetLastAssistantTextCommand {})
+			.unwrap()
+			.as_deref(),
+		Some("still serving")
+	);
+	drop(script.join().unwrap());
+}
+
+// If this regresses, a late response whose `data` is `null` reaches the event
+// receiver as `Some(Value::Null)` instead of the `None` serde decodes it to.
+#[test]
+fn a_late_response_with_null_data_carries_no_data() {
+	let (_client, events, mut server) = connect(ready_v2(), Vec::new());
+	server.send(
+		&json!({"type": "response", "id": "late", "command": "get_state", "success": true, "data": null}),
+	);
+	match next_event(&events) {
+		Event::UnmatchedResponse(response) => assert_eq!(response.data, None),
+		other => panic!("expected the late response, got {other:?}"),
+	}
+}
+
+// If this regresses, a late `get_tree` answer of a long session reaches the
+// event receiver whole, and dropping the event overflows the stack and aborts
+// the process.
+#[test]
+fn a_late_response_deeper_than_serde_json_reads_arrives_without_its_data() {
+	let (_client, events, mut server) = connect(ready_v2(), Vec::new());
+	let depth = 100_000;
+	let line = format!(
+		r#"{{"type":"response","id":"late","command":"get_tree","success":true,"data":{{"tree":{}{}}}}}"#,
+		"[".repeat(depth),
+		"]".repeat(depth)
+	);
+	server
+		.out
+		.write_all(format!("{line}\n").as_bytes())
+		.unwrap();
+	// A failure neither prints nor drops a value this deep: either would abort
+	// the test process.
+	match next_event(&events) {
+		Event::UnmatchedResponse(mut response) => {
+			assert_eq!(response.command, "get_tree");
+			if let Some(data) = response.data.take() {
+				std::mem::forget(data);
+				panic!("the late response kept its data");
+			}
+		},
+		other => {
+			std::mem::forget(other);
+			panic!("expected the late response");
+		},
+	}
+}
+
+// If this regresses, a frame other than a response that nests deeper than
+// `serde_json` reads is copied by recursion as it decodes, which overflows the
+// reader thread's stack and aborts the process, instead of closing the client
+// with the protocol error it gave before.
+#[test]
+fn a_frame_deeper_than_serde_json_reads_closes_the_client() {
+	let (client, events, mut server) = connect(ready_v2(), Vec::new());
+	let depth = 100_000;
+	let line = format!(r#"{{"type":"deep","pad":{}{}}}"#, "[".repeat(depth), "]".repeat(depth));
+	server
+		.out
+		.write_all(format!("{line}\n").as_bytes())
+		.unwrap();
+	let error = fatal_error(&client, &events);
+	assert!(error.starts_with("Failed to decode RPC output: "), "{error}");
+}
+
+// If this regresses, an answer other than `get_tree` nested deeper than
+// `serde_json` reads (a `get_messages` answer holding a deeply nested tool
+// result) is decoded by recursion, which overflows the stack and aborts the
+// process, instead of closing the client with the protocol error it gave
+// before.
+#[test]
+fn a_deep_get_messages_answer_closes_the_client() {
+	let (client, _events, mut server) = connect(ready_v1(), Vec::new());
+	let script = thread::spawn(move || {
+		let frame = server.expect("get_messages");
+		let depth = 100_000;
+		let deep = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+		let line = format!(
+			r#"{{"type":"response","id":{},"command":"get_messages","success":true,"data":{{"messages":{deep}}}}}"#,
+			frame["id"]
+		);
+		server
+			.out
+			.write_all(format!("{line}\n").as_bytes())
+			.unwrap();
+		server
+	});
+	let error = client.call(&GetMessagesCommand {}).unwrap_err();
+	assert!(
+		matches!(&error, Error::Protocol(message) if message.starts_with("Failed to decode RPC output: ")),
+		"{error:?}"
+	);
+	drop(script.join().unwrap());
+}
+
+// If this regresses, a `get_tree` answer whose envelope does not decode reaches
+// the event receiver with its deep `data`, and dropping the event overflows the
+// stack and aborts the process.
+#[test]
+fn a_deep_get_tree_answer_that_does_not_decode_arrives_without_its_data() {
+	let (_client, events, mut server) = connect(ready_v1(), Vec::new());
+	let depth = 100_000;
+	let line = format!(
+		r#"{{"type":"response","id":"late","command":"get_tree","success":"yes","data":{{"tree":{}{}}}}}"#,
+		"[".repeat(depth),
+		"]".repeat(depth)
+	);
+	server
+		.out
+		.write_all(format!("{line}\n").as_bytes())
+		.unwrap();
+	// A failure neither prints nor drops a value this deep: either would abort
+	// the test process.
+	match next_event(&events) {
+		Event::Undecodable { mut raw, .. } => {
+			assert_eq!(raw["command"], "get_tree");
+			if let Some(data) = raw
+				.as_object_mut()
+				.and_then(|members| members.remove("data"))
+			{
+				std::mem::forget(data);
+				panic!("the undecodable answer kept its data");
+			}
+		},
+		other => {
+			std::mem::forget(other);
+			panic!("expected the undecodable answer");
+		},
+	}
+}
+
+// If this regresses, a `get_tree` answer that nests deeper than `serde_json`
+// reads outside its `tree` (any member the parse refuses at that depth: a
+// `leafId`, an unknown member, a `data` array, a member a later duplicate
+// replaces) is decoded or dropped by recursion, which overflows a thread's
+// stack and aborts the process, instead of closing the client with the
+// protocol error it gave before.
+#[test]
+fn a_get_tree_answer_deep_outside_its_tree_closes_the_client() {
+	let depth = 100_000;
+	let deep = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+	let (client, _events, mut server) = connect(ready_v1(), Vec::new());
+	let script = thread::spawn(move || {
+		let frame = server.expect("get_tree");
+		let line = format!(
+			r#"{{"type":"response","id":{},"command":"get_tree","success":true,"data":{{"tree":[],"leafId":{deep}}}}}"#,
+			frame["id"]
+		);
+		server
+			.out
+			.write_all(format!("{line}\n").as_bytes())
+			.unwrap();
+		server
+	});
+	let error = client.call(&GetTreeCommand {}).unwrap_err();
+	assert!(
+		matches!(&error, Error::Protocol(message) if message.starts_with("Failed to decode RPC output: ")),
+		"{error:?}"
+	);
+	drop(script.join().unwrap());
+}
+
+// If this regresses, `get_tree` on a long session (each entry two levels under
+// its parent) closes the client, or the tree it returns overflows the stack
+// and aborts the process when it is dropped.
+#[test]
+fn a_get_tree_answer_of_any_depth_decodes_and_drops() {
+	let (client, _events, mut server) = connect(ready_v1(), Vec::new());
+	let entries = 100_000;
+	let script = thread::spawn(move || {
+		let frame = server.expect("get_tree");
+		let mut line = format!(
+			r#"{{"type":"response","id":{},"command":"get_tree","success":true,"data":{{"tree":["#,
+			frame["id"]
+		);
+		for index in 0..entries {
+			line.push_str(&format!(r#"{{"entry":{{"id":"e{index}"}},"children":["#));
+		}
+		line.push_str(&"]}".repeat(entries));
+		line.push_str(&format!(r#"],"leafId":"e{}"}}}}"#, entries - 1));
+		line.push('\n');
+		server.out.write_all(line.as_bytes()).unwrap();
+		server
+	});
+	let result = client.call(&GetTreeCommand {}).unwrap();
+	assert_eq!(result.leaf_id.as_deref(), Some(format!("e{}", entries - 1).as_str()));
+	let mut depth = 0;
+	let mut next = result.tree.first();
+	while let Some(node) = next {
+		assert_eq!(node["entry"]["id"], format!("e{depth}"));
+		depth += 1;
+		next = node
+			.get("children")
+			.and_then(Value::as_array)
+			.and_then(|children| children.first())
+			.and_then(Value::as_object);
+	}
+	assert_eq!(depth, entries);
+	drop(result);
+	drop(script.join().unwrap());
+}

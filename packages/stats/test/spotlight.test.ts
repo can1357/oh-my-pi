@@ -10,7 +10,7 @@ import {
 	getSpotlightDashboardStats,
 	getSpotlightSessionContext,
 } from "@oh-my-pi/omp-stats/spotlight-aggregator";
-import { argumentTokens } from "@oh-my-pi/omp-stats/spotlight-ingest";
+import { argumentTokens } from "@oh-my-pi/omp-stats/spotlight-arguments";
 import { getSessionsDir } from "@oh-my-pi/pi-utils";
 import { SpotlightSessionBuilder } from "./helpers/spotlight-session";
 import { installStatsTestIsolation } from "./helpers/temp-agent";

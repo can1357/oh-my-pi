@@ -24,6 +24,7 @@ import {
 	spillUrl,
 	spillUrlIds,
 } from "@oh-my-pi/pi-utils";
+import { argumentTokens, callTarget } from "./spotlight-arguments";
 
 /**
  * Whether a custom entry marks its session as a Spotlight experiment session: pi's `spotlight:session` entry, which
@@ -35,9 +36,6 @@ export function experimentMarker(customType: unknown, data: Record<string, unkno
 	if (customType === "spotlight:session") return true;
 	return customType === "spotlight:assignment" && data.arm === "vylv5";
 }
-
-/** Longest stored call target. */
-export const SPOTLIGHT_TARGET_CHARS = 500;
 
 /**
  * A window of a shaped read still collecting the lines the agent needs later (see {@link SpotlightCollector}): a
@@ -269,76 +267,6 @@ export function artifactIds(text: string): number[] {
 	const ids = new Set<number>(spills);
 	for (const match of text.matchAll(LEGACY_ARTIFACT_RE)) ids.add(Number(match[1]));
 	return [...ids].sort((a, b) => a - b);
-}
-
-/**
- * What a call asked for, as recovery detection compares it: a read's path with its selector, a bash command, a
- * search pattern with its path, eval code. Clipped to {@link SPOTLIGHT_TARGET_CHARS}.
- */
-export function callTarget(toolName: string, args: unknown): string {
-	const a: Record<string, unknown> = isRecord(args) ? args : {};
-	const str = (key: string): string => {
-		const value = a[key];
-		return typeof value === "string" ? value : "";
-	};
-	let target: string;
-	if (toolName === "read") target = str("path");
-	else if (toolName === "bash") target = str("command");
-	else if (toolName === "eval") target = str("code");
-	else if (typeof a.pattern === "string") target = [str("pattern"), str("path")].filter(Boolean).join(" ");
-	else if (typeof a.query === "string") target = [str("query"), str("path")].filter(Boolean).join(" ");
-	else if (typeof a.path === "string") target = str("path");
-	else {
-		try {
-			target = JSON.stringify(args ?? {});
-		} catch {
-			target = "";
-		}
-	}
-	return target.slice(0, SPOTLIGHT_TARGET_CHARS);
-}
-
-/** Top-level arguments that say why, not what: the intent note every omp tool takes. */
-const NOTE_ARGUMENTS = new Set(["i"]);
-/** Argument keys whose string values are paths (or URLs), kept as one token even with spaces. */
-const PATH_ARGUMENT = /(?:^|_)(?:path|file|dir|cwd|url)s?$/i;
-/** Most tokens kept per call (the first distinct ones), and the longest token. */
-const ARGUMENT_TOKEN_LIMIT = 256;
-const ARGUMENT_TOKEN_CHARS = 200;
-
-/**
- * A call's arguments as a token set for the generic rerun rule (two calls of the same tool rerun when their sets'
- * Jaccard similarity is high): every JSON leaf as `key=value`, the key being the nearest object key; strings split
- * on whitespace except under path keys (`path`, `paths`, `file`, `cwd`, `url`, …), which stay whole; nulls dropped;
- * the top-level intent note `i` left out. Distinct tokens in first-seen order, at most
- * {@link ARGUMENT_TOKEN_LIMIT}, each clipped to {@link ARGUMENT_TOKEN_CHARS} chars.
- */
-export function argumentTokens(args: unknown): string[] {
-	const tokens = new Set<string>();
-	const add = (key: string, value: string) => {
-		if (tokens.size < ARGUMENT_TOKEN_LIMIT) tokens.add(`${key}=${value}`.slice(0, ARGUMENT_TOKEN_CHARS));
-	};
-	const visit = (value: unknown, key: string, top: boolean): void => {
-		if (tokens.size >= ARGUMENT_TOKEN_LIMIT || value === null || value === undefined) return;
-		if (Array.isArray(value)) {
-			for (const item of value) visit(item, key, false);
-		} else if (isRecord(value)) {
-			for (const child in value) {
-				if (!(top && NOTE_ARGUMENTS.has(child))) visit(value[child], child, false);
-			}
-		} else if (typeof value === "string") {
-			if (PATH_ARGUMENT.test(key)) {
-				const whole = value.trim();
-				if (whole) add(key, whole);
-			} else {
-				for (const part of value.split(/\s+/)) if (part) add(key, part);
-			}
-		} else if (typeof value === "number" || typeof value === "boolean") {
-			add(key, String(value));
-		}
-	};
-	visit(args, "", true);
-	return [...tokens];
 }
 
 const URL_SCHEME = /^[a-z][\w+.-]*:\/\//i;

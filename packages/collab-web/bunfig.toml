@@ -1,0 +1,4 @@
+# `bun ./index.html` (`bun run dev`) bundles the app with this plugin, as `scripts/build-app.ts` does:
+# the tool cards use pi-utils' JSON helpers, which import `node:util/types`.
+[serve.static]
+plugins = ["@oh-my-pi/omp-stats/client-bundle"]

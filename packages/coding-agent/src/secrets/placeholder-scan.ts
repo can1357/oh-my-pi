@@ -1,3 +1,4 @@
+import { ContainerPath, isNonNullObject, type NestedWalk, runNested } from "@oh-my-pi/pi-utils";
 import type { JsonRecord, JsonValue, SecretObfuscator } from "./obfuscator";
 import {
 	lookupFriendlyPlaceholderAlias,
@@ -452,59 +453,83 @@ function isPlainRecord(obj: object): obj is Record<string, unknown> {
 	return prototype === Object.prototype || prototype === null;
 }
 
+/**
+ * The regex-protected secret values in every string of `value`, JSON data
+ * such as a tool call's arguments. The walk keeps its own stack
+ * ({@link runNested}), so it reads a value as deep as `JSON.parse` reads
+ * (millions of levels) where a recursive one stops near 22,000.
+ */
 export function collectJsonRegexSecretValues(obfuscator: SecretObfuscator, value: JsonValue): SecretValueSet {
 	const values = new SecretValueSet();
-	const collect = (item: JsonValue): void => {
-		if (typeof item === "string") {
-			for (const secretValue of obfuscator.collectRegexSecretValuesForObfuscation(item)) {
-				values.add(secretValue);
-			}
-			return;
-		}
-		if (Array.isArray(item)) {
-			for (const child of item) collect(child);
-			return;
-		}
-		if (item !== null && typeof item === "object") {
-			for (const child of Object.values(item)) {
-				if (child !== undefined) collect(child);
-			}
-		}
+	const collect = (text: string): void => {
+		for (const secretValue of obfuscator.collectRegexSecretValuesForObfuscation(text)) values.add(secretValue);
 	};
-	collect(value);
+	if (typeof value === "string") collect(value);
+	else if (isNonNullObject(value)) runNested(collectJsonContainerStrings(value, collect, new ContainerPath()));
 	return values;
+}
+
+/** Pass every string in `container` and below it to `collect`; `path` makes a cycle fail instead of walking on. */
+function* collectJsonContainerStrings(
+	container: JsonValue[] | JsonRecord,
+	collect: (text: string) => void,
+	path: ContainerPath,
+): NestedWalk<void> {
+	path.enter(container);
+	for (const child of Array.isArray(container) ? container : Object.values(container)) {
+		if (typeof child === "string") collect(child);
+		else if (isNonNullObject(child)) yield collectJsonContainerStrings(child, collect, path);
+	}
+	path.leave(container);
 }
 
 /**
  * Map string values in schema-designated JSON data: tool arguments, discovery
  * annotations, and schema examples. Keys remain identifiers. Protocol
- * objects and JSON Schema structure require their own typed traversal.
+ * objects and JSON Schema structure require their own typed traversal. A
+ * container nothing in which changes is returned as itself. The walk keeps
+ * its own stack ({@link runNested}), so it maps a value as deep as
+ * `JSON.parse` reads.
  */
 export function mapJsonStrings(value: JsonValue, fn: (s: string) => string): JsonValue {
 	if (typeof value === "string") return fn(value);
-	if (Array.isArray(value)) {
+	if (!isNonNullObject(value)) return value;
+	return runNested(mapJsonContainerStrings(value, fn, new ContainerPath()));
+}
+
+/** {@link mapJsonStrings} of `container`; `path` makes a cycle fail instead of walking on. */
+function* mapJsonContainerStrings(
+	container: JsonValue[] | JsonRecord,
+	fn: (s: string) => string,
+	path: ContainerPath,
+): NestedWalk<JsonValue> {
+	path.enter(container);
+	if (Array.isArray(container)) {
 		let out: JsonValue[] | undefined;
-		for (let index = 0; index < value.length; index++) {
-			const item = value[index]!;
-			const next = mapJsonStrings(item, fn);
+		for (let index = 0; index < container.length; index++) {
+			const item = container[index]!;
+			let next: JsonValue = item;
+			if (typeof item === "string") next = fn(item);
+			else if (isNonNullObject(item)) next = (yield mapJsonContainerStrings(item, fn, path)) as JsonValue;
 			if (next === item) continue;
-			out ??= value.slice();
+			out ??= container.slice();
 			out[index] = next;
 		}
-		return out ?? value;
+		path.leave(container);
+		return out ?? container;
 	}
-	if (value !== null && typeof value === "object") {
-		let out: JsonRecord | undefined;
-		for (const key in value) {
-			if (!Object.hasOwn(value, key)) continue;
-			const item = value[key];
-			if (item === undefined) continue;
-			const next = mapJsonStrings(item, fn);
-			if (next === item) continue;
-			out ??= { ...value };
-			out[key] = next;
-		}
-		return out ?? value;
+	let out: JsonRecord | undefined;
+	for (const key in container) {
+		if (!Object.hasOwn(container, key)) continue;
+		const item = container[key];
+		if (item === undefined) continue;
+		let next: JsonValue = item;
+		if (typeof item === "string") next = fn(item);
+		else if (isNonNullObject(item)) next = (yield mapJsonContainerStrings(item, fn, path)) as JsonValue;
+		if (next === item) continue;
+		out ??= { ...container };
+		out[key] = next;
 	}
-	return value;
+	path.leave(container);
+	return out ?? container;
 }

@@ -23,12 +23,24 @@ import type { AgentMessage, AgentState } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { dropToolCallReasoningDetail } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { dropReasoningDetailsEnvelopes } from "@oh-my-pi/pi-ai/utils/reasoning-source";
-import { $which, logger } from "@oh-my-pi/pi-utils";
+import {
+	$which,
+	ContainerPath,
+	DEEP_JSON_LEVELS,
+	isNonNullObject,
+	isRecord,
+	logger,
+	type NestedWalk,
+	nestsDeeperThan,
+	runNested,
+	stringifyDeepJson,
+} from "@oh-my-pi/pi-utils";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
 import { obfuscateToolArguments } from "../secrets/message-transform";
-import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { JsonValue, SecretObfuscator } from "../secrets/obfuscator";
 import { SecretValueSet } from "../secrets/placeholder";
+import { collectJsonRegexSecretValues, mapJsonStrings } from "../secrets/placeholder-scan";
 import { type SessionEntry, type SessionHeader, TITLE_CHANGE_ENTRY_TYPE } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { OutputMeta } from "../tools/output-meta-format";
@@ -103,7 +115,7 @@ export function buildShareSnapshot(sm: SessionManager, options?: ShareSessionOpt
  * Redact secrets from a share snapshot. A share blob leaves the machine, so
  * every text-bearing field is rewritten through the obfuscator. The walk is
  * typed end-to-end (no generic object traversal): inline image bytes are left
- * intact (size-trimmed later by {@link stripImagePayloads}) and opaque,
+ * intact (size-trimmed later by {@link stripSnapshotImages}) and opaque,
  * untyped payloads we cannot redact field-by-field (`compaction.preserveData`,
  * extension `details`/`data`, `mode_change.data`, structured output schemas)
  * are dropped so they cannot leak.
@@ -115,18 +127,6 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 		for (const secretValue of o.collectRegexSecretValuesForObfuscation(value)) {
 			values.add(secretValue);
 		}
-	};
-	const addJsonStrings = (value: unknown): void => {
-		if (typeof value === "string") {
-			add(value);
-			return;
-		}
-		if (Array.isArray(value)) {
-			for (const item of value) addJsonStrings(item);
-			return;
-		}
-		if (!isRecord(value)) return;
-		for (const item of Object.values(value)) addJsonStrings(item);
 	};
 	const addContent = (content: string | (TextContent | ImageContent)[]): void => {
 		if (typeof content === "string") {
@@ -160,7 +160,7 @@ function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): 
 					if (block.type === "text") add(block.text);
 					else if (block.type === "thinking") add(block.thinking);
 					else if (block.type === "toolCall") {
-						addJsonStrings(block.arguments);
+						for (const value of collectJsonRegexSecretValues(o, block.arguments as JsonValue)) values.add(value);
 						add(block.intent);
 						add(block.rawBlock);
 					}
@@ -549,34 +549,42 @@ interface SealedSession {
 
 /** Seal `data`, trimming content until the sealed blob fits `maxBytes`. Exported for tests. */
 export async function sealToFit(key: CryptoKey, data: SessionData, maxBytes: number): Promise<SealedSession> {
-	let sealed = await sealSessionData(key, data);
+	// One rule for every seal: a snapshot nested past DEEP_JSON_LEVELS skips the `JSON.stringify` that takes seconds
+	// or runs out of stack on it. No trim makes a snapshot deeper. The check reads no getter and goes into no `toJSON`,
+	// so a snapshot that deep only below one is written by `stringifyDeepJson`, which falls back when `JSON.stringify`
+	// runs out of stack.
+	const json = { deep: nestsDeeperThan(data, DEEP_JSON_LEVELS) };
+	const seal = (snapshot: SessionData): Promise<Uint8Array<ArrayBuffer>> =>
+		sealSessionData(key, stringifyDeepJson(snapshot, json)!);
+	let sealed = await seal(data);
 	if (sealed.byteLength <= maxBytes) return { sealed, truncated: false };
 
-	// Work on a deep copy; the caller may re-fit the original at another budget.
-	const working = structuredClone(data);
-	stripImagePayloads(working);
-	sealed = await sealSessionData(key, working);
+	// Each trim copies only the containers it changes, so `data` stays whole: the caller may re-fit it at another budget.
+	let working = stripSnapshotImages(data);
+	sealed = await seal(working);
 	if (sealed.byteLength <= maxBytes) return { sealed, truncated: true };
 
 	for (const cap of TEXT_CAPS) {
-		capLongStrings(working, cap);
-		sealed = await sealSessionData(key, working);
+		working = mapJsonStrings(working as unknown as JsonValue, text =>
+			text.length > cap ? `${text.slice(0, cap)}\n…[truncated for share]` : text,
+		) as unknown as SessionData;
+		sealed = await seal(working);
 		if (sealed.byteLength <= maxBytes) return { sealed, truncated: true };
 	}
 
 	// Last resort: drop oldest entries (orphaned children render as roots).
 	while (working.entries.length > 4) {
-		working.entries = working.entries.slice(Math.ceil(working.entries.length / 2));
-		sealed = await sealSessionData(key, working);
+		working = { ...working, entries: working.entries.slice(Math.ceil(working.entries.length / 2)) };
+		sealed = await seal(working);
 		if (sealed.byteLength <= maxBytes) return { sealed, truncated: true };
 	}
 
 	throw new Error(`Session too large to share: ${sealed.byteLength} bytes sealed exceeds the ${maxBytes} byte limit`);
 }
 
-/** `[12B IV][AES-256-GCM(gzip(JSON))]` — decrypted and gunzipped by share-loader.js. */
-async function sealSessionData(key: CryptoKey, data: SessionData): Promise<Uint8Array<ArrayBuffer>> {
-	const compressed = Bun.gzipSync(new TextEncoder().encode(JSON.stringify(data)));
+/** `[12B IV][AES-256-GCM(gzip(json))]` — decrypted and gunzipped by share-loader.js. */
+async function sealSessionData(key: CryptoKey, json: string): Promise<Uint8Array<ArrayBuffer>> {
+	const compressed = Bun.gzipSync(new TextEncoder().encode(json));
 	const iv = new Uint8Array(IV_LENGTH);
 	crypto.getRandomValues(iv);
 	const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, compressed));
@@ -586,53 +594,56 @@ async function sealSessionData(key: CryptoKey, data: SessionData): Promise<Uint8
 	return out;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
+/**
+ * `snapshot` with each inline image payload replaced by a tiny placeholder
+ * (an image block in an array by a text block, a `data:` URL under a key by a
+ * blank image). A container nothing in which is replaced is shared with
+ * `snapshot`, and `snapshot` itself is never changed. The walk keeps its own
+ * stack ({@link runNested}), so it strips a snapshot of any depth a session
+ * entry holds.
+ */
+function stripSnapshotImages(snapshot: SessionData): SessionData {
+	return runNested(stripContainerImages(snapshot, new ContainerPath())) as SessionData;
 }
 
-/** Replace inline image payloads (image blocks + data: URLs) with tiny placeholders, in place. */
-function stripImagePayloads(value: unknown): void {
-	if (Array.isArray(value)) {
-		for (let i = 0; i < value.length; i++) {
-			const item: unknown = value[i];
-			if (isRecord(item) && item.type === "image" && typeof item.data === "string" && item.data.length > 1024) {
-				value[i] = { type: "text", text: IMAGE_OMITTED_TEXT };
-				continue;
-			}
-			stripImagePayloads(item);
+/** {@link stripSnapshotImages} of `container`; `inside`, the containers it is in, makes a cycle fail instead of walking on. */
+function* stripContainerImages(container: object, inside: ContainerPath): NestedWalk<object> {
+	inside.enter(container);
+	if (Array.isArray(container)) {
+		let out: unknown[] | undefined;
+		for (let index = 0; index < container.length; index++) {
+			const item: unknown = container[index];
+			const next =
+				strippedImageBlock(item) ?? (isNonNullObject(item) ? yield stripContainerImages(item, inside) : item);
+			if (next === item) continue;
+			out ??= container.slice();
+			out[index] = next;
 		}
-		return;
+		inside.leave(container);
+		return out ?? container;
 	}
-	if (!isRecord(value)) return;
-	for (const k in value) {
-		const v = value[k];
-		if (typeof v === "string") {
-			if (v.length > 1024 && v.startsWith("data:")) value[k] = BLANK_IMAGE_DATA_URL;
-			continue;
-		}
-		stripImagePayloads(v);
+	const holder = container as Record<string, unknown>;
+	let out: Record<string, unknown> | undefined;
+	for (const key of Object.keys(holder)) {
+		const item = holder[key];
+		const next = isNonNullObject(item) ? yield stripContainerImages(item, inside) : strippedDataUrl(item);
+		if (next === item) continue;
+		out ??= { ...holder };
+		out[key] = next;
 	}
+	inside.leave(container);
+	return out ?? container;
 }
 
-/** Truncate every string longer than `cap`, in place. */
-function capLongStrings(value: unknown, cap: number): void {
-	if (Array.isArray(value)) {
-		for (let i = 0; i < value.length; i++) {
-			const item: unknown = value[i];
-			if (typeof item === "string" && item.length > cap) value[i] = `${item.slice(0, cap)}\n…[truncated for share]`;
-			else capLongStrings(item, cap);
-		}
-		return;
-	}
-	if (!isRecord(value)) return;
-	for (const k in value) {
-		const v = value[k];
-		if (typeof v === "string") {
-			if (v.length > cap) value[k] = `${v.slice(0, cap)}\n…[truncated for share]`;
-			continue;
-		}
-		capLongStrings(v, cap);
-	}
+/** The text block that stands in for `item` when it is an image block whose string `data` is over 1024 characters; undefined when not. */
+function strippedImageBlock(item: unknown): TextContent | undefined {
+	const data = isRecord(item) && item.type === "image" ? item.data : undefined;
+	return typeof data === "string" && data.length > 1024 ? { type: "text", text: IMAGE_OMITTED_TEXT } : undefined;
+}
+
+/** {@link BLANK_IMAGE_DATA_URL} in place of `item` when it is a `data:` URL over 1024 characters; `item` itself when not. */
+function strippedDataUrl(item: unknown): unknown {
+	return typeof item === "string" && item.length > 1024 && item.startsWith("data:") ? BLANK_IMAGE_DATA_URL : item;
 }
 
 /** Create a secret gist holding base64 of the sealed blob; null when `gh` is unusable. */

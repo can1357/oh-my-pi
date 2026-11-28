@@ -10,7 +10,7 @@ import {
 	type ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { prompt, sanitizeText, untilAborted, toError } from "@oh-my-pi/pi-utils";
+import { jsonDeepEquals, prompt, sanitizeText, untilAborted, toError } from "@oh-my-pi/pi-utils";
 import type { Theme } from "@oh-my-pi/pi-tui/theme/contract";
 import { extensionTheme } from "../../ui/extensions/render-output";
 import nativeDelegationTemplate from "../../prompts/tools/native-delegation.md" with { type: "text" };
@@ -392,11 +392,11 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// ACP approval satisfies prompts only for the input the client approved: it compares
 		// against a deep snapshot because handlers can mutate the original argument object in
 		// place. Denies were enforced above, and provider safety checks remain independently
-		// required.
+		// required. Both sides are JSON data, as deep as a transcript line holds.
 		const acpBypass =
 			context !== undefined &&
 			Object.hasOwn(context, "acpApprovedArgs") &&
-			Bun.deepEquals(effectiveParams, context.acpApprovedArgs);
+			jsonDeepEquals(effectiveParams, context.acpApprovedArgs);
 		// Only a prompt `always-ask-cached` itself raised can be remembered by target; provider safety
 		// checks are per-call, so they never offer a grant of any kind.
 		const grantable =

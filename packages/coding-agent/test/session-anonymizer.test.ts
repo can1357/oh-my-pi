@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { SessionAnonymizer } from "../src/session/session-anonymizer";
+import { stringifyJsonIteratively } from "@oh-my-pi/pi-utils";
+import { anonymizeSessionTranscripts, SessionAnonymizer } from "../src/session/session-anonymizer";
+import type { SessionEntry } from "../src/session/session-entries";
+import { DEEP_LEVELS, nestedChain } from "../../ai/test/helpers/deep-nesting";
 
 const SECRET_WORDS = ["acme", "hunter2", "invoiceParser", "Probe", "alice", "launch codes"];
 
@@ -602,4 +605,107 @@ describe("SessionAnonymizer", () => {
 		expect(at(result("unseen_lines"), "message", "details", "errorKind")).toBe("unseen_lines");
 		expect(JSON.stringify(result("customer-acme"))).not.toContain("acme");
 	});
+});
+
+/**
+ * `bottom` wrapped {@link DEEP_LEVELS} times by `wrap`: a chain of another key
+ * than `next`, or of arrays, around any bottom, which `nestedChain` does not build.
+ */
+function nest(bottom: unknown, wrap: (inner: unknown) => unknown): unknown {
+	let node = bottom;
+	for (let level = 0; level < DEEP_LEVELS; level++) node = wrap(node);
+	return node;
+}
+
+/** How many times `unwrap` opens `value` before it returns undefined, and the value at the bottom. */
+function depthOf(value: unknown, unwrap: (node: unknown) => unknown): { levels: number; bottom: unknown } {
+	let levels = 0;
+	let node = value;
+	for (let inner = unwrap(node); inner !== undefined; inner = unwrap(node)) {
+		node = inner;
+		levels++;
+	}
+	return { levels, bottom: node };
+}
+
+/** The one record of the anonymized `session.jsonl` an entry-only export of `entries` writes. */
+async function anonymizedRecords(entries: unknown[]): Promise<unknown[]> {
+	const { files } = await anonymizeSessionTranscripts({ header: null, entries: entries as SessionEntry[] });
+	const body = files.find(([name]) => name === "session.jsonl")?.[1] ?? "";
+	return Bun.JSONL.parse(body) as unknown[];
+}
+
+// A tool returns any JSON and a transcript line holds it as deep as `JSON.parse` reads.
+describe("anonymizing records nested deeper than a recursive walk reaches", () => {
+	test("redacts an extension tool's details nested 50,000 levels into one marker", async () => {
+		const [record] = await anonymizedRecords([
+			{
+				type: "message",
+				id: "r1",
+				parentId: null,
+				timestamp: "2026-09-22T15:12:04.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "mcp__crm_lookup",
+					content: [{ type: "text", text: "found" }],
+					details: nestedChain({ customer: "acme" }),
+					isError: false,
+					timestamp: 1,
+				},
+			},
+		]);
+		const details = at(record, "message", "details");
+		expect(details).toMatch(/^\[redacted #\d+: \d+ chars, 1 line\]$/);
+	}, 20_000);
+
+	test("maps the path at the bottom of a built-in tool's details whose path fields nest 50,000 levels", async () => {
+		const [record] = await anonymizedRecords([
+			{
+				type: "message",
+				id: "r1",
+				parentId: null,
+				timestamp: "2026-09-22T15:12:04.000Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "read",
+					content: [{ type: "text", text: "found" }],
+					details: nest("/home/alice/acme/x.ts", inner => ({ path: inner })),
+					isError: false,
+					timestamp: 1,
+				},
+			},
+		]);
+		const { levels, bottom } = depthOf(at(record, "message", "details"), node => at(node, "path"));
+		expect(levels).toBe(DEEP_LEVELS);
+		expect(bottom).toMatch(/^\/home\/seg\d+\/seg\d+\/seg\d+\.ts$/);
+	}, 20_000);
+
+	test("maps the path at the bottom of a built-in tool call's arguments nested 50,000 levels, as objects and as JSON text", async () => {
+		const args = { path: nest("/home/alice/acme", inner => [inner]) };
+		const call = (id: string, value: unknown) => ({ type: "toolCall", id, name: "grep", arguments: value });
+		const [record] = await anonymizedRecords([
+			{
+				type: "message",
+				id: "a1",
+				parentId: null,
+				timestamp: "2026-09-22T15:12:04.000Z",
+				message: {
+					role: "assistant",
+					content: [call("toolu_01abcdef", args), call("toolu_02abcdef", stringifyJsonIteratively(args))],
+					timestamp: 1,
+				},
+			},
+		]);
+		const fromObject = at(record, "message", "content", 0, "arguments", "path");
+		const text = at(record, "message", "content", 1, "arguments");
+		expect(typeof text).toBe("string");
+		const fromText = at(JSON.parse(text as string), "path");
+		for (const path of [fromObject, fromText]) {
+			const { levels, bottom } = depthOf(path, node => (Array.isArray(node) ? node[0] : undefined));
+			expect(levels).toBe(DEEP_LEVELS);
+			expect(bottom).toMatch(/^\/home\/seg\d+\/seg\d+$/);
+		}
+	}, 20_000);
 });

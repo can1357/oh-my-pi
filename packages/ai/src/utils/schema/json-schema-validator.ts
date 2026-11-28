@@ -13,7 +13,7 @@
  * tolerates non-standard shapes (`nullable`) that LLM-emitted schemas carry.
  */
 import { parseLocalRefPointer } from "@oh-my-pi/omptype";
-import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, type NestedWalk, runNested } from "@oh-my-pi/pi-utils";
 import { areJsonValuesEqual } from "./equality";
 import { stamp } from "./stamps";
 
@@ -108,13 +108,26 @@ export function getTagSelectedUnionBranch(branches: readonly unknown[], value: u
 	return selected;
 }
 
+/**
+ * Where an issue sits in the validated value: each level's key, innermost
+ * last, as a chain each nested step extends without copying the levels above
+ * (a value nests as deep as `JSON.parse` reads, and a key array copied at each
+ * level costs the square of the depth). {@link pushIssue} writes it out.
+ */
+interface IssuePath {
+	readonly parent: IssuePath | undefined;
+	readonly key: PropertyKey;
+}
+
 function pushIssue(
 	issues: JsonSchemaValidationIssue[],
-	path: readonly PropertyKey[],
+	path: IssuePath | undefined,
 	message: string,
 	options: { expectedTypes?: string[]; keyword?: string } = {},
 ): void {
-	issues.push({ path: [...path], message, ...options });
+	const keys: PropertyKey[] = [];
+	for (let at = path; at !== undefined; at = at.parent) keys.push(at.key);
+	issues.push({ path: keys.reverse(), message, ...options });
 }
 
 function typeOfJsonValue(value: unknown): string {
@@ -337,15 +350,18 @@ function isRequiredSet(value: unknown): value is string[] {
  * Core validator. Walks a schema node, applies every applicable keyword to
  * `value`, and accumulates issues. Returns `true` only if no keyword
  * rejected; combinators may add issues but still return true (e.g. `anyOf`
- * succeeds if at least one branch matches).
+ * succeeds if at least one branch matches). Each schema it applies (a `$ref`'s,
+ * a branch's, a property's or an item's) is a nested step ({@link runNested}),
+ * so a recursive schema (`$ref: "#"`) validates a value as deep as `JSON.parse`
+ * reads, where a recursive walk ran out of stack.
  */
-function validateSchemaNode(
+function* validateSchemaNode(
 	schema: unknown,
 	value: unknown,
-	path: readonly PropertyKey[],
+	path: IssuePath | undefined,
 	ctx: ValidationContext,
 	issues: JsonSchemaValidationIssue[],
-): boolean {
+): NestedWalk<boolean> {
 	if (schema === true) return true;
 	if (schema === false) {
 		pushIssue(issues, path, "must not match false schema", { keyword: "false" });
@@ -380,7 +396,7 @@ function validateSchemaNode(
 			}
 			ctx.refDepth += 1;
 		}
-		const ok = validateSchemaNode(resolved, value, path, ctx, issues);
+		const ok = (yield validateSchemaNode(resolved, value, path, ctx, issues)) as boolean;
 		if (pairKey !== undefined) ctx.seenPairs.delete(pairKey);
 		else ctx.refDepth -= 1;
 		return ok;
@@ -413,7 +429,7 @@ function validateSchemaNode(
 		if (!Array.isArray(branches)) continue;
 		if (keyword === "allOf") {
 			for (const branch of branches) {
-				valid = validateSchemaNode(branch, value, path, ctx, issues) && valid;
+				valid = ((yield validateSchemaNode(branch, value, path, ctx, issues)) as boolean) && valid;
 			}
 			continue;
 		}
@@ -424,7 +440,7 @@ function validateSchemaNode(
 		const selectedBranch = getTagSelectedUnionBranch(branches, value);
 		for (const branch of branches) {
 			const branchIssues: JsonSchemaValidationIssue[] = [];
-			if (validateSchemaNode(branch, value, path, ctx, branchIssues)) {
+			if ((yield validateSchemaNode(branch, value, path, ctx, branchIssues)) as boolean) {
 				matches += 1;
 				continue;
 			}
@@ -463,7 +479,7 @@ function validateSchemaNode(
 
 	if ("not" in schema) {
 		const notIssues: JsonSchemaValidationIssue[] = [];
-		if (validateSchemaNode(schema.not, value, path, ctx, notIssues)) {
+		if ((yield validateSchemaNode(schema.not, value, path, ctx, notIssues)) as boolean) {
 			pushIssue(issues, path, "must not match excluded schema", { keyword: "not" });
 			valid = false;
 		}
@@ -477,10 +493,10 @@ function validateSchemaNode(
 	// shapes we encounter.
 	if ("if" in schema) {
 		const ifIssues: JsonSchemaValidationIssue[] = [];
-		const ifOk = validateSchemaNode(schema.if, value, path, ctx, ifIssues);
+		const ifOk = (yield validateSchemaNode(schema.if, value, path, ctx, ifIssues)) as boolean;
 		const branch = ifOk ? schema.then : schema.else;
 		if (branch !== undefined) {
-			valid = validateSchemaNode(branch, value, path, ctx, issues) && valid;
+			valid = ((yield validateSchemaNode(branch, value, path, ctx, issues)) as boolean) && valid;
 		}
 	}
 
@@ -497,10 +513,10 @@ function validateSchemaNode(
 	}
 
 	if (isRecord(value)) {
-		valid = validateObjectKeywords(schema, value, path, ctx, issues) && valid;
+		valid = (yield* validateObjectKeywords(schema, value, path, ctx, issues)) && valid;
 	}
 	if (Array.isArray(value)) {
-		valid = validateArrayKeywords(schema, value, path, ctx, issues) && valid;
+		valid = (yield* validateArrayKeywords(schema, value, path, ctx, issues)) && valid;
 	}
 	if (typeof value === "string") {
 		valid = validateStringKeywords(schema, value, path, issues) && valid;
@@ -513,19 +529,19 @@ function validateSchemaNode(
 }
 
 /** Apply object-shaped JSON-Schema keywords: `required`, `properties`, `propertyNames`, `patternProperties`, `dependentRequired`, `dependentSchemas`, `additionalProperties`, and the `min/maxProperties` counts. */
-function validateObjectKeywords(
+function* validateObjectKeywords(
 	schema: Record<string, unknown>,
 	value: Record<string, unknown>,
-	path: readonly PropertyKey[],
+	path: IssuePath | undefined,
 	ctx: ValidationContext,
 	issues: JsonSchemaValidationIssue[],
-): boolean {
+): NestedWalk<boolean> {
 	let valid = true;
 	const properties = isRecord(schema.properties) ? schema.properties : {};
 	if (isRequiredSet(schema.required)) {
 		for (const key of schema.required) {
 			if (!(key in value)) {
-				pushIssue(issues, [...path, key], "is required", { keyword: "required" });
+				pushIssue(issues, { parent: path, key }, "is required", { keyword: "required" });
 				valid = false;
 			}
 		}
@@ -533,12 +549,16 @@ function validateObjectKeywords(
 
 	for (const key in properties) {
 		if (!(key in value)) continue;
-		valid = validateSchemaNode(properties[key], value[key], [...path, key], ctx, issues) && valid;
+		valid =
+			((yield validateSchemaNode(properties[key], value[key], { parent: path, key }, ctx, issues)) as boolean) &&
+			valid;
 	}
 
 	if (schema.propertyNames !== undefined) {
 		for (const key of Object.keys(value)) {
-			valid = validateSchemaNode(schema.propertyNames, key, [...path, key], ctx, issues) && valid;
+			valid =
+				((yield validateSchemaNode(schema.propertyNames, key, { parent: path, key }, ctx, issues)) as boolean) &&
+				valid;
 		}
 	}
 
@@ -558,7 +578,9 @@ function validateObjectKeywords(
 			for (const key in value) {
 				if (!re.test(key)) continue;
 				known.add(key);
-				valid = validateSchemaNode(patternSchema, value[key], [...path, key], ctx, issues) && valid;
+				valid =
+					((yield validateSchemaNode(patternSchema, value[key], { parent: path, key }, ctx, issues)) as boolean) &&
+					valid;
 			}
 		}
 	}
@@ -572,7 +594,7 @@ function validateObjectKeywords(
 			for (const dep of deps) {
 				if (typeof dep !== "string") continue;
 				if (!(dep in value)) {
-					pushIssue(issues, [...path, dep], `is required when "${key}" is present`, {
+					pushIssue(issues, { parent: path, key: dep }, `is required when "${key}" is present`, {
 						keyword: "dependentRequired",
 					});
 					valid = false;
@@ -585,7 +607,7 @@ function validateObjectKeywords(
 		const dependentSchemas = schema.dependentSchemas;
 		for (const key in dependentSchemas) {
 			if (!(key in value)) continue;
-			valid = validateSchemaNode(dependentSchemas[key], value, path, ctx, issues) && valid;
+			valid = ((yield validateSchemaNode(dependentSchemas[key], value, path, ctx, issues)) as boolean) && valid;
 		}
 	}
 
@@ -595,13 +617,15 @@ function validateObjectKeywords(
 	if (additional === false) {
 		for (const key of Object.keys(value)) {
 			if (known.has(key)) continue;
-			pushIssue(issues, [...path, key], "must not be present", { keyword: "additionalProperties" });
+			pushIssue(issues, { parent: path, key }, "must not be present", { keyword: "additionalProperties" });
 			valid = false;
 		}
 	} else if (additional !== undefined && additional !== true) {
 		for (const key in value) {
 			if (known.has(key)) continue;
-			valid = validateSchemaNode(additional, value[key], [...path, key], ctx, issues) && valid;
+			valid =
+				((yield validateSchemaNode(additional, value[key], { parent: path, key }, ctx, issues)) as boolean) &&
+				valid;
 		}
 	}
 
@@ -618,13 +642,13 @@ function validateObjectKeywords(
 }
 
 /** Apply array-shaped keywords: `min/maxItems`, `uniqueItems`, `prefixItems` + `items` tuple validation, and `contains` with `min/maxContains`. */
-function validateArrayKeywords(
+function* validateArrayKeywords(
 	schema: Record<string, unknown>,
 	value: unknown[],
-	path: readonly PropertyKey[],
+	path: IssuePath | undefined,
 	ctx: ValidationContext,
 	issues: JsonSchemaValidationIssue[],
-): boolean {
+): NestedWalk<boolean> {
 	let valid = true;
 	if (typeof schema.minItems === "number" && value.length < schema.minItems) {
 		pushIssue(issues, path, `must have at least ${schema.minItems} items`, { keyword: "minItems" });
@@ -638,7 +662,7 @@ function validateArrayKeywords(
 		for (let i = 0; i < value.length; i += 1) {
 			for (let j = i + 1; j < value.length; j += 1) {
 				if (!areJsonValuesEqual(value[i], value[j])) continue;
-				pushIssue(issues, [...path, j], "must be unique", { keyword: "uniqueItems" });
+				pushIssue(issues, { parent: path, key: j }, "must be unique", { keyword: "uniqueItems" });
 				valid = false;
 			}
 		}
@@ -656,16 +680,20 @@ function validateArrayKeywords(
 	} else if (prefixItems) {
 		const limit = Math.min(prefixItems.length, value.length);
 		for (let i = 0; i < limit; i += 1) {
-			valid = validateSchemaNode(prefixItems[i], value[i], [...path, i], ctx, issues) && valid;
+			valid =
+				((yield validateSchemaNode(prefixItems[i], value[i], { parent: path, key: i }, ctx, issues)) as boolean) &&
+				valid;
 		}
 		if (items !== undefined) {
 			for (let i = prefixItems.length; i < value.length; i += 1) {
-				valid = validateSchemaNode(items, value[i], [...path, i], ctx, issues) && valid;
+				valid =
+					((yield validateSchemaNode(items, value[i], { parent: path, key: i }, ctx, issues)) as boolean) && valid;
 			}
 		}
 	} else if (items !== undefined) {
 		for (let i = 0; i < value.length; i += 1) {
-			valid = validateSchemaNode(items, value[i], [...path, i], ctx, issues) && valid;
+			valid =
+				((yield validateSchemaNode(items, value[i], { parent: path, key: i }, ctx, issues)) as boolean) && valid;
 		}
 	}
 
@@ -675,7 +703,15 @@ function validateArrayKeywords(
 		let count = 0;
 		for (let i = 0; i < value.length; i += 1) {
 			const containsIssues: JsonSchemaValidationIssue[] = [];
-			if (validateSchemaNode(schema.contains, value[i], [...path, i], ctx, containsIssues)) {
+			if (
+				(yield validateSchemaNode(
+					schema.contains,
+					value[i],
+					{ parent: path, key: i },
+					ctx,
+					containsIssues,
+				)) as boolean
+			) {
 				count += 1;
 			}
 		}
@@ -696,7 +732,7 @@ function validateArrayKeywords(
 function validateStringKeywords(
 	schema: Record<string, unknown>,
 	value: string,
-	path: readonly PropertyKey[],
+	path: IssuePath | undefined,
 	issues: JsonSchemaValidationIssue[],
 ): boolean {
 	let valid = true;
@@ -726,7 +762,7 @@ function validateStringKeywords(
 function validateNumberKeywords(
 	schema: Record<string, unknown>,
 	value: number,
-	path: readonly PropertyKey[],
+	path: IssuePath | undefined,
 	issues: JsonSchemaValidationIssue[],
 ): boolean {
 	let valid = true;
@@ -766,12 +802,14 @@ function validateNumberKeywords(
 
 function validateSchemaValueInRoot(schema: unknown, value: unknown, root: unknown): JsonSchemaValidationResult {
 	const issues: JsonSchemaValidationIssue[] = [];
-	const success = validateSchemaNode(
-		schema,
-		value,
-		[],
-		{ root, seenPairs: new Set(), objectIds: new WeakMap(), nextObjectId: { value: 0 }, refDepth: 0 },
-		issues,
+	const success = runNested(
+		validateSchemaNode(
+			schema,
+			value,
+			undefined,
+			{ root, seenPairs: new Set(), objectIds: new WeakMap(), nextObjectId: { value: 0 }, refDepth: 0 },
+			issues,
+		),
 	);
 	return { success, issues };
 }

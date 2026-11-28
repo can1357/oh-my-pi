@@ -72,7 +72,16 @@ import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { resolvePromptCacheLookback } from "@oh-my-pi/pi-catalog/compat/prompt-cache-lookback";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
-import { isRecord, logger, prompt, Snowflake, spillUrl, toError, withLoopPhase } from "@oh-my-pi/pi-utils";
+import {
+	isRecord,
+	logger,
+	prompt,
+	Snowflake,
+	spillUrl,
+	structuredCloneDeep,
+	toError,
+	withLoopPhase,
+} from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import * as fs from "node:fs/promises";
 import { writeArtifact } from "./artifacts";
@@ -1243,13 +1252,14 @@ export class SessionMaintenance {
 			return { region, replacement, replacementTokens: replacementTokenCount };
 		});
 
+		// As `structuredClone` copies, at any depth a transcript line holds (a tool call's arguments are any JSON).
 		const entrySnapshots = new Map<SessionEntry, SessionEntry>();
 		for (const { region } of items) {
-			if (!entrySnapshots.has(region.entry)) entrySnapshots.set(region.entry, structuredClone(region.entry));
+			if (!entrySnapshots.has(region.entry)) entrySnapshots.set(region.entry, structuredCloneDeep(region.entry));
 		}
 		const anchorEntry = anchorIndex >= 0 ? branchEntries[anchorIndex] : undefined;
 		if (anchorEntry && !entrySnapshots.has(anchorEntry))
-			entrySnapshots.set(anchorEntry, structuredClone(anchorEntry));
+			entrySnapshots.set(anchorEntry, structuredCloneDeep(anchorEntry));
 		applyShakeRegions(items);
 		try {
 			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);

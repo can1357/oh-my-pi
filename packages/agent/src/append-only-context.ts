@@ -17,6 +17,7 @@
 import type { AgentTool } from "./types";
 import type { Context, Message, Tool } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai";
+import { stringifyDeepJson } from "@oh-my-pi/pi-utils";
 import { normalizeTools } from "./agent-loop";
 import { messageEstimateVersion } from "./compaction/message-cache";
 import type { AgentContext, AgentMessage } from "./types";
@@ -442,23 +443,26 @@ export class AppendOnlyContextManager {
 	 * content, provider-native replay payloads, tool calls (both `toolCalls` and
 	 * OpenAI-wire `tool_calls`), tool-result ids/names/error flags (both internal
 	 * camelCase and wire snake_case), and assistant `id` — so an in-place rewrite
-	 * of *any* of these fields is visible to {@link #longestStablePrefix}. */
+	 * of *any* of these fields is visible to {@link #longestStablePrefix}. Their
+	 * JSON is written by `stringifyDeepJson`: a tool call's arguments are any
+	 * JSON, as deep as a transcript line holds. */
 	#messageDigest(msg: unknown): number {
 		if (!msg || typeof msg !== "object") return 0;
 		const m = msg as Record<string, unknown>;
 		const version = messageEstimateVersion(msg as AgentMessage);
 		const cached = this.#digestMemo.get(m);
 		if (cached !== undefined && cached.version === version) return cached.digest;
-		const payload = JSON.stringify({
-			r: m.role ?? null,
-			c: m.content ?? null,
-			pp: m.providerPayload ?? null,
-			tc: m.toolCalls ?? m.tool_calls ?? null,
-			tcid: m.toolCallId ?? m.tool_call_id ?? null,
-			tn: m.toolName ?? m.name ?? null,
-			err: m.isError ?? null,
-			id: m.id ?? null,
-		});
+		const payload =
+			stringifyDeepJson({
+				r: m.role ?? null,
+				c: m.content ?? null,
+				pp: m.providerPayload ?? null,
+				tc: m.toolCalls ?? m.tool_calls ?? null,
+				tcid: m.toolCallId ?? m.tool_call_id ?? null,
+				tn: m.toolName ?? m.name ?? null,
+				err: m.isError ?? null,
+				id: m.id ?? null,
+			}) ?? "";
 		let hash = 0;
 		for (let j = 0; j < payload.length; j++) {
 			hash = ((hash << 5) - hash + payload.charCodeAt(j)) | 0;

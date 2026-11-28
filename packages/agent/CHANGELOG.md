@@ -12,6 +12,11 @@
 - Fixed the context figure that the status line and compaction read leaving out `$` Python output, `@file` mentions and a `!` command's terminal images, and counting `!!` output that no request carries ([#20834](https://github.com/can1357/oh-my-pi/pull/20834) by [@sjawhar](https://github.com/sjawhar))
 - Fixed token counting throwing on a stored custom message whose content is neither text nor blocks ([#20834](https://github.com/can1357/oh-my-pi/pull/20834) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a failed split-turn compaction leaving its other summary request running after the failure was reported ([#20713](https://github.com/can1357/oh-my-pi/pull/20713) by [@sjawhar](https://github.com/sjawhar))
+- A resumed session holding a tool call whose arguments nest more than 40,000 levels deep no longer fails its next prompt, turn ends, compaction and context-usage readings with `Maximum call stack size exceeded`
+- Every request of a session holding a tool call nested more than 10,000 levels deep no longer spends up to seconds counting its tokens
+- With `provider.appendOnlyContext` on, a request no longer fails with `Maximum call stack size exceeded` when the conversation holds a tool call whose arguments nest more than 40,000 levels deep
+- With full message-content capture on, a request holding a tool call or result nested more than about 40,000 levels deep no longer fails or slows down, and a tool span records such a call's arguments and result as JSON instead of `[object Object]`
+- Compaction of a conversation holding a tool call whose arguments nest more than about 40,000 levels deep no longer fails with `Maximum call stack size exceeded`
 
 ### Added
 

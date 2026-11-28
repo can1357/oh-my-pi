@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, stringifyDeepJson } from "@oh-my-pi/pi-utils";
 
 const DEFAULT_RPC_MESSAGE_PAGE_LIMIT = 100;
 const MAX_RPC_MESSAGE_PAGE_LIMIT = 256;
@@ -112,7 +112,9 @@ export function pageRpcMessages(
 	let pageBytes = 2;
 	while (offset + page.length < messages.length && page.length < limit) {
 		const message = messages[offset + page.length];
-		const messageBytes = Buffer.byteLength(JSON.stringify(message), "utf8") + (page.length === 0 ? 0 : 1);
+		// Every page request measures its messages again: a deep one skips the JSON.stringify that would fail on it.
+		const messageBytes =
+			Buffer.byteLength(stringifyDeepJson(message, { probeDepth: true })!, "utf8") + (page.length === 0 ? 0 : 1);
 		if (page.length > 0 && pageBytes + messageBytes > MAX_RPC_MESSAGE_PAGE_BYTES) break;
 		page.push(message);
 		pageBytes += messageBytes;

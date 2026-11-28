@@ -43,6 +43,7 @@
  */
 
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { stringifyDeepJson } from "@oh-my-pi/pi-utils";
 import { registerCustomApi } from "../api-registry";
 import * as AIError from "../error";
 import type {
@@ -401,7 +402,13 @@ async function runMock(
 			stream.push({ type: "thinking_delta", contentIndex, delta: block.thinking, partial });
 			stream.push({ type: "thinking_end", contentIndex, content: block.thinking, partial });
 		} else {
-			const serialized = typeof block.arguments === "string" ? block.arguments : JSON.stringify(block.arguments);
+			// Scripted arguments are any JSON, as deep as a real provider's: one nested past
+			// `JSON.stringify`'s recursion goes to the deep writer without the attempt that would
+			// run out of stack.
+			const serialized =
+				typeof block.arguments === "string"
+					? block.arguments
+					: (stringifyDeepJson(block.arguments, { probeDepth: true }) ?? "");
 			stream.push({ type: "toolcall_start", contentIndex, partial });
 			stream.push({ type: "toolcall_delta", contentIndex, delta: serialized, partial });
 			stream.push({ type: "toolcall_end", contentIndex, toolCall: block, partial });

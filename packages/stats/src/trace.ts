@@ -13,7 +13,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pricingPeerFor } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { getBundledModel, type GeneratedProvider } from "@oh-my-pi/pi-catalog/models";
-import { getSessionsDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getSessionsDir, isEnoent, stringifyDeepJson } from "@oh-my-pi/pi-utils";
 import { initDb, isScheduledCatalogModel } from "./db";
 import { extractFolderFromPath, parseAllSessionEntries, resolveUsageTotal } from "./parser";
 import { getSessionRollups } from "./rollup";
@@ -271,7 +271,7 @@ function toolStartDetail(data: Record<string, unknown>): string | undefined {
 function argsPreview(args: unknown): string | undefined {
 	if (args === undefined || args === null) return undefined;
 	try {
-		return headText(JSON.stringify(args), DETAIL_MAX);
+		return headText(stringifyDeepJson(args) ?? "", DETAIL_MAX);
 	} catch {
 		return undefined;
 	}

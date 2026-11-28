@@ -17,10 +17,11 @@ const unrelatedCwd = path.join(tempRoot, "unrelated-cwd");
 const bundleDir = path.join(tempRoot, "bundle");
 const compiledPath = path.join(tempRoot, "compiled-template-probe");
 let bundlePath: string;
+const utilsJsonPath = Bun.resolveSync("@oh-my-pi/pi-utils/json", import.meta.dir);
 const dependencyStubs: Record<string, string> = {
 	"@oh-my-pi/omp-stats/trace":
 		'export const buildSessionTraceFromSnapshots = () => { throw new Error("Trace assembly is outside the template probe"); };',
-	"@oh-my-pi/pi-utils": `export const APP_NAME = "omp"; export const VERSION = ${JSON.stringify(VERSION)}; export const isEnoent = err => err?.code === "ENOENT"; export const isCompiledBinary = () => false;`,
+	"@oh-my-pi/pi-utils": `export const APP_NAME = "omp"; export const VERSION = ${JSON.stringify(VERSION)}; export const isEnoent = err => err?.code === "ENOENT"; export const isCompiledBinary = () => false; export { stringifyDeepJson } from ${JSON.stringify(utilsJsonPath)};`,
 	"../../ui/theme/service":
 		"export const getResolvedThemeColors = async () => ({}); export const getThemeExportColors = async () => ({});",
 	"../../session/sub-sessions": "export const collectSubSessions = async () => ({});",

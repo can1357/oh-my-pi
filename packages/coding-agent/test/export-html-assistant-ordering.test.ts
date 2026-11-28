@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import * as vm from "node:vm";
 import { type Document, Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
+import { stringifyJsonIteratively } from "@oh-my-pi/pi-utils/json";
 import { Marked } from "@oh-my-pi/pi-utils/marked";
 import type { SessionEntry } from "../src/session/session-entries";
 import type { SubSession } from "../src/session/sub-sessions";
@@ -87,6 +88,7 @@ function renderSession(entries: unknown[], leafId: string, subSessions?: Record<
 		window,
 		document,
 		ompMarkdown: { Marked },
+		ompJson: { stringifyJsonIteratively },
 		hljs: {
 			getLanguage: () => false,
 			highlight: () => ({ value: "" }),

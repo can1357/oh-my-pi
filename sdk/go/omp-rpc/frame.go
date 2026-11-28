@@ -114,7 +114,8 @@ func (d *chunkDecoder) push(line []byte, chunk bool) ([]byte, error) {
 	if int64(len(sequence.data)) != sequence.byteLength {
 		return nil, protocolError("RPC chunk sequence length mismatch")
 	}
-	if !utf8.Valid(sequence.data) || !json.Valid(sequence.data) {
+	// json.Valid stops at encoding/json's nesting limit, which a get_tree answer exceeds.
+	if !utf8.Valid(sequence.data) || !json.Valid(sequence.data) && !validJSON(sequence.data) {
 		return nil, protocolError("Failed to decode reassembled RPC frame")
 	}
 	if jsonKind(sequence.data) != '{' {

@@ -6,11 +6,13 @@ import json
 import math
 import os
 import queue
+import re
 import signal
 import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
+from json.decoder import WHITESPACE, scanstring
 from pathlib import Path
 from typing import Any, Callable, Generic, Mapping, Sequence, TypeVar, cast
 
@@ -44,6 +46,7 @@ from ._wire_runtime import (
     JsonValue,
     UnknownNotification,
     array,
+    decode_json_object,
     decode_str,
     expect_object,
     required,
@@ -155,12 +158,122 @@ class _RpcFrameDecoder:
         self._pending = None
         try:
             decoded = b"".join(pending.chunks).decode("utf-8")
-            frame = json.loads(decoded)
+            frame = _loads_frame(decoded)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise RpcError("Failed to decode reassembled RPC frame") from exc
         if not isinstance(frame, dict):
             raise RpcError("RPC frame must be a JSON object")
         return cast(JsonObject, frame)
+
+
+_JSON_NUMBER = re.compile(r"(-?(?:0|[1-9][0-9]*))(\.[0-9]+)?([eE][-+]?[0-9]+)?")
+_JSON_CONSTANTS: tuple[tuple[str, object], ...] = (
+    ("true", True),
+    ("false", False),
+    ("null", None),
+    ("NaN", float("nan")),
+    ("Infinity", float("inf")),
+    ("-Infinity", float("-inf")),
+)
+
+
+def _loads_frame(text: str) -> object:
+    """`json.loads(text)`, also for a frame nested deeper than `json.loads` recurses.
+
+    `get_tree` nests each session entry two levels under its parent, so the
+    tree of a session longer than a few thousand entries runs `json.loads` out
+    of recursion; such a frame is parsed again by `_loads_deep`.
+    """
+    try:
+        return json.loads(text)
+    except RecursionError:
+        return _loads_deep(text)
+
+
+def _loads_deep(text: str) -> object:
+    """`json.loads(text)` with a stack of its own instead of recursion, for any depth."""
+    containers: list[list[object] | dict[str, object]] = []
+    # The key the next member of each open object takes, innermost last.
+    keys: list[str] = []
+    pos = _json_space(text, 0)
+    while True:
+        # A value starts at `pos`: open a container, or read a scalar whole.
+        value: object
+        char = text[pos : pos + 1]
+        if char == "{" or char == "[":
+            pos = _json_space(text, pos + 1)
+            if text[pos : pos + 1] == ("}" if char == "{" else "]"):
+                value = {} if char == "{" else []
+                pos += 1
+            elif char == "{":
+                containers.append({})
+                key, pos = _json_key(text, pos)
+                keys.append(key)
+                continue
+            else:
+                containers.append([])
+                continue
+        elif char == '"':
+            value, pos = scanstring(text, pos + 1, True)
+        else:
+            value, pos = _json_scalar(text, pos)
+        # `value` is whole: add it to the innermost container, closing each container it completes.
+        while containers:
+            container = containers[-1]
+            if isinstance(container, list):
+                container.append(value)
+            else:
+                container[keys[-1]] = value
+            pos = _json_space(text, pos)
+            char = text[pos : pos + 1]
+            if char == ",":
+                pos = _json_space(text, pos + 1)
+                if isinstance(container, dict):
+                    keys[-1], pos = _json_key(text, pos)
+                break
+            if char != ("]" if isinstance(container, list) else "}"):
+                raise json.JSONDecodeError("Expecting ',' delimiter", text, pos)
+            pos += 1
+            value = containers.pop()
+            if isinstance(value, dict):
+                keys.pop()
+        else:
+            pos = _json_space(text, pos)
+            if pos != len(text):
+                raise json.JSONDecodeError("Extra data", text, pos)
+            return value
+
+
+def _json_space(text: str, pos: int) -> int:
+    # `[ \t\n\r]*` always matches, as `json.decoder` relies on.
+    return WHITESPACE.match(text, pos).end()  # type: ignore[union-attr]
+
+
+def _json_key(text: str, pos: int) -> tuple[str, int]:
+    """The member name at `pos` and the position of its value, past the colon."""
+    if text[pos : pos + 1] != '"':
+        raise json.JSONDecodeError(
+            "Expecting property name enclosed in double quotes", text, pos
+        )
+    key, pos = scanstring(text, pos + 1, True)
+    pos = _json_space(text, pos)
+    if text[pos : pos + 1] != ":":
+        raise json.JSONDecodeError("Expecting ':' delimiter", text, pos)
+    return key, _json_space(text, pos + 1)
+
+
+def _json_scalar(text: str, pos: int) -> tuple[object, int]:
+    """The number or literal at `pos`, as `json.loads` reads it, and the position after it."""
+    match = _JSON_NUMBER.match(text, pos)
+    if match is not None:
+        integer, fraction, exponent = match.groups()
+        if fraction or exponent:
+            return float(integer + (fraction or "") + (exponent or "")), match.end()
+        return int(integer), match.end()
+    for literal, value in _JSON_CONSTANTS:
+        if text.startswith(literal, pos):
+            return value, pos + len(literal)
+    raise json.JSONDecodeError("Expecting value", text, pos)
 
 
 def _process_group_id(process: subprocess.Popen[Any]) -> int | None:
@@ -266,25 +379,13 @@ def _terminate_process_group(process: subprocess.Popen[Any], pgid: int | None) -
     return True
 
 
-def _clone_json_value(value: object) -> JsonValue:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return cast(JsonValue, value)
-    if isinstance(value, list):
-        return [_clone_json_value(item) for item in value]
-    if isinstance(value, dict):
-        cloned: JsonObject = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise RpcError("RPC payload objects must use string keys")
-            cloned[key] = _clone_json_value(item)
-        return cloned
-    raise RpcError("RPC payload must be JSON-serializable")
-
-
 def _clone_json_object(value: object) -> JsonObject:
     if not isinstance(value, dict):
         raise RpcError("RPC response payload must be an object")
-    return cast(JsonObject, _clone_json_value(value))
+    try:
+        return decode_json_object(value, "RPC payload")
+    except ValueError as exc:
+        raise RpcError(str(exc)) from exc
 
 
 class RpcError(RuntimeError):
@@ -1946,7 +2047,7 @@ class RpcClient(WireClient):
                     continue
 
                 try:
-                    raw_payload = json.loads(stripped)
+                    raw_payload = _loads_frame(stripped)
                 except json.JSONDecodeError as exc:
                     snippet = stripped
                     if len(snippet) > 240:

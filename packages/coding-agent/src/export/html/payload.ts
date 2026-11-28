@@ -8,6 +8,8 @@
  * produces the same bytes in bounded chunks instead.
  */
 
+import { stringifyDeepJson } from "@oh-my-pi/pi-utils";
+
 /** Write target for encoded chunks; Bun's `FileSink` in production. */
 export interface ChunkSink {
 	write(chunk: string): unknown;
@@ -75,7 +77,9 @@ function isPlainObject(value: object): value is Record<string, unknown> {
 /**
  * Yield the JSON text of `value` in pieces whose concatenation equals
  * `JSON.stringify(value)`, descending `depth` levels into arrays and plain
- * objects. Anything deeper, or with custom serialization, is stringified whole.
+ * objects. Anything deeper, or with custom serialization, is stringified whole,
+ * by {@link stringifyDeepJson}: an entry nests as deep as `JSON.parse` reads a
+ * transcript line (millions of levels), where `JSON.stringify` stops at 40,000.
  */
 function* jsonPieces(value: unknown, depth: number): Generator<string> {
 	if (depth > 0 && typeof value === "object" && value !== null && !("toJSON" in value)) {
@@ -104,5 +108,5 @@ function* jsonPieces(value: unknown, depth: number): Generator<string> {
 			return;
 		}
 	}
-	yield JSON.stringify(value);
+	yield stringifyDeepJson(value) as string;
 }

@@ -140,7 +140,7 @@ func TestHostToolCancelWhileWaitingToWrite(t *testing.T) {
 // reuses its id (WithRequestID).
 func TestReleaseKeepsALaterOwner(t *testing.T) {
 	c, _ := startFake(t, readyV1, nil)
-	first, second := make(chan RpcResponse, 1), make(chan RpcResponse, 1)
+	first, second := make(chan callReply, 1), make(chan callReply, 1)
 	c.mu.Lock()
 	c.pending["shared"] = pendingCall{command: "get_state", reply: second}
 	c.mu.Unlock()
