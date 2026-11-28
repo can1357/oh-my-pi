@@ -49,6 +49,13 @@ export function geminiImageResult(responses: Iterable<GeminiImageResponse>): Ima
 	}
 	text = text.trim();
 	const usage = wireUsage ? mapGoogleUsage(wireUsage) : emptyUsage();
+	// `totalTokenCount` is optional on the wire, and mapGoogleUsage reports 0 without it.
+	if (wireUsage && !wireUsage.totalTokenCount) {
+		usage.totalTokens =
+			(wireUsage.promptTokenCount ?? 0) +
+			(wireUsage.candidatesTokenCount ?? 0) +
+			(wireUsage.thoughtsTokenCount ?? 0);
+	}
 	return { images, ...(text ? { text } : {}), usage };
 }
 

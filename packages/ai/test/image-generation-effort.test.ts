@@ -71,22 +71,34 @@ describe("Gemini image thinking effort", () => {
 		]);
 	});
 
-	test("bills thinking tokens as output, as chat does", async () => {
+	async function imageUsage(usageMetadata: Record<string, number>) {
 		const fetch: FetchImpl = async () =>
 			Response.json({
 				candidates: [{ content: { parts: [{ inlineData: { data: IMAGE_DATA, mimeType: "image/png" } }] } }],
-				usageMetadata: {
-					promptTokenCount: 12,
-					candidatesTokenCount: 1290,
-					thoughtsTokenCount: 310,
-					totalTokenCount: 1612,
-				},
+				usageMetadata,
 			});
 		const result = await generateGoogleImage(
 			googleImageModel("gemini-3.1-flash-image", true),
 			{ prompt: "a fox", reasoning: Effort.High },
 			{ apiKey: "key", fetch },
 		);
-		expect(result.usage).toMatchObject({ input: 12, output: 1600, reasoningTokens: 310, totalTokens: 1612 });
+		return result.usage;
+	}
+
+	test("bills thinking tokens as output, as chat does", async () => {
+		expect(
+			await imageUsage({
+				promptTokenCount: 12,
+				candidatesTokenCount: 1290,
+				thoughtsTokenCount: 310,
+				totalTokenCount: 1612,
+			}),
+		).toMatchObject({ input: 12, output: 1600, reasoningTokens: 310, totalTokens: 1612 });
+	});
+
+	test("derives the total from its parts only when Google omits totalTokenCount", async () => {
+		const parts = { promptTokenCount: 12, candidatesTokenCount: 1290, thoughtsTokenCount: 310 };
+		expect(await imageUsage(parts)).toMatchObject({ output: 1600, totalTokens: 1612 });
+		expect(await imageUsage({ ...parts, totalTokenCount: 1650 })).toMatchObject({ totalTokens: 1650 });
 	});
 });
