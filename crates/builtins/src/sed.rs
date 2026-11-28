@@ -357,6 +357,13 @@ pub struct Command {
 
 impl Default for Command {
 	fn default() -> Self {
+		Command::defined_at(ScriptLocation::default())
+	}
+}
+
+impl Command {
+	/// A command with no code, addresses or data yet, defined at `place`.
+	fn defined_at(place: ScriptLocation) -> Self {
 		Command {
 			code:       '_',
 			addr1:      None,
@@ -365,15 +372,40 @@ impl Default for Command {
 			start_line: None,
 			data:       CommandData::None,
 			next:       None,
-			location:   ScriptLocation::default(),
+			location:   place,
+		}
+	}
+
+	/// Construct with position information from the given providers.
+	pub fn at_position(lines: &ScriptLineProvider, line: &ScriptCharProvider) -> Self {
+		Command::defined_at(ScriptLocation::at_position(lines, line))
+	}
+
+	/// Move the commands this one holds, the next one and its block's, to
+	/// `owned`.
+	fn unlink(&mut self, owned: &mut Vec<Rc<RefCell<Command>>>) {
+		owned.extend(self.next.take());
+		if let CommandData::BranchTarget(target) = &mut self.data {
+			owned.extend(target.take());
 		}
 	}
 }
 
-impl Command {
-	/// Construct with position information from the given providers.
-	pub fn at_position(lines: &ScriptLineProvider, line: &ScriptCharProvider) -> Self {
-		Command { location: ScriptLocation::at_position(lines, line), ..Default::default() }
+/// Dropping a command drops the next one and the commands of its block, each
+/// dropping theirs in turn: a script of 100,000 commands, or of blocks nested
+/// 100,000 deep, which GNU sed runs, would recurse once a command and overflow
+/// the stack. The commands that only this one holds are dropped one by one
+/// with a stack of their own instead.
+impl Drop for Command {
+	fn drop(&mut self) {
+		let mut owned = Vec::new();
+		self.unlink(&mut owned);
+		while let Some(cmd) = owned.pop() {
+			// A command held elsewhere too lives on as it is.
+			if let Ok(cmd) = Rc::try_unwrap(cmd) {
+				cmd.into_inner().unlink(&mut owned);
+			}
+		}
 	}
 }
 
@@ -730,155 +762,145 @@ fn compile_with_provider(
 	Ok(result)
 }
 
-/// For every Command in the top-level `head` chain, look for
-/// `CommandData::BranchTarget(Some(sub_head))` '{' commands.
-/// Recursively patch the sub-chain, then splice its tail back to the
-/// original “next” pointer of the *parent* (falling back to its own
-/// parent_next if its own next was `None`).
+/// Link the last command of each `{` block to the command after the block:
+/// the block's own next, or, for a block that ends the block it is in, the
+/// command that one goes on to.
+/// The blocks are walked with a stack of their own, not by recursion, so a
+/// script of blocks nested 100,000 deep, which GNU sed runs, does not overflow
+/// the stack. A chain's last command is linked on only after the chain has
+/// been walked, so no walk leaves its chain.
 fn patch_block_endings(head: Option<Rc<RefCell<Command>>>) {
-	fn patch_block_endings_to_parent(
-		mut cur: Option<Rc<RefCell<Command>>>,
-		parent_next: Option<Rc<RefCell<Command>>>,
-	) {
+	// Each chain to walk, with the command its last command goes on to.
+	let mut chains = vec![(head, None)];
+	while let Some((mut cur, parent_next)) = chains.pop() {
+		let mut tail = None;
 		while let Some(rc_cmd) = cur {
-			// Borrow mutably just long enough to inspect/rewire this node
-			let cmd = rc_cmd.borrow_mut();
-			// Save this node’s own next pointer
+			let cmd = rc_cmd.borrow();
 			let own_next = cmd.next.clone();
-			// Decide what “splice target” to use:
-			//   - if this node has its own_next, use that
-			//   - otherwise, fall back to parent_next
-			let splice_target = own_next.clone().or(parent_next.clone());
-
-			// If it has a sub-block, recurse and then patch its tail
-			if let CommandData::BranchTarget(Some(ref sub_head)) = cmd.data
+			if let CommandData::BranchTarget(Some(sub_head)) = &cmd.data
 				&& cmd.code == '{'
 			{
-				// 1) recurse into the sub-chain, passing splice_target
-				patch_block_endings_to_parent(Some(sub_head.clone()), splice_target.clone());
-
-				// 2) find the tail of that sub-chain
-				let mut tail = sub_head.clone();
-				loop {
-					let next_in_sub = tail.borrow().next.clone();
-					match next_in_sub {
-						Some(n) => tail = n,
-						None => break,
-					}
-				}
-
-				// 3) splice the tail’s `.next` to splice_target
-				tail.borrow_mut().next.clone_from(&splice_target);
+				let splice_target = own_next.clone().or_else(|| parent_next.clone());
+				chains.push((Some(sub_head.clone()), splice_target));
 			}
-
-			// drop the borrow before moving on
 			drop(cmd);
-
-			// advance to the next sibling in this level
+			tail = Some(rc_cmd);
 			cur = own_next;
 		}
+		// The top-level chain has no parent, so its last command stays last.
+		if let Some(tail) = tail {
+			tail.borrow_mut().next = parent_next;
+		}
 	}
+}
 
-	// top-level has no parent, so pass None
-	patch_block_endings_to_parent(head, None);
+/// The commands of the tree `head` in script order, the commands of a block
+/// before those after it; a block is entered as its command is returned. The
+/// tree is walked with a stack of its own, not by recursion, so a script of
+/// blocks nested 100,000 deep, which GNU sed runs, does not overflow the stack.
+fn commands(head: Option<Rc<RefCell<Command>>>) -> impl Iterator<Item = Rc<RefCell<Command>>> {
+	// The commands after each block entered.
+	let mut after_blocks = Vec::new();
+	let mut cur = head;
+	std::iter::from_fn(move || {
+		let rc_cmd = cur.take().or_else(|| after_blocks.pop())?;
+		let cmd = rc_cmd.borrow();
+		if let CommandData::BranchTarget(Some(body)) = &cmd.data {
+			after_blocks.extend(cmd.next.clone());
+			cur = Some(Rc::clone(body));
+		} else {
+			cur.clone_from(&cmd.next);
+		}
+		drop(cmd);
+		Some(rc_cmd)
+	})
 }
 
 /// Populate the context's label map with references to associated commands.
 /// Like GNU sed, a label defined twice resolves to its last definition.
-fn populate_label_map(mut cur: Option<Rc<RefCell<Command>>>, context: &mut ProcessingContext) {
-	while let Some(rc_cmd) = cur.take() {
-		// Borrow mutably just long enough to inspect/rewire this node
-		let cmd = rc_cmd.borrow_mut();
-
-		// Extract any label to insert after borrow ends
-		let maybe_label = match &cmd.data {
-			CommandData::BranchTarget(Some(sub_head)) => {
-				populate_label_map(Some(sub_head.clone()), context);
-				None
-			},
-			CommandData::Label(Some(label)) => Some(label.clone()),
-			_ => None,
-		};
-
-		if let Some(label) = maybe_label
+fn populate_label_map(head: Option<Rc<RefCell<Command>>>, context: &mut ProcessingContext) {
+	for rc_cmd in commands(head) {
+		let cmd = rc_cmd.borrow();
+		if let CommandData::Label(Some(label)) = &cmd.data
 			&& cmd.code == ':'
 		{
-			context.label_to_command_map.insert(label, rc_cmd.clone());
+			context.label_to_command_map.insert(label.clone(), Rc::clone(&rc_cmd));
 		}
-
-		cur.clone_from(&cmd.next);
 	}
 }
 
 /// Populate the context's address range command list with references to
 /// associated commands.
-fn populate_range_commands(mut cur: Option<Rc<RefCell<Command>>>, context: &mut ProcessingContext) {
-	while let Some(rc_cmd) = cur.take() {
-		// Borrow mutably just long enough to inspect/rewire this node
-		let cmd = rc_cmd.borrow_mut();
-
-		// Recursively process blocks.
-		if let CommandData::BranchTarget(Some(sub_head)) = &cmd.data {
-			populate_range_commands(Some(Rc::clone(sub_head)), context);
-		}
-
-		if cmd.addr2.is_some() {
+fn populate_range_commands(head: Option<Rc<RefCell<Command>>>, context: &mut ProcessingContext) {
+	for rc_cmd in commands(head) {
+		if rc_cmd.borrow().addr2.is_some() {
 			// Save detected range command.
-			context.range_commands.push(Rc::clone(&rc_cmd));
+			context.range_commands.push(rc_cmd);
 		}
-
-		cur.clone_from(&cmd.next);
 	}
 }
 
 /// Replace branch labels with references to the corresponding commands.
 /// Raise an error on undefined labels.
 fn resolve_branch_targets(
-	mut cur: Option<Rc<RefCell<Command>>>,
+	head: Option<Rc<RefCell<Command>>>,
 	context: &mut ProcessingContext,
 ) -> SedResult<()> {
-	while let Some(rc_cmd) = cur.take() {
-		// Borrow mutably just long enough to inspect/rewire this node
+	for rc_cmd in commands(head) {
 		let mut cmd = rc_cmd.borrow_mut();
-
-		// Recurse into blocks
-		if let CommandData::BranchTarget(Some(sub_head)) = &cmd.data {
-			resolve_branch_targets(Some(sub_head.clone()), context)?;
-		}
-
 		// Only for 't' or 'b' commands:
-		if matches!(cmd.code, 't' | 'b') {
-			// Take ownership of the current data
-			let old_data = mem::replace(&mut cmd.data, CommandData::None);
-
-			// Build the replacement
-			let new_data = match old_data {
-				CommandData::Label(Some(label)) => {
-					// GNU reports this without a location and with its panic status, 4.
-					let target = context
-						.label_to_command_map
-						.get(&label)
-						.cloned()
-						.ok_or_else(|| {
-							SedError::new(4, format!("can't find label for jump to `{label}'"))
-						})?;
-					CommandData::BranchTarget(Some(target))
-				},
-				CommandData::Label(None) => CommandData::BranchTarget(None),
-				other => other, // put back anything else unchanged
-			};
-
-			// Store it back
-			cmd.data = new_data;
+		if !matches!(cmd.code, 't' | 'b') {
+			continue;
 		}
-
-		// Advance to the next sibling
-		cur.clone_from(&cmd.next);
+		let target = match &cmd.data {
+			// GNU reports this without a location and with its panic status, 4.
+			CommandData::Label(Some(label)) => Some(
+				context.label_to_command_map.get(label).cloned().ok_or_else(|| {
+					SedError::new(4, format!("can't find label for jump to `{label}'"))
+				})?,
+			),
+			CommandData::Label(None) => None,
+			_ => continue, // anything else stays as it is
+		};
+		cmd.data = CommandData::BranchTarget(target);
 	}
 	Ok(())
 }
 
+/// Close the innermost block open: the commands read since it opened become
+/// its body, and it becomes the tail of the sequence it is in. A block whose
+/// `}` was never read is refused as GNU sed refuses it, where it opened.
+fn close_block(
+	open_blocks: &mut Vec<OpenBlock>,
+	head: &mut Option<Rc<RefCell<Command>>>,
+	context: &ProcessingContext,
+) -> SedResult<Option<Rc<RefCell<Command>>>> {
+	let Some(OpenBlock { outer_head, block, depth }) = open_blocks.pop() else {
+		return Ok(None);
+	};
+	if context.parsed_block_nesting == depth {
+		// GNU reports the innermost unclosed block where it opened, at char 0.
+		let location = ScriptLocation { offset: 0, ..block.borrow().location.clone() };
+		return semantic_error(&location, "unmatched `{'");
+	}
+	block.borrow_mut().data = CommandData::BranchTarget(mem::replace(head, outer_head));
+	Ok(Some(block))
+}
+
+/// A `{` block whose commands are being read.
+struct OpenBlock {
+	/// The head of the sequence the block is in.
+	outer_head: Option<Rc<RefCell<Command>>>,
+	/// The `{` command, that sequence's tail.
+	block:      Rc<RefCell<Command>>,
+	/// The block nesting once it opened.
+	depth:      usize,
+}
+
 /// Compile provided scripts into a sequence of commands.
+/// The commands of a block are compiled with a stack of the blocks open, not
+/// by recursion, so a script of blocks nested 100,000 deep, which GNU sed
+/// runs, does not overflow the stack.
 fn compile_sequence(
 	lines: &mut ScriptLineProvider,
 	line: &mut ScriptCharProvider,
@@ -886,6 +908,7 @@ fn compile_sequence(
 ) -> SedResult<Option<Rc<RefCell<Command>>>> {
 	let mut head: Option<Rc<RefCell<Command>>> = None;
 	let mut tail: Option<Rc<RefCell<Command>>> = None;
+	let mut open_blocks = Vec::new();
 
 	loop {
 		line.eat_spaces();
@@ -907,6 +930,9 @@ fn compile_sequence(
 		if line.eol() || line.current() == '#' {
 			match lines.next_line()? {
 				None => {
+					while !open_blocks.is_empty() {
+						close_block(&mut open_blocks, &mut head, context)?;
+					}
 					return Ok(head);
 				},
 				Some(line_string) => {
@@ -932,9 +958,18 @@ fn compile_sequence(
 				cmd_mut.code = line.current();
 				(cmd_spec.handler)(lines, line, &mut cmd_mut, context)?;
 			},
-			CommandHandling::Return => return Ok(head),
+			CommandHandling::Return => {
+				// `}` ends the innermost block open.
+				drop(cmd_mut);
+				match close_block(&mut open_blocks, &mut head, context)? {
+					Some(block) => tail = Some(block),
+					None => return Ok(head),
+				}
+				continue;
+			},
 			CommandHandling::Continue => (),
 		}
+		let opens_block = cmd_mut.code == '{';
 		drop(cmd_mut);
 
 		if let Some(ref t) = tail {
@@ -944,7 +979,14 @@ fn compile_sequence(
 			// first element: set head
 			head = Some(cmd.clone());
 		}
-		tail = Some(cmd);
+		if opens_block {
+			// The commands up to the matching `}` are the block's.
+			let depth = context.parsed_block_nesting;
+			open_blocks.push(OpenBlock { outer_head: head.take(), block: cmd, depth });
+			tail = None;
+		} else {
+			tail = Some(cmd);
+		}
 	}
 }
 
@@ -1663,23 +1705,15 @@ fn compile_write_file_command(
 	Ok(CommandHandling::Continue)
 }
 
-// Handles {
+// Handles {; compile_sequence reads the block's commands.
 fn compile_block_command(
-	lines: &mut ScriptLineProvider,
+	_lines: &mut ScriptLineProvider,
 	line: &mut ScriptCharProvider,
-	cmd: &mut Command,
+	_cmd: &mut Command,
 	context: &mut ProcessingContext,
 ) -> SedResult<CommandHandling> {
 	line.advance(); // move past '{'
 	context.parsed_block_nesting += 1;
-	let depth = context.parsed_block_nesting;
-	let block_body = compile_sequence(lines, line, context)?;
-	if context.parsed_block_nesting == depth {
-		// GNU reports the innermost unclosed block where it opened, at char 0.
-		let location = ScriptLocation { offset: 0, ..cmd.location.clone() };
-		return semantic_error(&location, "unmatched `{'");
-	}
-	cmd.data = CommandData::BranchTarget(block_body);
 	Ok(CommandHandling::Continue)
 }
 
@@ -2899,7 +2933,9 @@ mod tests {
 
 	// Create a command with the specified code.
 	fn command_with_code(code: char) -> Rc<RefCell<Command>> {
-		Rc::new(RefCell::new(Command { code, ..Default::default() }))
+		let cmd = Rc::new(RefCell::new(Command::default()));
+		cmd.borrow_mut().code = code;
+		cmd
 	}
 
 	// Link the vector of passed commands into a list, returning head.
@@ -3097,7 +3133,9 @@ mod tests {
 
 	// populate_label_map
 	fn command_with_data(data: CommandData) -> Rc<RefCell<Command>> {
-		Rc::new(RefCell::new(Command { data, ..Default::default() }))
+		let cmd = Rc::new(RefCell::new(Command::default()));
+		cmd.borrow_mut().data = data;
+		cmd
 	}
 
 	#[test]
@@ -3190,13 +3228,14 @@ mod tests {
 		end: usize,
 		data: CommandData,
 	) -> Rc<RefCell<Command>> {
-		Rc::new(RefCell::new(Command {
-			code,
-			addr1: Some(Address::Line(start)),
-			addr2: Some(Address::Line(end)),
-			data,
-			..Default::default()
-		}))
+		let cmd = command_with_code(code);
+		{
+			let mut c = cmd.borrow_mut();
+			c.addr1 = Some(Address::Line(start));
+			c.addr2 = Some(Address::Line(end));
+			c.data = data;
+		}
+		cmd
 	}
 
 	#[test]
@@ -3225,22 +3264,14 @@ mod tests {
 		let mut context = ProcessingContext::default();
 
 		// Zero-address command
-		let cmd0 = Rc::new(RefCell::new(Command {
-			code: 'p',
-			data: CommandData::None,
-			..Default::default()
-		}));
+		let cmd0 = command_with_code('p');
 
 		populate_range_commands(Some(cmd0), &mut context);
 		assert!(context.range_commands.is_empty());
 
 		// One-address command
-		let cmd1 = Rc::new(RefCell::new(Command {
-			code: 'p',
-			addr1: Some(Address::Line(3)),
-			data: CommandData::None,
-			..Default::default()
-		}));
+		let cmd1 = command_with_code('p');
+		cmd1.borrow_mut().addr1 = Some(Address::Line(3));
 
 		populate_range_commands(Some(cmd1), &mut context);
 		assert!(context.range_commands.is_empty());
@@ -8740,13 +8771,27 @@ pub mod script_char_provider {
 
 #[derive(Debug)]
 pub struct ScriptCharProvider {
-	line: Vec<char>,
-	pos:  usize,
+	line:         Vec<char>,
+	pos:          usize,
+	/// The byte offset of each character and of the line's end, built once
+	/// for a line that is not ASCII; in an ASCII line a position is its byte
+	/// offset. Every command's location reads it, and a script of 100,000
+	/// blocks on one line would otherwise count its bytes once a command.
+	byte_offsets: Option<Box<[usize]>>,
 }
 
 impl ScriptCharProvider {
 	pub fn new(line_string: &str) -> Self {
-		Self { line: line_string.chars().collect(), pos: 0 }
+		let line: Vec<char> = line_string.chars().collect();
+		let byte_offsets = if line_string.is_ascii() {
+			None
+		} else {
+			let mut offsets = Vec::with_capacity(line.len() + 1);
+			offsets.extend(line_string.char_indices().map(|(i, _)| i));
+			offsets.push(line_string.len());
+			Some(offsets.into_boxed_slice())
+		};
+		Self { line, pos: 0, byte_offsets }
 	}
 
 	/// Advances to the next character, if not at end of line.
@@ -8790,10 +8835,11 @@ impl ScriptCharProvider {
 
 	/// Returns the UTF-8 byte offset of the current position; GNU counts script bytes.
 	pub fn byte_pos(&self) -> usize {
-		self.line[..self.pos.min(self.line.len())]
-			.iter()
-			.map(|c| c.len_utf8())
-			.sum()
+		let pos = self.pos.min(self.line.len());
+		match &self.byte_offsets {
+			Some(offsets) => offsets[pos],
+			None => pos,
+		}
 	}
 }
 
@@ -9977,6 +10023,45 @@ mod tests {
 			assert_ne!(code, 0, "{script}");
 			assert_eq!(capture.out(), "", "{script}");
 		}
+	}
+
+	#[test]
+	fn blocks_nested_a_hundred_thousand_deep_run_as_gnu() {
+		// GNU sed 4.9 runs a script of blocks nested 100,000 deep at once,
+		// also on a script line that is not ASCII, as it runs a script of
+		// 100,000 commands one per line. Compiling, linking, running and
+		// dropping it must not overflow the stack, nor take time that grows
+		// with the square of the script's length.
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("flat"), "p\n".repeat(100_000)).unwrap();
+		let (open, close) = ("{".repeat(100_000), "}".repeat(100_000));
+		let ascii = format!("{open}p{close}");
+		let not_ascii = format!("{open}s/é/x/{close}");
+		let flat_out = "a\n".repeat(100_000);
+		for (script, args, stdin, expected) in [
+			("nested", &["-n", ascii.as_str()][..], "a\n", "a\n"),
+			("nested, not ASCII", &["-e", not_ascii.as_str()], "é\n", "x\n"),
+			("flat, from -f", &["-n", "-f", "flat"], "a\n", flat_out.as_str()),
+		] {
+			let started = std::time::Instant::now();
+			let (code, capture) = crate::host::run_util::<Sed>(args, stdin, dir.path());
+			let out = capture.out();
+			assert_eq!(code, 0, "{script}: {}", capture.err());
+			assert!(out == expected, "{script}: {} bytes out, {} expected", out.len(), expected.len());
+			let took = started.elapsed();
+			assert!(took < std::time::Duration::from_secs(10), "{script}: {took:?}");
+		}
+	}
+
+	#[test]
+	fn unclosed_deep_blocks_are_refused_with_exit_1() {
+		// GNU sed 4.9 refuses them with exit 1, naming the innermost block.
+		let blocks = format!("{}p", "{".repeat(100_000));
+		let (code, capture) = crate::host::run_util::<Sed>(&["-n", &blocks], "a\n", "/");
+		assert_eq!(
+			(code, capture.out().as_str(), capture.err().as_str()),
+			(1, "", "sed: -e expression #1, char 0: unmatched `{'\n")
+		);
 	}
 
 	#[test]
