@@ -12,7 +12,7 @@ import type { Settings } from "../config/settings";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { clearPluginRootsAndCaches } from "../discovery/helpers";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
-import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
+import type { ExtensionRunner, SourceInfo, ToolDefinition, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { isEvalBridgeToolCallable } from "../eval/tool-bridge-policy";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
@@ -490,6 +490,8 @@ export class SessionTools {
 	#announcedMountsSeeded = false;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
+	/** Explicit removals are restrictions, unlike tools that have never been activated. */
+	#evalBridgeExcludedToolNames = new Set<string>();
 	#baseSystemPrompt: string[];
 	#systemPromptSources: SystemPromptSources | undefined;
 	/**
@@ -936,7 +938,7 @@ export class SessionTools {
 	}
 
 	/**
-	 * Looks up a registered tool by its canonical name.
+	 * Looks up a registered tool by canonical name or wire name.
 	 *
 	 * An unmatched `mcp__` name is retried under its canonical registry keys: the
 	 * identity prompt primes the Claude Code spelling `mcp__<server>__<tool>`
@@ -948,31 +950,65 @@ export class SessionTools {
 	 * shortcut could render or return the wrong tool.
 	 */
 	getToolByName(name: string): AgentTool | undefined {
-		const direct = this.#toolRegistry.get(name);
+		const direct = resolveToolWireName(this.#toolRegistry, name);
 		if (direct) return direct;
 		return resolveMCPToolAlias(name, candidate => this.#toolRegistry.get(candidate));
 	}
 
 	/**
-	 * Looks up an enabled tool through the same ACP permission gate as direct calls.
+	 * Looks up an enabled or activatable tool through the direct-call ACP gate.
 	 *
-	 * Accepts the spellings direct dispatch accepts: the canonical name and the
-	 * Claude Code `mcp__<server>__<tool>` alias. The alias resolves in one
-	 * {@link resolveMCPToolAlias} pass over every enabled tool (top-level plus
-	 * tool commands), so an alias two enabled tools answer resolves to nothing.
+	 * Discovery admission is the existing tool command mountable partition plus
+	 * manager- and extension-owned MCP tools, not the entire registry. Hidden/default-
+	 * inactive entries still need explicit activation. Initial tool grants,
+	 * explicit removals, and plan/vibe narrowing also apply; the SDK filters
+	 * unavailable built-ins and restricted-session tools at registration.
+	 * This lookup does not activate or mount anything, so calling from a cell does
+	 * not change the model-visible tool list, descriptions, or prompt cache prefix.
+	 * The shared bridge policy separately refuses checkpoint/rewind.
 	 */
 	getToolForEvalBridge(name: string): AgentTool | undefined {
-		const enabled = new Set(this.getEnabledToolNames());
 		const named = resolveToolWireName(this.#toolRegistry, name);
-		// A registered name never falls through to an alias guess, even when disabled.
-		if (named) return enabled.has(named.name) ? this.#wrapToolForAcpPermission(named) : undefined;
-		const alias = resolveMCPToolAlias(name, candidate =>
-			enabled.has(candidate) ? this.#toolRegistry.get(candidate) : undefined,
-		);
-		return alias && this.#wrapToolForAcpPermission(alias);
+		// Exact names shadow aliases even when the exact tool is disabled.
+		if (named) return this.#isEvalBridgeToolAvailable(named) ? this.#wrapToolForAcpPermission(named) : undefined;
+		// The shared resolver reports an ambiguous wire alias as a miss; name the conflict instead.
+		let wireClaimants = 0;
+		for (const tool of this.#toolRegistry.values()) {
+			if (tool.customWireName === name && ++wireClaimants > 1) {
+				throw new ToolError(`Ambiguous tool alias ${name}; use an exact session tool name.`);
+			}
+		}
+		let matches = 0;
+		const alias = resolveMCPToolAlias(name, candidate => {
+			const tool = this.#toolRegistry.get(candidate);
+			if (tool) matches++;
+			return tool;
+		});
+		if (matches > 1) throw new ToolError(`Ambiguous tool alias ${name}; use an exact session tool name.`);
+		return alias && this.#isEvalBridgeToolAvailable(alias) ? this.#wrapToolForAcpPermission(alias) : undefined;
 	}
 
-	/** Canonical and unambiguous wire names accepted by the eval bridge. */
+	#isEvalBridgeToolAvailable(tool: AgentTool & Pick<ToolDefinition, "defaultInactive">): boolean {
+		if (this.getEnabledToolNames().includes(tool.name)) return true;
+		// Match the SDK's initial activation exclusions, regardless of MCP ownership
+		// or discoverable load mode. Explicit activation above is the only opt-in.
+		if (tool.hidden === true || tool.defaultInactive === true) return false;
+		if (
+			this.#evalBridgeExcludedToolNames.has(tool.name) ||
+			this.#presentationPinnedToolNames !== undefined ||
+			this.#host.planModeEnabled() ||
+			this.#installedVibeToolNames.size > 0
+		) {
+			return false;
+		}
+		return (
+			isMountableAsToolCommand(tool) ||
+			this.#mcpManagerToolNames.has(tool.name) ||
+			this.#extensionMcpTools.has(tool.name)
+		);
+	}
+
+	/** Enabled canonical/wire names advertised by eval, not an exhaustive invocation allowlist. */
 	getEvalBridgeToolNames(): string[] {
 		const names = new Set<string>();
 		for (const name of this.getEnabledToolNames()) {
@@ -2489,6 +2525,14 @@ export class SessionTools {
 		signal?: AbortSignal,
 	): Promise<void> {
 		const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
+		const previousExcludedToolNames = this.#evalBridgeExcludedToolNames;
+		const excludedToolNames = new Set(previousExcludedToolNames);
+		const selectedToolNames = new Set(normalized);
+		for (const name of this.getEnabledToolNames()) {
+			if (!selectedToolNames.has(name)) excludedToolNames.add(name);
+		}
+		for (const name of selectedToolNames) excludedToolNames.delete(name);
+		this.#evalBridgeExcludedToolNames = excludedToolNames;
 		this.#runtimeSelectedToolNames = new Set(
 			normalized.filter(name => !mounted.has(name) && !this.#transportDemotedNames.has(name)),
 		);
@@ -2496,6 +2540,7 @@ export class SessionTools {
 			await this.#applyActiveToolsByName(normalized, forcePromptRefresh, signal);
 		} catch (error) {
 			this.#runtimeSelectedToolNames = previousRuntimeSelectedToolNames;
+			this.#evalBridgeExcludedToolNames = previousExcludedToolNames;
 			throw error;
 		}
 	}
