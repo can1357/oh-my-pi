@@ -714,14 +714,13 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 	// Up/Down in a textarea step through the rows drawn here.
 	model.wrapWidth = textareaWrap(overflow ? inner - 1 : inner);
 	const lines = column.lines;
-	if (column.overlay) {
+	// Only the picker waits for the viewport height; a note's rows were already written in buildColumn.
+	if (column.overlay && !view.note && view.dropdown !== undefined && typeof view.active === "number") {
 		const at = column.overlay.at;
 		const space = Math.max(3, rows - at);
-		const overlay =
-			!view.note && view.dropdown !== undefined && typeof view.active === "number"
-				? dropdownRows(theme, model, view.active, model.field(view.active) as ChoiceField, view, inner, space)
-				: column.overlay.rows;
-		overlay.forEach((row, i) => {
+		const field = model.field(view.active) as ChoiceField;
+		const picker = dropdownRows(theme, model, view.active, field, view, inner, space);
+		picker.forEach((row, i) => {
 			lines[at + i] = row;
 		});
 	}

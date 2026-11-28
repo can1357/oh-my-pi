@@ -340,7 +340,7 @@
 - A long session no longer keeps every finished background job, with its full output, in memory after the job's result reaches the agent ([#20836](https://github.com/can1357/oh-my-pi/pull/20836) by [@sjawhar](https://github.com/sjawhar))
 - Skipped prompt-cache writes for one-off memory extraction and consolidation in the local memory backend ([#20783](https://github.com/can1357/oh-my-pi/pull/20783) by [@farnoy](https://github.com/farnoy))
 - Starting or resuming a session no longer prints a `Tool commands: added mcp__…` line listing every MCP tool; MCP tools mounted later are still shown ([#20643](https://github.com/can1357/oh-my-pi/pull/20643) by [@Petyok](https://github.com/Petyok)).
-- An ask form's option note wraps in the terminal as it is typed instead of being cut to one row, so its caret stays visible ([#<PR>](https://github.com/can1357/oh-my-pi/pull/<PR>) by [@brianzilla](https://github.com/brianzilla)).
+- An ask form's option note wraps in the terminal as it is typed instead of being cut to one row, so its caret stays visible ([#20880](https://github.com/can1357/oh-my-pi/pull/20880) by [@brianzilla](https://github.com/brianzilla)).
 
 ### Removed
 
