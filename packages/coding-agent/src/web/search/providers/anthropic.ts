@@ -199,6 +199,7 @@ function resolveSearchEndpoint(
 		extraBetas: serverSideFallback ? [SERVER_SIDE_FALLBACK_BETA] : undefined,
 		provider: model.provider,
 		providerType: model.providerType,
+		compat: model.compat,
 		sessionId,
 	});
 	return {

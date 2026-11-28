@@ -15,7 +15,7 @@ import {
 	resolveAnthropicCustomHeadersForBaseUrl,
 } from "../providers/anthropic-headers";
 import { normalizeAnthropicBaseUrl } from "../providers/anthropic-state";
-import { applyInferenceHeaders } from "../providers/inference-headers";
+import { applyInferenceHeaders, applySessionHeader } from "../providers/inference-headers";
 import { isFoundryEnabled } from "./foundry";
 
 /** Auth configuration for Anthropic */
@@ -95,6 +95,11 @@ export interface AnthropicSearchHeaderOptions {
 	provider?: string;
 	/** The selected model's declared backend (`providerType`). */
 	providerType?: string;
+	/**
+	 * The selected model's resolved compat. Its `sessionHeader` (KDL `session-header`)
+	 * is applied after the generic identity headers, as on the streaming path.
+	 */
+	compat?: object;
 	/** Conversation id carried by the backend's session headers. */
 	sessionId?: string;
 }
@@ -127,6 +132,7 @@ export function buildAnthropicSearchHeaders(
 			protocol: "anthropic",
 			sessionId: options.sessionId,
 		});
+		applySessionHeader(headers, options.compat, options.sessionId);
 	}
 	return headers;
 }
