@@ -56,6 +56,7 @@ import {
 } from "../utils/empty-completion-retry";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { omitUnresolvedImageBlocks } from "../utils/image-blob-reference";
 import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
@@ -2776,7 +2777,8 @@ export function convertMessages(
 				const supportsImages = isOpenAICompletionsVisionSupported(model);
 				const content: ChatCompletionContentPart[] = [];
 				let omittedImages = false;
-				for (const item of msg.content) {
+				const blocks = supportsImages ? omitUnresolvedImageBlocks(msg.content, "url") : msg.content;
+				for (const item of blocks) {
 					if (item.type === "text") {
 						const text = item.text.toWellFormed();
 						if (text.trim().length === 0) continue;
@@ -3089,14 +3091,15 @@ export function convertMessages(
 
 			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
 				const toolMsg = transformedMessages[j] as ToolResultMessage;
+				const supportsImages = isOpenAICompletionsVisionSupported(model);
+				const blocks = supportsImages ? omitUnresolvedImageBlocks(toolMsg.content, "url") : toolMsg.content;
 
 				// Extract text and image content
-				const textResult = toolMsg.content
+				const textResult = blocks
 					.filter(c => c.type === "text")
 					.map(c => (c as TextContent).text)
 					.join("\n");
-				const supportsImages = isOpenAICompletionsVisionSupported(model);
-				const hasImages = toolMsg.content.some(c => c.type === "image");
+				const hasImages = blocks.some(c => c.type === "image");
 				const omittedImages = hasImages && !supportsImages;
 
 				// Always send tool result with text (or placeholder if only images)
@@ -3122,7 +3125,7 @@ export function convertMessages(
 				params.push(toolResultMsg);
 
 				if (hasImages && supportsImages) {
-					for (const block of toolMsg.content) {
+					for (const block of blocks) {
 						if (block.type === "image") {
 							imageBlocks.push({
 								type: "image_url",

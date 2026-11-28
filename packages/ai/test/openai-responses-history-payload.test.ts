@@ -532,6 +532,33 @@ describe("OpenAI responses history payload", () => {
 		},
 	);
 
+	it("leaves native history usable when an input image's blob is missing", async () => {
+		const ref = `blob:sha256:${"a".repeat(64)}`;
+		const image = { type: "input_image", detail: "auto", image_url: `data:image/png;base64,${ref}` };
+		const withFile = { type: "input_image", detail: "auto", file_id: "file-image" };
+		const item = { type: "message", role: "user", content: [image, withFile] };
+		const parts = [{ type: "input_text", text: expect.stringContaining("unresolved blob reference") }, withFile];
+		expect(sanitizeOpenAIResponsesHistoryItemsForReplay([item])).toMatchObject([{ ...item, content: parts }]);
+
+		const model = createCodexModel("gpt-5.5");
+		const payload = await buildTransformedCodexRequestBody(
+			model,
+			{
+				messages: [
+					{
+						role: "user",
+						content: "",
+						timestamp: 0,
+						providerPayload: createOpenAIResponsesHistoryPayload(model.provider, [item], false),
+					},
+				],
+			},
+			undefined,
+		);
+		expect(findResponsesInputItem(payload.input, "message")).toMatchObject({ content: parts });
+		expect(item.content[0]).toBe(image);
+	});
+
 	it("clamps stored original image hints when replay support is unknown", () => {
 		const items = [
 			{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" },

@@ -103,6 +103,7 @@ import {
 	isHarmonyDialectModel,
 } from "../utils/harmony-leak";
 import type { CapturedHttpErrorResponse } from "../utils/http-inspector";
+import { unresolvedImageReferenceOmission } from "../utils/image-blob-reference";
 import { getOpenRouterHeaders } from "../utils/openrouter-headers";
 import { isForcedToolChoice } from "../utils/tool-choice";
 import {
@@ -1973,11 +1974,16 @@ function clampResponsesImageDetail(
 	return resolved === "original" && !supportsImageDetailOriginal ? "auto" : resolved;
 }
 
-function convertResponsesInputImage(image: ImageContent, supportsImageDetailOriginal: boolean): ResponseInputImage {
-	const detail = clampResponsesImageDetail(image.detail, supportsImageDetailOriginal);
+/** Serialize one Responses image or explain why its local source is unavailable. */
+export function convertResponsesInputImage(
+	image: ImageContent,
+	detail: ResponseInputImage["detail"],
+): ResponseInputContent {
 	if (image.providerFile?.provider === "openai" && image.providerFile.id) {
 		return { type: "input_image", detail, file_id: image.providerFile.id };
 	}
+	const text = unresolvedImageReferenceOmission(image.url ?? image.data);
+	if (text !== undefined) return { type: "input_text", text };
 	return {
 		type: "input_image",
 		detail,
@@ -2014,7 +2020,9 @@ export function convertResponsesInputContent(
 		} satisfies ResponseInputText);
 	}
 	for (const item of imageBlocks) {
-		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
+		normalizedContent.push(
+			convertResponsesInputImage(item, clampResponsesImageDetail(item.detail, supportsImageDetailOriginal)),
+		);
 	}
 	if (omittedImages) {
 		normalizedContent.push({
@@ -2973,11 +2981,30 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 	supportsImageDetailOriginal: boolean,
 ): ResponsesToolResultOutputEncoding {
 	const supportsImages = model.input.includes("image");
-	const textResult = toolResult.content
-		.filter((block): block is TextContent => block.type === "text")
-		.map(block => block.text)
-		.join("\n");
+	const escapeControlTokens = isHarmonyDialectModel(model);
 	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
+	const imageOutput: ResponseInputContent[] | undefined = hasImages && supportsImages ? [] : undefined;
+	const textBlocks: string[] = [];
+	for (const block of toolResult.content) {
+		if (block.type === "text") {
+			textBlocks.push(block.text);
+			if (imageOutput) {
+				const text = block.text.toWellFormed();
+				imageOutput.push({
+					type: "input_text",
+					text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text,
+				});
+			}
+		} else if (imageOutput) {
+			const part = convertResponsesInputImage(
+				block,
+				clampResponsesImageDetail(block.detail, supportsImageDetailOriginal),
+			);
+			if (part.type === "input_text") textBlocks.push(part.text);
+			imageOutput.push(part);
+		}
+	}
+	const textResult = textBlocks.join("\n");
 	const omittedImages = hasImages && !supportsImages;
 	const rawOutput = (
 		omittedImages
@@ -2988,23 +3015,11 @@ export function encodeResponsesToolResultOutput<TApi extends Api>(
 					? "(see attached image)"
 					: ""
 	).toWellFormed();
-	const escapeControlTokens = isHarmonyDialectModel(model);
 	// Harmony-server models reject reserved control-token spellings even as tool
 	// data; escape the transport copy so a grep/read result cannot poison the
 	// session (#6913). Covers every downstream branch that consumes `output`.
 	const outputText = escapeControlTokens ? escapeHarmonyControlTokens(rawOutput) : rawOutput;
-	const output: string | ResponseInputContent[] =
-		hasImages && supportsImages
-			? toolResult.content.map((block): ResponseInputContent => {
-					if (block.type === "image") return convertResponsesInputImage(block, supportsImageDetailOriginal);
-					const text = block.text.toWellFormed();
-					return {
-						type: "input_text",
-						text: escapeControlTokens ? escapeHarmonyControlTokens(text) : text,
-					};
-				})
-			: outputText;
-	return { output, outputText };
+	return { output: imageOutput ?? outputText, outputText };
 }
 
 /** Appends one Responses tool result. */

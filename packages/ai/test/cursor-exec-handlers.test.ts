@@ -520,6 +520,26 @@ describe("Cursor request action encoding", () => {
 		}
 		expect(Array.from(selectedImage.dataOrBlobId.value)).toEqual(Array.from(Buffer.from(imageData, "base64")));
 	});
+
+	it("sends text instead of undecodable selected images or replayed prompt images", async () => {
+		const ref = `blob:sha256:${"a".repeat(64)}`;
+		const messages: Context["messages"] = [
+			{ role: "user", timestamp: 0, content: [{ type: "image", mimeType: "image/png", data: ref }] },
+			{
+				role: "user",
+				timestamp: 1,
+				content: [{ type: "image", mimeType: "image/png", data: `data:image/png;base64,${ref}` }],
+			},
+		];
+		const payload = await captureCursorPayload({ messages });
+		if (payload.action?.action.case !== "userMessageAction") throw new Error("Expected Cursor userMessageAction");
+		const user = payload.action.action.value.userMessage;
+		expect(user?.text).toContain("unresolved blob reference");
+		expect(user?.selectedContext?.selectedImages).toBeUndefined();
+		expect(buildCursorHistoryForTest(messages).rootPromptMessagesJson).toEqual([
+			{ role: "user", content: [{ type: "text", text: expect.stringContaining("unresolved blob reference") }] },
+		]);
+	});
 });
 
 describe("Cursor history encoding", () => {

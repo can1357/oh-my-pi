@@ -25,6 +25,7 @@ import {
 	parseAzureDeploymentNameMap,
 	resolveOpenAIRequestSetup,
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import { omitUnresolvedResponsesImages } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import { withResolvedHeaders } from "@oh-my-pi/pi-ai/utils/model-headers";
 import type { CatalogPolicyInputs } from "@oh-my-pi/pi-catalog/types";
@@ -255,11 +256,11 @@ export function buildCompactionV2RequestFromBody(
 		retainedUserItems?: unknown[];
 	},
 ): CompactionV2Request {
-	const input = Array.isArray(body.input) ? body.input : [];
+	const input = Array.isArray(body.input) ? omitUnresolvedResponsesImages(body.input) : [];
 	return {
 		body: { ...body, model: resolveCompactionV2Model(model), input },
 		input,
-		retainedUserItems: options?.retainedUserItems ?? input,
+		retainedUserItems: options?.retainedUserItems ? omitUnresolvedResponsesImages(options.retainedUserItems) : input,
 		retainedMessageBudget: resolveCompactionV2RetainedMessageBudget(options?.retainedMessageBudget),
 		sessionId: options?.sessionId,
 		promptCacheKey: options?.promptCacheKey,

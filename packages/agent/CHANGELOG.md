@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- OpenAI remote compaction can replay sessions with missing image blobs by replacing the unavailable images with text ([#20903](https://github.com/can1357/oh-my-pi/issues/20903)).
 - Fixed turn-end hooks being unable to tell which tool calls named no tool: `AgentTurnEndContext.unresolvedToolCallIds` now lists them ([#10876](https://github.com/can1357/oh-my-pi/issues/10876))
 - Fixed `generateHandoffFromContext` sending no output limit, so a server without its own limit could stream a handoff forever; the request is now capped at `MAX_SUMMARY_TOKENS` and ends as an incomplete-output failure ([#18031](https://github.com/can1357/oh-my-pi/issues/18031))
 - Reduced the size of authentication-gateway requests by preventing tool definitions from including internal host state.

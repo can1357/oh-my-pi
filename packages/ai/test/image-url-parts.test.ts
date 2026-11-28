@@ -5,8 +5,16 @@ import { describe, expect, it } from "bun:test";
 import { convertAnthropicMessages } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { convertMessages as convertGoogleMessages } from "@oh-my-pi/pi-ai/providers/google-shared";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
-import { convertResponsesInputContent } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import type { Context, FetchImpl, Message, Model, ProviderFileReference, UserMessage } from "@oh-my-pi/pi-ai/types";
+import { convertResponsesInputContent, encodeResponsesToolResultOutput } from "@oh-my-pi/pi-ai/providers/openai-shared";
+import type {
+	Context,
+	FetchImpl,
+	ImageContent,
+	Message,
+	Model,
+	ProviderFileReference,
+	UserMessage,
+} from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 const PNG_B64 = Buffer.from("not-actually-a-png, but bytes are opaque here").toString("base64");
@@ -113,6 +121,40 @@ describe("image url parts", () => {
 		const images = (converted ?? []).flatMap(part => (part.type === "input_image" ? [part] : []));
 		expect(images[0].image_url).toBe(BLOB_URL);
 		expect(images[1].image_url).toBe(`data:image/png;base64,${PNG_B64}`);
+	});
+
+	it("omits unresolved Responses images without losing usable sources", () => {
+		const missing: ImageContent = { type: "image", mimeType: "image/png", data: `blob:sha256:${"a".repeat(64)}` };
+		const wrapped = `data:image/png;base64,${missing.data}`;
+		const content: ImageContent[] = [
+			missing,
+			{ ...missing, data: wrapped },
+			{ ...missing, data: PNG_B64, url: wrapped },
+			{ ...missing, url: BLOB_URL },
+			{ ...missing, url: wrapped, providerFile: { provider: "openai", id: "file-image" } },
+			{ ...missing, data: PNG_B64 },
+		];
+		const parts = convertResponsesInputContent(content, true, true) ?? [];
+		expect(parts.slice(0, 3)).toEqual(
+			Array.from({ length: 3 }, () => ({
+				type: "input_text",
+				text: expect.stringContaining("unresolved blob reference"),
+			})),
+		);
+		expect(parts.slice(3)).toEqual([
+			{ type: "input_image", detail: "auto", image_url: BLOB_URL },
+			{ type: "input_image", detail: "auto", file_id: "file-image" },
+			{ type: "input_image", detail: "auto", image_url: `data:image/png;base64,${PNG_B64}` },
+		]);
+
+		const model = getBundledModel("openai", "gpt-4o-mini");
+		const result = encodeResponsesToolResultOutput(
+			{ role: "toolResult", toolCallId: "call_image", toolName: "read", content, isError: false, timestamp: 0 },
+			model,
+			true,
+		);
+		expect(result.output).toEqual(parts);
+		expect(result.outputText).toContain("unresolved blob reference");
 	});
 
 	it("google emits fileData for decorated blocks in user turns and tool results", () => {

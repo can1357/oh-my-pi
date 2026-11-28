@@ -124,6 +124,24 @@ function textOf(part: TextContent | ImageContent | undefined): string {
 }
 
 describe("dropUnreadableContextImages", () => {
+	test("reports an unresolved blob reference instead of decoding it as image bytes", async () => {
+		const ref = `blob:sha256:${"a".repeat(64)}`;
+		const guarded = await dropUnreadableContextImages(
+			{
+				messages: [
+					userMessage([{ ...INTACT_IMAGE, data: ref }, INTACT_IMAGE]),
+					userMessage([], nativeImagePayload(ref)),
+				],
+			},
+			OPENAI_RESPONSES_MODEL,
+		);
+		const [user, native] = guarded.messages;
+		if (user.role !== "user" || !Array.isArray(user.content)) throw new Error("expected user content");
+		expect(textOf(user.content[0])).toContain("unresolved blob reference");
+		expect(user.content[1]).toEqual(INTACT_IMAGE);
+		expect(nativeTextOf(nativeContentParts(native)[1])).toContain("unresolved blob reference");
+	});
+
 	test("degrades an undecodable image to text and keeps decodable siblings byte-identical", async () => {
 		const context: Context = {
 			messages: [

@@ -227,6 +227,7 @@ import {
 } from "../utils/block-symbols";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { omitUnresolvedImageBlocks } from "../utils/image-blob-reference";
 import { connectProxiedSocket, getProxyForUrl, wrapFetchForProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { waitForRetry } from "../utils/retry-wait";
@@ -6540,6 +6541,19 @@ function extractUserMessageText(msg: Message): string {
 	return text.trim();
 }
 
+function omitUnresolvedCursorImages(messages: Message[]): Message[] {
+	let rewritten: Message[] | undefined;
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		if (message.role === "assistant" || typeof message.content === "string") continue;
+		const content = omitUnresolvedImageBlocks(message.content);
+		if (content === message.content) continue;
+		rewritten ??= messages.slice();
+		rewritten[index] = { ...message, content };
+	}
+	return rewritten ?? messages;
+}
+
 function hasUserMessageImages(msg: Message): boolean {
 	return (
 		(msg.role === "user" || msg.role === "developer") &&
@@ -7112,6 +7126,7 @@ export function buildCursorHistoryForTest(
 	turnUserMessagesJson: JsonValue[];
 	turnStepMessagesJson: JsonValue[][];
 } {
+	messages = omitUnresolvedCursorImages(messages);
 	const blobStore = new Map<string, Uint8Array>();
 	const toolHistory = collectCursorToolHistory(messages, activeUserMessageIndex);
 	// Server records replay only on a resolved wire route, which this helper does not build: every turn rebuilds.
@@ -7326,6 +7341,8 @@ async function buildGrpcRequestForWireMode(
 	state: CursorRequestState,
 	wireMode: CursorWireMode,
 ): Promise<CursorTransportRequest> {
+	const messages = omitUnresolvedCursorImages(context.messages);
+	if (messages !== context.messages) context = { ...context, messages };
 	const blobStore = state.blobStore;
 
 	const systemPromptIds = buildCursorSystemPromptJsons(context.systemPrompt).map(json =>

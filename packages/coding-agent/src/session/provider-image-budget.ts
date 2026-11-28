@@ -13,6 +13,10 @@ import type {
 import { reachesBudgetedHost } from "@oh-my-pi/pi-ai";
 import { adoptFactoryReplay, toGeminiTools } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
+import {
+	unresolvedImageReferenceOmission,
+	unresolvedImageReferenceReason,
+} from "@oh-my-pi/pi-ai/utils/image-blob-reference";
 import { resolveFactoryDroidPolicy } from "@oh-my-pi/pi-catalog/compat/factory-droid";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { resolveInlineImageByteBudget, resolveRequestBodyByteLimit } from "@oh-my-pi/pi-catalog/compat/request-size";
@@ -459,6 +463,8 @@ const IMAGE_DECODE_CACHE_MAX_ENTRIES = 512;
 const imageDecodeFailures = new LRUCache<string, string | null>({ max: IMAGE_DECODE_CACHE_MAX_ENTRIES });
 
 async function unreadableImageReason(image: ImageContent): Promise<string | null> {
+	const unresolved = unresolvedImageReferenceReason(image.data);
+	if (unresolved !== undefined) return unresolved;
 	const key = `${image.mimeType}:${image.data.length}:${String(Bun.hash(image.data))}`;
 	const cached = imageDecodeFailures.get(key);
 	if (cached !== undefined) return cached;
@@ -562,6 +568,8 @@ async function replaceUnreadableContent(
  */
 async function replaceUnreadableNativePart(part: unknown): Promise<Record<string, unknown> | undefined> {
 	if (!isRecord(part) || part.type !== "input_image") return undefined;
+	const omitted = unresolvedImageReferenceOmission(part.image_url);
+	if (omitted !== undefined) return { type: "input_text", text: omitted };
 	const image = inlineImageFromDataUri(part.image_url);
 	if (!image) return undefined;
 	const reason = await unreadableImageReason(image);

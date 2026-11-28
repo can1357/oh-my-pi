@@ -1,14 +1,16 @@
-import { $env } from "@oh-my-pi/pi-utils";
+import { $env, isRecord } from "@oh-my-pi/pi-utils";
 import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
 import { isMalformedToolCallName, redactSensitiveCredentials } from "./providers/transform-messages";
 export { normalizeToolCallId } from "./providers/transform-messages";
 import type { CacheRetention, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
+import { unresolvedImageReferenceOmission } from "./utils/image-blob-reference";
 import { invalidToolCallArguments } from "./utils/tool-call-arguments";
 
 type OpenAIResponsesReplayItem = ResponseInput[number];
 const NON_WHITESPACE_RE = /\S/;
 
-export { isRecord } from "@oh-my-pi/pi-utils";
+export { isRecord };
+
 /**
  * Read a header value ignoring key casing. HTTP header names are
  * case-insensitive, but `Record<string, string>` header bags are not, so a
@@ -163,6 +165,46 @@ export function clampOpenAIResponsesImageDetailForReplay<
 		clamped?.push(clampedItem);
 	}
 	return clamped ?? items;
+}
+
+function omitUnresolvedResponsesImagePart(part: unknown): { type: "input_text"; text: string } | undefined {
+	if (!isRecord(part) || part.type !== "input_image") return undefined;
+	const text = unresolvedImageReferenceOmission(part.image_url);
+	return text === undefined ? undefined : { type: "input_text", text };
+}
+
+/** Remove unresolved image sources without discarding native message or tool-output metadata. */
+export function omitUnresolvedResponsesImageItem(item: Record<string, unknown>): Record<string, unknown> {
+	const standalone = omitUnresolvedResponsesImagePart(item);
+	if (standalone) return { type: "message", role: "user", content: [standalone] };
+
+	const key = item.type === "function_call_output" || item.type === "custom_tool_call_output" ? "output" : "content";
+	const parts = item[key];
+	if (!Array.isArray(parts)) return item;
+	let rewritten: unknown[] | undefined;
+	for (let index = 0; index < parts.length; index++) {
+		const part = omitUnresolvedResponsesImagePart(parts[index]);
+		if (!part) continue;
+		rewritten ??= parts.slice();
+		rewritten[index] = part;
+	}
+	return rewritten ? { ...item, [key]: rewritten } : item;
+}
+
+/** Omit unresolved input images in saved Responses history before replay. */
+export function omitUnresolvedResponsesImages(items: Array<Record<string, unknown>>): Array<Record<string, unknown>>;
+export function omitUnresolvedResponsesImages(items: unknown[]): unknown[];
+export function omitUnresolvedResponsesImages(items: unknown[]): unknown[] {
+	let rewritten: unknown[] | undefined;
+	for (let index = 0; index < items.length; index++) {
+		const item = items[index];
+		if (!isRecord(item)) continue;
+		const replacement = omitUnresolvedResponsesImageItem(item);
+		if (replacement === item) continue;
+		rewritten ??= items.slice();
+		rewritten[index] = replacement;
+	}
+	return rewritten ?? items;
 }
 
 function isOpenAIResponsesClientInputBoundary(item: Record<string, unknown>): boolean {
@@ -632,7 +674,7 @@ function sanitizeOpenAIResponsesHistoryItemForReplay(
 	if (item.type === "function_call") sanitizedItem.arguments = replayFunctionCallArguments(item);
 
 	return clampReplayItemImageDetail(
-		sanitizedItem,
+		omitUnresolvedResponsesImageItem(sanitizedItem),
 		supportsImageDetailOriginal,
 	) as unknown as OpenAIResponsesReplayItem;
 }

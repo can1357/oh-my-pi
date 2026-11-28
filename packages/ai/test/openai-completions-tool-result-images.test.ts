@@ -131,6 +131,61 @@ describe("openai-completions convertMessages", () => {
 		]);
 	});
 
+	it("moves unavailable tool images into result text without dropping valid attachments", () => {
+		const model = buildModel({
+			id: "vision-test",
+			name: "Vision test",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+		const ref = `blob:sha256:${"a".repeat(64)}`;
+		const missing = {
+			type: "image",
+			data: ref,
+			mimeType: "image/png",
+		} satisfies ToolResultMessage["content"][number];
+		const url = "https://example.com/image.png";
+		const messages = convertMessages(
+			model,
+			{
+				messages: [
+					{ role: "user", content: [{ ...missing, url: `data:image/png;base64,${ref}` }], timestamp: 0 },
+					{
+						role: "assistant",
+						content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "image.png" } }],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: emptyUsage,
+						stopReason: "toolUse",
+						timestamp: 1,
+					},
+					{ ...buildToolResult("tool-1", 2), content: [missing, { ...missing, url }] },
+				],
+			},
+			compat,
+		);
+		expect(messages[0]).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: expect.stringContaining("unresolved blob reference") }],
+		});
+		expect(messages[2]).toMatchObject({
+			role: "tool",
+			tool_call_id: "tool-1",
+			content: expect.stringContaining("unresolved blob reference"),
+		});
+		expect(messages[3]).toMatchObject({
+			role: "user",
+			content: [{ type: "text" }, { type: "image_url", image_url: { url } }],
+		});
+	});
+
 	it("batches tool-result images without unsupported original-detail metadata", () => {
 		const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
 		const model: Model<"openai-completions"> = {

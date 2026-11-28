@@ -388,6 +388,64 @@ function toolResultFor(callId: string, custom = false): ToolResultMessage {
 	};
 }
 
+describe("remote compaction with missing image blobs", () => {
+	const ref = `blob:sha256:${"a".repeat(64)}`;
+	const model = makeOpenAiModel({ input: ["text", "image"] });
+	const image = { type: "input_image", detail: "auto", image_url: `data:image/png;base64,${ref}` };
+	const withUrl = { ...image, image_url: "https://example.com/image.png" };
+	const stored = { type: "message", role: "user", content: [image, withUrl] };
+	const omitted = { type: "input_text", text: expect.stringContaining("unresolved blob reference") };
+
+	test("V1 preserves native history and direct references but omits unavailable images", () => {
+		const output = buildOpenAiNativeHistory(
+			[
+				{
+					role: "user",
+					timestamp: 0,
+					content: [
+						{ type: "image", mimeType: "image/png", data: ref },
+						{
+							type: "image",
+							mimeType: "image/png",
+							data: ref,
+							providerFile: { provider: "openai", id: "file-image" },
+						},
+					],
+				},
+			],
+			model,
+			[stored],
+		);
+		expect(output).toEqual([
+			{ ...stored, content: [omitted, withUrl] },
+			{
+				type: "message",
+				role: "user",
+				content: [omitted, { type: "input_image", detail: "auto", file_id: "file-image" }],
+			},
+		]);
+		expect(stored.content[0]).toBe(image);
+	});
+
+	test("V2 omits missing images from native tool output and from retained user history", () => {
+		const toolOutput = {
+			type: "function_call_output",
+			call_id: "call_image",
+			output: [{ ...image, image_url: `data:image/png;base64,${image.image_url}` }],
+		};
+		const request = buildCompactionV2Request(model, [stored, toolOutput], "summarize", {
+			retainedUserItems: [stored],
+		});
+		expect(request.body.input).toEqual(
+			expect.arrayContaining([
+				{ ...stored, content: [omitted, withUrl] },
+				{ ...toolOutput, output: [omitted] },
+			]),
+		);
+		expect(request.retainedUserItems).toEqual([{ ...stored, content: [omitted, withUrl] }]);
+	});
+});
+
 describe("buildOpenAiNativeHistory multimodal tool results", () => {
 	test("encodes ReadTool images inside the native function output", () => {
 		const imageData = Buffer.from("read image").toString("base64");

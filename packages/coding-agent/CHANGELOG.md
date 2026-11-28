@@ -131,6 +131,7 @@
 
 ### Fixed
 
+- Images missing from a restored session now say “unresolved blob reference” instead of reporting a base64 decoding error ([#20903](https://github.com/can1357/oh-my-pi/issues/20903)).
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).

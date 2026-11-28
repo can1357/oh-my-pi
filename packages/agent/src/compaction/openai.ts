@@ -28,7 +28,9 @@ import {
 	applySessionHeader,
 	resolveOpenCodeGoCacheAffinity,
 } from "@oh-my-pi/pi-ai/providers/inference-headers";
+import type { ResponseInputContent } from "@oh-my-pi/pi-ai/providers/openai-responses-wire";
 import {
+	convertResponsesInputImage,
 	encodeResponsesToolResultOutput,
 	getOpenAIPromptCacheKey,
 	hoistInterleavedResponsesToolBatchMessages,
@@ -50,6 +52,7 @@ import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
+	omitUnresolvedResponsesImageItem,
 	stripOpenAIResponsesInternalMetadataForReplay,
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
 	truncateResponseItemId,
@@ -647,7 +650,7 @@ export function buildOpenAiNativeHistory(
 				continue;
 			}
 
-			const contentBlocks: Array<Record<string, unknown>> = [];
+			const contentBlocks: ResponseInputContent[] = [];
 			if (typeof message.content === "string") {
 				if (message.content.trim().length > 0) {
 					contentBlocks.push({ type: "input_text", text: message.content.toWellFormed() });
@@ -660,11 +663,7 @@ export function buildOpenAiNativeHistory(
 						continue;
 					}
 					if (block.type === "image") {
-						contentBlocks.push({
-							type: "input_image",
-							detail: "auto",
-							image_url: `data:${block.mimeType};base64,${block.data}`,
-						});
+						contentBlocks.push(convertResponsesInputImage(block, "auto"));
 					}
 				}
 			}
@@ -862,7 +861,7 @@ export function buildOpenAiNativeHistory(
 	}
 
 	for (let index = 0; index < input.length; index++) {
-		input[index] = stripOpenAIResponsesInternalMetadataForReplay(input[index]!);
+		input[index] = stripOpenAIResponsesInternalMetadataForReplay(omitUnresolvedResponsesImageItem(input[index]!));
 	}
 	return stripOpenAIResponsesOutputOnlyStatusesForReplay(hoistInterleavedResponsesToolBatchMessages(input));
 }

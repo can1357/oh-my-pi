@@ -56,6 +56,7 @@ import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
+	omitUnresolvedResponsesImages,
 	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
 	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 	stripOpenAIResponsesComputerLinkedReasoningIdsForReplay,
@@ -4360,11 +4361,12 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 	for (const msg of transformedMessages) {
 		if (msg.role === "user" || msg.role === "developer") {
 			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
-			const historyItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider) as
-				| Array<ResponseInput[number]>
-				| undefined;
+			const historyItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider);
 			if (historyItems) {
-				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>;
+				const resolvedHistoryItems = omitUnresolvedResponsesImages(historyItems);
+				const redactedHistoryItems = redactSensitiveInObject(resolvedHistoryItems).result as Array<
+					ResponseInput[number]
+				>;
 				const sanitizedHistoryItems = dropMalformedOpenAIResponsesToolCalls(redactedHistoryItems);
 				const clampedHistoryItems = clampOpenAIResponsesImageDetailForReplay(
 					sanitizedHistoryItems,
