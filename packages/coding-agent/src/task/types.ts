@@ -161,10 +161,10 @@ function createTaskSchema(options: {
 		: {};
 	const toolsField = options.evalToolsEnabled ? { "tools?": "string[]" } : {};
 	// `model` is declared only when the caller may send it: a per-call selector
-	// while `task.perCallModel` allows task calls. An
+	// (one, or an ordered list) while `task.perCallModel` allows task calls. An
 	// undeclared `model` still reaches preflight (root keys survive lenient
 	// validation; batch items keep it via keepItemModelKey) and is refused there.
-	const gatedFields = options.perCallModel ? { "model?": "string" } : {};
+	const gatedFields = options.perCallModel ? { "model?": "string | string[]" } : {};
 	if (options.batchEnabled) {
 		if (options.isolationEnabled) {
 			const item = type.raw({
@@ -245,7 +245,7 @@ export function getTaskSchema(options: {
 	/** Advertise `steps` instead of `task` (`task.steps`); default off. */
 	steps?: boolean;
 	defaultAgent?: string;
-	/** Advertise the per-call `model` field (`task.perCallModel` allows task calls); default off. */
+	/** Advertise the per-call `model` field (`task.perCallModel` allows task calls) as one selector or an ordered list; default off. */
 	perCallModel?: boolean;
 }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";

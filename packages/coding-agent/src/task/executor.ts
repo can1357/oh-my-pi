@@ -523,7 +523,7 @@ export interface ExecutorOptions {
 	journalTaskLabel?: CompletionJournal;
 	/** Set for a per-call `model`; every model the child sends to must stay approved by these grants. */
 	perCallModelGrants?: PerCallModelGrants;
-	/** The dispatched model pattern is the exact selector the caller supplied, not a spawn-hook replacement. */
+	/** The dispatched model patterns are the caller's per-call selection, not a spawn-hook replacement; their explicit `:level`s are the caller's. */
 	callerSelectedModel?: boolean;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
@@ -5086,10 +5086,19 @@ async function runSubprocessOnThisThread(options: ExecutorOptions): Promise<Sing
 					resolvedModel: model.id,
 				});
 			}
-			// Preflight skips these checks while the registry is cold, so hold the model
-			// a per-call child actually starts on to them before its session exists.
+			// Preflight skips these checks while the registry is cold or absent, so hold the model
+			// a per-call child actually starts on, and every other literal it was offered, to them
+			// before its session exists: an unapproved candidate fails the call even when an
+			// approved one ahead of it is selected.
 			if (options.perCallModelGrants && model) {
 				assertPerCallModelApproved(model, options.perCallModelGrants, modelRegistry);
+				const chat = modelRegistry.getAvailable("chat");
+				for (const pattern of modelPatterns) {
+					const candidate = resolveModelOverride([pattern], { getAvailable: () => chat }, settings, {
+						exactOnly: true,
+					}).model;
+					if (candidate) assertPerCallModelApproved(candidate, options.perCallModelGrants, modelRegistry);
+				}
 			}
 			// The exact-name `task.agentServiceTierOverrides` entry dispatch resolved
 			// for this agent. The session evaluates it against its final model —
