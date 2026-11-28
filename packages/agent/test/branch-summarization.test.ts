@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
+	type ConvertToLlm,
+	defaultConvertToLlm,
 	type GenerateBranchSummaryOptions,
 	generateBranchSummary,
 	prepareBranchEntries,
 	type SessionEntry,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, Model, Usage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Model, Usage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
@@ -290,6 +292,121 @@ describe("branch summarization", () => {
 		const { messages } = prepareBranchEntries(entries, new Tokenizer(), 700);
 
 		expect(messages.some(m => m.role === "toolResult")).toBe(true);
+	});
+
+	// Contract: when the summary request replaces an image with its description
+	// (a host whose summarizer cannot see images), the budget counts the
+	// description. Charged as a short `[Image: …]` marker, it left room for
+	// older entries the description had filled, and the summarizer's input
+	// overran the budget.
+	test("budgets an image as the description the summary request carries in its place", async () => {
+		const description = `<image path="screenshot.png">${"Each line reports a passing test. ".repeat(100)}</image>`;
+		const screenshot: ImageContent = { type: "image", data: "A".repeat(40_000), mimeType: "image/png" };
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "user-1",
+				parentId: null,
+				timestamp: new Date(0).toISOString(),
+				message: { role: "user", content: `OLDER_BRANCH_FACT_20834 ${"context ".repeat(200)}`, timestamp: 0 },
+			},
+			{
+				type: "message",
+				id: "user-2",
+				parentId: "user-1",
+				timestamp: new Date(1).toISOString(),
+				message: {
+					role: "user",
+					content: [{ type: "text", text: "What does this show?" }, screenshot],
+					timestamp: 1,
+				},
+			},
+		];
+		// What a host that describes images sends: each image block replaced by its description.
+		const describeImages: ConvertToLlm = messages =>
+			defaultConvertToLlm(messages).map(message => {
+				if (message.role !== "user" || typeof message.content === "string") return message;
+				const content = message.content.map(block =>
+					block.type === "image" ? { type: "text" as const, text: description } : block,
+				);
+				return { ...message, content };
+			});
+		/** The summarizer's prompt for `entries` under `convertToLlm`, with 1,000 tokens for the branch. */
+		async function summarizedPrompt(convertToLlm: ConvertToLlm): Promise<string> {
+			let prompt = "";
+			await generateBranchSummary(entries, {
+				model: { ...MODEL, contextWindow: 2_000 },
+				reserveTokens: 1_000,
+				apiKey: "test-api-key",
+				signal: new AbortController().signal,
+				convertToLlm,
+				completeImpl: async (_model, ctx) => {
+					prompt = JSON.stringify(ctx.messages);
+					return {
+						role: "assistant",
+						content: [{ type: "text", text: "branch summary text" }],
+						api: "mock",
+						provider: "mock",
+						model: "mock-model",
+						usage: ZERO_USAGE,
+						stopReason: "stop",
+						timestamp: 2,
+					};
+				},
+			});
+			return prompt;
+		}
+
+		// The description takes most of the budget: the older entry no longer fits beside it.
+		const described = await summarizedPrompt(describeImages);
+		expect(described).toContain("Each line reports a passing test.");
+		expect(described).not.toContain("OLDER_BRANCH_FACT_20834");
+		// Control: the same image sent as a marker leaves room for the older entry.
+		const marked = await summarizedPrompt(defaultConvertToLlm);
+		expect(marked).toContain("OLDER_BRANCH_FACT_20834");
+	}, 15_000);
+
+	// Contract: the request converts the selected rows together, and a
+	// converter can send text there that no row converts to alone (the
+	// coding-agent's saved `live-ended` notice, sent only once the delegation it
+	// closes is selected too). Counted row by row, that text was free and the
+	// summarizer's input overran the budget.
+	test("drops the oldest rows until the branch fits as its conversion sends it", () => {
+		const notice = `CALL_ENDED_NOTICE ${"The voice call has ended. ".repeat(120)}`;
+		// Like the coding-agent's converter: the closing row goes out only to close a call the same conversion opened.
+		const convertWithNotice: ConvertToLlm = messages => {
+			let open = false;
+			return defaultConvertToLlm(messages).flatMap(message => {
+				if (message.role !== "user" || typeof message.content !== "string") return [message];
+				if (message.content === "CALL_OPENED") open = true;
+				if (message.content !== "CALL_CLOSED") return [message];
+				const closes = open;
+				open = false;
+				return closes ? [{ ...message, content: notice }] : [];
+			});
+		};
+		const rows: AgentMessage[] = [
+			{ role: "user", content: `OLDER_BRANCH_FACT_20834 ${"context ".repeat(200)}`, timestamp: 0 },
+			{ role: "user", content: "CALL_OPENED", timestamp: 1 },
+			{ role: "user", content: "CALL_CLOSED", timestamp: 2 },
+		];
+		const entries = rows.map((message, index): SessionEntry => ({
+			type: "message",
+			id: `row-${index}`,
+			parentId: index === 0 ? null : `row-${index - 1}`,
+			timestamp: new Date(index).toISOString(),
+			message,
+		}));
+		const tokenizer = new Tokenizer();
+		const sentTokens = (messages: AgentMessage[]) => tokenizer.countMessages(convertWithNotice(messages));
+		// Control: the rows fit the 1,000-token budget one by one, and the notice pushes the three together past it.
+		expect(rows.reduce((sum, row) => sum + sentTokens([row]), 0)).toBeLessThanOrEqual(1_000);
+		expect(sentTokens(rows)).toBeGreaterThan(1_000);
+
+		const { messages } = prepareBranchEntries(entries, tokenizer, 1_000, convertWithNotice);
+
+		expect(messages).toEqual(rows.slice(1));
+		expect(sentTokens(messages)).toBeLessThanOrEqual(1_000);
 	});
 
 	// Contract: the summarizer receives the branch as plain text, so a Codex

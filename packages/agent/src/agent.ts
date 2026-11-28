@@ -126,6 +126,16 @@ export interface AgentOptions {
 	convertToLlm?: AgentLoopConfig["convertToLlm"];
 
 	/**
+	 * The text a request to `model` carries in place of each image block, or
+	 * `undefined` when it carries the images. Give it the image policy
+	 * {@link convertToLlm} applies, so {@link Agent.tokenizer} counts each
+	 * image as the request sends it; read on every `tokenizer` access, so a
+	 * model switch or a setting change applies at once. Default: images are
+	 * charged at their pixel size.
+	 */
+	imagePlaceholder?: (model: Model) => string | undefined;
+
+	/**
 	 * Optional transform applied to context before convertToLlm.
 	 * Use for context pruning, injecting external context, etc.
 	 */
@@ -483,6 +493,7 @@ export class Agent {
 	#repetitionPenalty?: number;
 	#serviceTier?: ServiceTier;
 	#serviceTierResolver?: (model: Model) => ServiceTier | undefined;
+	#imagePlaceholder?: (model: Model) => string | undefined;
 	#hideThinkingSummary?: boolean;
 	#maxRetryDelayMs?: number;
 	#getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
@@ -584,6 +595,7 @@ export class Agent {
 		if (opts.initialState?.messages) this.#state.messages = opts.initialState.messages.slice();
 		if (opts.initialState?.pendingToolCalls)
 			this.#state.pendingToolCalls = new Set(opts.initialState.pendingToolCalls);
+		this.#imagePlaceholder = opts.imagePlaceholder;
 		this.#syncTokenizer(this.#state.model);
 		this.#convertToLlm = opts.convertToLlm || defaultConvertToLlm;
 		this.#transformContext = opts.transformContext;
@@ -927,16 +939,20 @@ export class Agent {
 	/**
 	 * Tokenizer for the active model. The instance is replaced whenever the
 	 * active model's encoding, image or thinking-replay pricing, or
-	 * replayed-reasoning reader changes (see {@link setModel}), or its Responses
-	 * session turns cold or warm, so callers must not cache it across model
-	 * switches or requests.
+	 * replayed-reasoning reader changes (see {@link setModel}), its Responses
+	 * session turns cold or warm, or the text its requests carry for images
+	 * ({@link imagePlaceholderFor}) changes, so callers must not cache it
+	 * across model switches or requests.
 	 */
 	get tokenizer(): Tokenizer {
-		// The provider warms or closes a session inside a request, so the replay
-		// state is read here rather than only on model switches.
+		// The provider warms or closes a session inside a request, and the image
+		// placeholder follows host settings, so both are read here rather than
+		// only on model switches.
 		const model = this.#state.model;
 		if (
-			openAIResponsesReplaysNativeHistory(model, this.#providerSessionState) !== this.#tokenizer.nativeHistoryReplay
+			openAIResponsesReplaysNativeHistory(model, this.#providerSessionState) !==
+				this.#tokenizer.nativeHistoryReplay ||
+			(model ? this.imagePlaceholderFor(model) : undefined) !== this.#tokenizer.imagePlaceholder
 		) {
 			this.#syncTokenizer(model);
 		}
@@ -944,13 +960,25 @@ export class Agent {
 	}
 
 	/**
+	 * The text this agent's requests to `model` carry in place of each image
+	 * block, or `undefined` when they carry the images
+	 * ({@link AgentOptions.imagePlaceholder}).
+	 */
+	imagePlaceholderFor(model: Model): string | undefined {
+		return this.#imagePlaceholder?.(model);
+	}
+
+	/**
 	 * Swap the tokenizer only when the encoding, image or thinking-replay
-	 * pricing, replayed-reasoning reader or native-history replay state
-	 * actually changes, so the warm
-	 * per-message memo survives same-pricing model switches.
+	 * pricing, replayed-reasoning reader, native-history replay state or image
+	 * placeholder actually changes, so the warm per-message memo survives
+	 * same-pricing model switches.
 	 */
 	#syncTokenizer(model: Model | null | undefined): void {
-		const options = { nativeHistoryReplay: openAIResponsesReplaysNativeHistory(model, this.#providerSessionState) };
+		const options = {
+			nativeHistoryReplay: openAIResponsesReplaysNativeHistory(model, this.#providerSessionState),
+			imagePlaceholder: model ? this.imagePlaceholderFor(model) : undefined,
+		};
 		if (!this.#tokenizer.countsAlike(model, options)) this.#tokenizer = new Tokenizer(model, options);
 	}
 

@@ -11,11 +11,14 @@
 - Fixed shake replacing tool results smaller than its recovery placeholder, which grew context instead of shrinking it ([#7204](https://github.com/can1357/oh-my-pi/issues/7204))
 - Fixed the context figure that the status line and compaction read leaving out `$` Python output, `@file` mentions and a `!` command's terminal images, and counting `!!` output that no request carries ([#20834](https://github.com/can1357/oh-my-pi/pull/20834) by [@sjawhar](https://github.com/sjawhar))
 - Fixed token counting throwing on a stored custom message whose content is neither text nor blocks ([#20834](https://github.com/can1357/oh-my-pi/pull/20834) by [@sjawhar](https://github.com/sjawhar))
+- Fixed branch summaries overrunning the summarizer's input on branches with described images or saved call notices ([#20892](https://github.com/can1357/oh-my-pi/pull/20892) by [@sjawhar](https://github.com/sjawhar))
 - Fixed a failed split-turn compaction leaving its other summary request running after the failure was reported ([#20713](https://github.com/can1357/oh-my-pi/pull/20713) by [@sjawhar](https://github.com/sjawhar))
 
 ### Added
 
 - Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
+- Added `AgentOptions.imagePlaceholder` (read with `Agent.imagePlaceholderFor(model)`) and `TokenizerOptions.imagePlaceholder`: the text a request carries in place of each image, which the tokenizer then counts instead of the image's pixels ([#20892](https://github.com/can1357/oh-my-pi/pull/20892) by [@sjawhar](https://github.com/sjawhar))
+- Added `wrapFileMention(path, content)`, the `<file>` wrapper an `@file` mention sends for one file, so a host's converter and the tokenizer count the same text ([#20892](https://github.com/can1357/oh-my-pi/pull/20892) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 

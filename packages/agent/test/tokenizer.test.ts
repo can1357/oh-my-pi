@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as path from "node:path";
-import type { Api, AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, ImageContent, Model, ProviderSessionState, UserMessage } from "@oh-my-pi/pi-ai";
 import { renderDemotedThinking } from "@oh-my-pi/pi-ai/dialect/demotion";
 import { adoptFactoryReplay } from "@oh-my-pi/pi-ai/providers/factory-droid/gemini";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -14,6 +14,7 @@ import * as natives from "@oh-my-pi/pi-natives";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { Agent } from "../src/agent";
 import type { SessionMessageEntry } from "../src/compaction/entries";
+import { convertMessageToLlm, type CustomMessage, createCompactionSummaryMessage } from "../src/compaction/messages";
 import { applyShakeRegions, collectShakeRegions, RESCUE_SHAKE_CONFIG } from "../src/compaction/shake";
 import { Tokenizer, tokenizerEncodingForModel } from "../src/tokenizer";
 import type { AgentMessage } from "../src/types";
@@ -183,7 +184,7 @@ describe("countTokens with modes", () => {
 // against a context window larger than the real one.
 describe("countMessage", () => {
 	const TEXT = "x".repeat(4000);
-	const IMAGE = { type: "image", data: "A".repeat(40_000), mimeType: "image/png" };
+	const IMAGE: ImageContent = { type: "image", data: "A".repeat(40_000), mimeType: "image/png" };
 
 	test("counts a developer message like the user message it mirrors", () => {
 		const tokenizer = new Tokenizer();
@@ -205,15 +206,11 @@ describe("countMessage", () => {
 			content: [IMAGE],
 			isError: false,
 			timestamp: 0,
-		} as unknown as AgentMessage);
+		});
 
 		expect(inToolResult).toBeGreaterThan(0);
-		expect(tokenizer.countMessage({ role: "user", content: [IMAGE], timestamp: 0 } as unknown as AgentMessage)).toBe(
-			inToolResult,
-		);
-		expect(
-			tokenizer.countMessage({ role: "developer", content: [IMAGE], timestamp: 0 } as unknown as AgentMessage),
-		).toBe(inToolResult);
+		expect(tokenizer.countMessage({ role: "user", content: [IMAGE], timestamp: 0 })).toBe(inToolResult);
+		expect(tokenizer.countMessage({ role: "developer", content: [IMAGE], timestamp: 0 })).toBe(inToolResult);
 	});
 
 	test("adds the image estimate on top of the text beside it", () => {
@@ -227,97 +224,52 @@ describe("countMessage", () => {
 			role: "user",
 			content: [{ type: "text", text: TEXT }, IMAGE],
 			timestamp: 0,
-		} as unknown as AgentMessage);
+		});
 
 		expect(textOnly).toBeGreaterThan(0);
 		expect(withImage).toBe(textOnly + inToolResultImageEstimate(tokenizer));
 	});
 });
 
-// Contract: the coding-agent's app roles count what its `convertToLlm` sends
-// for them. A `$` Python cell or an `@file` mention that counts as free lets the
-// rate-limit fallback, compaction and the status line read a large context as
-// small; a `!!` run, which no request carries, counted as sent and read a small
-// context as large.
-describe("countMessage app roles", () => {
-	const COMMAND = "cat build.log";
-	const CODE = "print(open('build.log').read())";
-	const OUTPUT = "build step finished without warnings\n".repeat(400);
-	const IMAGE = { type: "image", data: "A".repeat(40_000), mimeType: "image/png" };
-	/** Tokens the rendering's fixed framing (lead-in, fences, `<file>` tags) may add. */
-	const FRAMING = 50;
-	const tokenizer = new Tokenizer();
+// Contract: countMessage charges what the request carries in place of a
+// message. A custom message kept out of context is in no request, and counted
+// it read a small context as large. Where the input carries text in place of
+// images (images blocked, a model that cannot read them, a summarizer's
+// transcript), each image costs that text, not thousands of tokens of pixels.
+describe("countMessage of what the request carries instead", () => {
+	const IMAGE: ImageContent = { type: "image", data: "A".repeat(40_000), mimeType: "image/png" };
+	const NOTICE = "Image reading is disabled.";
 
-	/** What a user message carrying `texts` counts; the request sends each app role as such text. */
-	function asUserText(...texts: string[]): number {
-		return tokenizer.countMessage({
+	test("counts 0 for a custom message kept out of context", () => {
+		const note: CustomMessage = {
+			role: "custom",
+			customType: "note",
+			content: "A note shown to the user and never sent to the model. ".repeat(40),
+			display: true,
+			excludeFromContext: true,
+			timestamp: 0,
+		};
+
+		expect(convertMessageToLlm(note)).toBeUndefined();
+		expect(new Tokenizer().countMessage(note)).toBe(0);
+	});
+
+	test("charges an image block or a snapcompact frame as the image placeholder's text", () => {
+		const tokenizer = new Tokenizer(undefined, { imagePlaceholder: NOTICE });
+		const withImage: UserMessage = { role: "user", content: [{ type: "text", text: "see" }, IMAGE], timestamp: 0 };
+		const asSent: UserMessage = {
 			role: "user",
-			content: texts.map(text => ({ type: "text", text })),
+			content: [
+				{ type: "text", text: "see" },
+				{ type: "text", text: NOTICE },
+			],
 			timestamp: 0,
-		} as AgentMessage);
-	}
+		};
+		const archived = createCompactionSummaryMessage("summary", 1000, new Date(0).toISOString(), { images: [IMAGE] });
+		const summary = createCompactionSummaryMessage("summary", 1000, new Date(0).toISOString());
 
-	function execution(
-		role: "bashExecution" | "pythonExecution",
-		fields: { excludeFromContext?: boolean; images?: unknown[] } = {},
-	): AgentMessage {
-		return {
-			role,
-			...(role === "bashExecution" ? { command: COMMAND } : { code: CODE }),
-			output: OUTPUT,
-			exitCode: 0,
-			cancelled: false,
-			truncated: false,
-			timestamp: 0,
-			...fields,
-		} as unknown as AgentMessage;
-	}
-
-	function fileMention(files: Array<{ path: string; content: string; image?: unknown }>): AgentMessage {
-		return { role: "fileMention", files, timestamp: 0 } as unknown as AgentMessage;
-	}
-
-	test.each([
-		{ role: "bashExecution", source: COMMAND },
-		{ role: "pythonExecution", source: CODE },
-	] as const)("$role counts its source and output, and 0 when excluded from context", ({ role, source }) => {
-		const content = asUserText(source, OUTPUT);
-		const included = tokenizer.countMessage(execution(role));
-		expect(included).toBeGreaterThanOrEqual(content);
-		expect(included).toBeLessThan(content + FRAMING);
-		expect(tokenizer.countMessage(execution(role, { excludeFromContext: true }))).toBe(0);
-	});
-
-	test("an @file mention counts each file's path and content", () => {
-		const second = "export const answer = 42;\n".repeat(200);
-		const content = asUserText("build.log", OUTPUT, "src/answer.ts", second);
-		const mention = tokenizer.countMessage(
-			fileMention([
-				{ path: "build.log", content: OUTPUT },
-				{ path: "src/answer.ts", content: second },
-			]),
-		);
-		expect(mention).toBeGreaterThanOrEqual(content);
-		expect(mention).toBeLessThan(content + 2 * FRAMING);
-	});
-
-	test("charges a bash run's terminal images and an @file image as a user message charges them", () => {
-		const image = inToolResultImageEstimate(tokenizer);
-		expect(tokenizer.countMessage(execution("bashExecution", { images: [IMAGE] }))).toBe(
-			tokenizer.countMessage(execution("bashExecution")) + image,
-		);
-		const screenshot = { path: "screenshot.png", content: "" };
-		expect(tokenizer.countMessage(fileMention([{ ...screenshot, image: IMAGE }]))).toBe(
-			tokenizer.countMessage(fileMention([screenshot])) + image,
-		);
-	});
-
-	// A persisted custom message whose content is neither text nor blocks is
-	// dropped from every request; counting it threw, and the context figure
-	// with it.
-	test("counts 0 for custom content no request carries", () => {
-		const custom = { role: "custom", customType: "note", content: undefined, display: false, timestamp: 0 };
-		expect(tokenizer.countMessage(custom as unknown as AgentMessage)).toBe(0);
+		expect(tokenizer.countMessage(withImage)).toBe(tokenizer.countMessage(asSent));
+		expect(tokenizer.countMessage(archived)).toBe(tokenizer.countMessage(summary) + tokenizer.countTokens(NOTICE));
 	});
 });
 
@@ -1153,5 +1105,5 @@ function inToolResultImageEstimate(tokenizer: Tokenizer): number {
 		content: [{ type: "image", data: "A".repeat(40_000), mimeType: "image/png" }],
 		isError: false,
 		timestamp: 0,
-	} as unknown as AgentMessage);
+	});
 }

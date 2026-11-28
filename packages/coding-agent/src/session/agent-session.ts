@@ -546,7 +546,7 @@ import {
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
-import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
+import { kRequestImagePlaceholder, SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { type AiuTotals, sessionAiu } from "./aiu-billing";
 import { sumSubagentTreeCost } from "../modes/agent-hub-runtime";
 import type { AgentCostSnapshot, AgentTreeSpend } from "../modes/view-model/overlays/agent-hub-projection";
@@ -4718,14 +4718,21 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 		if (this.#sessionMessageAlreadyPersisted(message)) return;
 		if (message.role === "assistant") {
-			const assistantMsg = message as AssistantMessage;
+			const assistantMsg = message as AssistantMessage & { [kRequestImagePlaceholder]?: string | null };
 			if (this.#recovery.isClassifierRefusal(assistantMsg)) return;
 			if (isEmptyErrorTurn(assistantMsg)) return;
 			if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
+				const requestImagePlaceholder = assistantMsg[kRequestImagePlaceholder];
 				assistantMsg.contextSnapshot = {
 					promptTokens: calculatePromptTokens(assistantMsg.usage),
 					...this.#stats.nonMessageSnapshot(),
 					compactionEpoch: this.#stats.compactionEpoch,
+					// The image policy the prompt was charged under, as its request was converted: the status count
+					// anchors on it only under the same one. A reply no host stamped falls back to the live policy.
+					imagePlaceholder:
+						requestImagePlaceholder !== undefined
+							? requestImagePlaceholder
+							: (this.agent.tokenizer.imagePlaceholder ?? null),
 				};
 			}
 		}
