@@ -4,6 +4,7 @@ import type { Provider } from "../types";
 import { isWithinUsageReserve, resolveUsedFraction } from "../usage";
 import type {
 	CredentialRankingContext,
+	CredentialRankingStrategy,
 	UsageCredential,
 	UsageFetchContext,
 	UsageFetchParams,
@@ -30,7 +31,7 @@ import type {
 } from "./types";
 import { buildRefreshableOauthCredential, mergeRefreshedUsageCredential } from "./usage";
 import type { UsageService } from "./usage";
-import { REMOTE_REFRESH_SENTINEL } from "./types";
+import { REMOTE_REFRESH_SENTINEL, STATIC_KEY_CREDENTIAL_ID } from "./types";
 import { oauthUsageRequest, usageCacheIdentity, usageRequest } from "./usage-cache";
 import type { UsageRequestDescriptor } from "./usage-cache";
 import { isUsageLimitExhausted, reserveUsageLimits, usageReportMetadataValue } from "./usage-report";
@@ -91,8 +92,10 @@ export class CredentialHealth implements HealthApi {
 	 *
 	 * Pool aggregation is deliberately conservative: one healthy sibling makes
 	 * the model healthy, while any unknown sibling prevents a depleted/reserve
-	 * conclusion. Static runtime/config/env credentials return unknown because
-	 * they bypass the managed account pool.
+	 * conclusion. Static runtime/config/env credentials bypass the managed
+	 * account pool, so they return unknown unless the provider's usage adapter
+	 * reads the quota of exactly the key inference sends (`usesRequestKey`):
+	 * that key is then the one implicit account.
 	 */
 	async model(provider: Provider, options: ModelUsageHealthOptions): Promise<ModelUsageHealth> {
 		options.signal?.throwIfAborted();
@@ -100,11 +103,15 @@ export class CredentialHealth implements HealthApi {
 		const strategy = this.#deps.strategies(provider);
 		const usageProvider = this.#deps.usage.providerFor(provider);
 		const canFetchOAuthUsage = usageProvider !== undefined || this.#deps.store.getUsageReport !== undefined;
-		if (
-			!origin ||
-			(origin.kind !== "oauth" && origin.kind !== "api_key") ||
-			(strategy === undefined && (origin.kind !== "oauth" || !canFetchOAuthUsage))
-		) {
+		const reserveFraction = Number.isFinite(options.reserveFraction)
+			? Math.max(0, Math.min(1, options.reserveFraction))
+			: this.#deps.policies.defaultReservePct / 100;
+		if (!origin) return { state: "unknown", accounts: [] };
+		if (origin.kind !== "oauth" && origin.kind !== "api_key") {
+			if (usageProvider?.usesRequestKey !== true) return { state: "unknown", accounts: [] };
+			return this.#requestKeyHealth(provider, strategy, reserveFraction, options);
+		}
+		if (strategy === undefined && (origin.kind !== "oauth" || !canFetchOAuthUsage)) {
 			return { state: "unknown", accounts: [] };
 		}
 
@@ -132,9 +139,6 @@ export class CredentialHealth implements HealthApi {
 		const planEligibilityByCredential = new Map<number, boolean | undefined>();
 		const blockScope = strategy?.blockScope?.(rankingContext);
 		const blockScopes = credentialBlockScopesForRequest(strategy, rankingContext, blockScope);
-		const reserveFraction = Number.isFinite(options.reserveFraction)
-			? Math.max(0, Math.min(1, options.reserveFraction))
-			: this.#deps.policies.defaultReservePct / 100;
 
 		const resolveReserveFraction = (entry: StoredCredential): number => {
 			const policy = this.#deps.policies.forCredential(provider, entry.credential);
@@ -193,42 +197,10 @@ export class CredentialHealth implements HealthApi {
 					};
 				}
 				if (!report) return { credentialId: entry.id, credentialType, state: "unknown" };
-
-				const limits = reserveUsageLimits(strategy, report, rankingContext);
-				if (limits.length === 0) return { credentialId: entry.id, credentialType, state: "unknown" };
-
-				const currentLimits = limits.filter(limit => {
-					const resetsAt = limit.window?.resetsAt;
-					return resetsAt === undefined || resetsAt > nowMs || report.fetchedAt >= resetsAt;
-				});
-				if (currentLimits.length === 0) {
-					return { credentialId: entry.id, credentialType, state: "unknown" };
-				}
-				const activeExhausted = currentLimits.filter(limit => isUsageLimitExhausted(limit));
-				if (activeExhausted.length > 0) {
-					const futureResets = activeExhausted
-						.map(limit => limit.window?.resetsAt)
-						.filter((resetsAt): resetsAt is number => resetsAt !== undefined && resetsAt > nowMs);
-					return {
-						credentialId: entry.id,
-						credentialType,
-						state: "depleted",
-						resetsAt: futureResets.length > 0 ? Math.min(...futureResets) : undefined,
-					};
-				}
-
-				const usedFractions = currentLimits
-					.map(resolveUsedFraction)
-					.filter((fraction): fraction is number => fraction !== undefined);
-				if (usedFractions.length === 0) {
-					return { credentialId: entry.id, credentialType, state: "unknown" };
-				}
-				const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
 				return {
 					credentialId: entry.id,
 					credentialType,
-					state: isWithinUsageReserve(remainingFraction, resolveReserveFraction(entry)) ? "reserve" : "healthy",
-					remainingFraction,
+					...reportAccountHealth(report, strategy, rankingContext, resolveReserveFraction(entry), nowMs),
 				};
 			}),
 		);
@@ -244,6 +216,53 @@ export class CredentialHealth implements HealthApi {
 		if (accounts.some(account => account.state === "unknown")) return { state: "unknown", accounts };
 		if (accounts.some(account => account.state === "reserve")) return { state: "reserve", accounts };
 		return { state: "depleted", accounts };
+	}
+
+	/**
+	 * Health of the static key inference sends, read through a usage adapter
+	 * that reports on that exact key. No pool row backs it, so no block,
+	 * affinity, or per-credential policy applies: its own report decides. A
+	 * failed refresh reads as unknown instead of replaying the previous report.
+	 */
+	async #requestKeyHealth(
+		provider: Provider,
+		strategy: CredentialRankingStrategy | undefined,
+		reserveFraction: number,
+		options: ModelUsageHealthOptions,
+	): Promise<ModelUsageHealth> {
+		const apiKey = await this.#deps.keys.peek(provider);
+		if (!apiKey) return { state: "unknown", accounts: [] };
+		let report: UsageReport | null;
+		try {
+			report = await raceSignal(
+				this.#deps.usage.report(
+					provider,
+					{ type: "api_key", key: apiKey },
+					{
+						baseUrl: options.baseUrl,
+						timeoutMs: this.#deps.usage.requestTimeoutMs,
+						signal: options.signal,
+						retainLastGoodOnFailure: false,
+					},
+				),
+				options.signal,
+				"usage fetch aborted",
+			);
+		} catch (error) {
+			if (options.signal?.aborted) throw error;
+			report = null;
+		}
+		const rankingContext: CredentialRankingContext = { modelId: options.modelId };
+		if (strategy?.planGate?.(rankingContext)?.(report) === false) return { state: "depleted", accounts: [] };
+		const account: ModelUsageAccountHealth = {
+			credentialId: STATIC_KEY_CREDENTIAL_ID,
+			credentialType: "api_key",
+			selected: true,
+			...(report
+				? reportAccountHealth(report, strategy, rankingContext, reserveFraction, Date.now())
+				: { state: "unknown" }),
+		};
+		return { state: account.state, accounts: [account] };
 	}
 	/**
 	 * Probe each stored credential against its provider's auth-verifying usage
@@ -439,4 +458,39 @@ export class CredentialHealth implements HealthApi {
 
 		return results;
 	}
+}
+
+/** One account's usage state from its report, against the limits that gate the requested model. */
+function reportAccountHealth(
+	report: UsageReport,
+	strategy: CredentialRankingStrategy | undefined,
+	rankingContext: CredentialRankingContext,
+	reserveFraction: number,
+	nowMs: number,
+): Pick<ModelUsageAccountHealth, "state" | "remainingFraction" | "resetsAt"> {
+	const limits = reserveUsageLimits(strategy, report, rankingContext);
+	if (limits.length === 0) return { state: "unknown" };
+
+	const currentLimits = limits.filter(limit => {
+		const resetsAt = limit.window?.resetsAt;
+		return resetsAt === undefined || resetsAt > nowMs || report.fetchedAt >= resetsAt;
+	});
+	if (currentLimits.length === 0) return { state: "unknown" };
+	const activeExhausted = currentLimits.filter(limit => isUsageLimitExhausted(limit));
+	if (activeExhausted.length > 0) {
+		const futureResets = activeExhausted
+			.map(limit => limit.window?.resetsAt)
+			.filter((resetsAt): resetsAt is number => resetsAt !== undefined && resetsAt > nowMs);
+		return { state: "depleted", resetsAt: futureResets.length > 0 ? Math.min(...futureResets) : undefined };
+	}
+
+	const usedFractions = currentLimits
+		.map(resolveUsedFraction)
+		.filter((fraction): fraction is number => fraction !== undefined);
+	if (usedFractions.length === 0) return { state: "unknown" };
+	const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
+	return {
+		state: isWithinUsageReserve(remainingFraction, reserveFraction) ? "reserve" : "healthy",
+		remainingFraction,
+	};
 }

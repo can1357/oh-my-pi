@@ -10,6 +10,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { CredentialRankingStrategy, UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
+import { litellmUsageProvider } from "@oh-my-pi/pi-ai/usage/litellm";
 import { logger } from "@oh-my-pi/pi-utils";
 import { TempDir } from "@oh-my-pi/pi-utils/temp";
 
@@ -497,6 +498,39 @@ describe("AuthStorage model usage health", () => {
 			reserveFraction: 0.1,
 		});
 		expect(health).toEqual({ state: "unknown", accounts: [] });
+	});
+
+	it("evaluates a config key as one account when the usage adapter reads the request key", async () => {
+		const fetchImpl = Object.assign(
+			async (input: string | URL | Request) =>
+				String(input) === "https://gw.example/key/info"
+					? Response.json({
+							info: {
+								spend: 50,
+								max_budget: 50,
+								budget_duration: "30d",
+								budget_reset_at: "2030-01-31T00:00:00",
+							},
+						})
+					: new Response(null, { status: 404 }),
+			{ preconnect: fetch.preconnect },
+		);
+		const storage = new AuthStorage(makeStore([]), {
+			usageProviderResolver: provider => (provider === "litellm" ? litellmUsageProvider : undefined),
+			configValueResolver: async value => value,
+			usageFetch: fetchImpl,
+		});
+		storages.push(storage);
+		storage.keys.setConfig("litellm", "sk-gateway");
+		const health = await storage.health.model("litellm", {
+			modelId: "gpt-5",
+			baseUrl: "https://gw.example/v1",
+			reserveFraction: 0.1,
+		});
+		expect(health.state).toBe("depleted");
+		expect(health.accounts).toMatchObject([
+			{ credentialType: "api_key", state: "depleted", resetsAt: Date.UTC(2030, 0, 31) },
+		]);
 	});
 
 	it("cancels the caller without cancelling the shared local usage fetch", async () => {

@@ -2448,6 +2448,8 @@ export class TurnRecovery {
 			refusalWalk?: boolean;
 			/** The retry policy retries the failed model if this hop does not switch. */
 			sameModelRetryAvailable?: boolean;
+			/** Cancels the hop's usage probes and model swap. */
+			signal?: AbortSignal;
 		},
 	): Promise<boolean> {
 		const ceiling = this.#host.thinkingLevelCeiling();
@@ -2557,6 +2559,24 @@ export class TurnRecovery {
 				// unexecuted-tool turns remain part of the request (issue #8065).
 				if (!this.#host.contextFitsModel(candidate, options?.preserveFailedTurn ? undefined : failedMessage)) {
 					continue;
+				}
+				// Under usage-aware fallback a fetched usage report can prove a candidate
+				// exhausted or inside its reserve before the switch sends it a request
+				// (e.g. a static gateway key out of quota).
+				if (cfgRetryUsageAwareFallback.get(this.#host.settings)) {
+					try {
+						const candidateHealth = await this.#host.modelRegistry.authStorage.health.model(candidate.provider, {
+							modelId: candidate.id,
+							sessionId: this.#host.sessionId(),
+							baseUrl: candidate.baseUrl,
+							reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
+							signal: options?.signal,
+						});
+						if (candidateHealth.state === "depleted" || candidateHealth.state === "reserve") continue;
+					} catch {
+						// Unknown usage fails open for an otherwise valid fallback.
+					}
+					options?.signal?.throwIfAborted();
 				}
 				// A session restricted to an OAuth account pool throws for a provider
 				// none of its pooled accounts can serve; that candidate is unavailable,
@@ -3272,35 +3292,51 @@ export class TurnRecovery {
 					const usageCooldownMs = recordedUsageLimitOutcome?.switchedCredential ? undefined : usageLimitWaitMs;
 					this.noteRetryFallbackCooldown(currentSelector, usageCooldownMs ?? parsedRetryAfterMs, errorMessage);
 				}
-				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
-					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
-					pinFallback: classifierRefusal,
-					refusalWalk: classifierRefusal,
-					preserveFailedTurn,
-					wrapAround: longUsageLimitFallback,
-					// Deferring a chain candidate only pays when the code below makes
-					// another attempt on this model that can succeed. Each term is a
-					// branch below that, with no switch, ends the turn instead (a spent
-					// budget, a refusal or account-policy denial, a hard-error or
-					// Fast-degrade consult the classifier would not retry, a wait past
-					// the fail-fast cap), or, under `retry.rateLimitWalksChain`, a rate
-					// limit on this model, which the next attempt re-hits.
-					sameModelRetryAvailable:
-						!retryBudgetExhausted &&
-						!sourceRateLimited &&
-						!classifierRefusal &&
-						!accountPolicyDenial &&
-						!(
-							(options?.fireworksFastFallback || options?.hardErrorFallback) &&
-							!this.isRetryableError(message)
-						) &&
-						!billingCap &&
-						!exceedsDelayCap(
-							usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
-								? parsedRetryAfterMs
-								: delayMs,
-						),
-				});
+				// Usage probes and the model swap can wait; register their signal as
+				// the retry controller so `abortRetry()` cancels the hop like the
+				// backoff sleep below.
+				const walkAbortController = new AbortController();
+				this.#retryAbortController?.abort();
+				this.#retryAbortController = walkAbortController;
+				try {
+					switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
+						excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
+						pinFallback: classifierRefusal,
+						refusalWalk: classifierRefusal,
+						preserveFailedTurn,
+						wrapAround: longUsageLimitFallback,
+						// Deferring a chain candidate only pays when the code below makes
+						// another attempt on this model that can succeed. Each term is a
+						// branch below that, with no switch, ends the turn instead (a spent
+						// budget, a refusal or account-policy denial, a hard-error or
+						// Fast-degrade consult the classifier would not retry, a wait past
+						// the fail-fast cap), or, under `retry.rateLimitWalksChain`, a rate
+						// limit on this model, which the next attempt re-hits.
+						sameModelRetryAvailable:
+							!retryBudgetExhausted &&
+							!sourceRateLimited &&
+							!classifierRefusal &&
+							!accountPolicyDenial &&
+							!(
+								(options?.fireworksFastFallback || options?.hardErrorFallback) &&
+								!this.isRetryableError(message)
+							) &&
+							!billingCap &&
+							!exceedsDelayCap(
+								usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs
+									? parsedRetryAfterMs
+									: delayMs,
+							),
+						signal: walkAbortController.signal,
+					});
+					walkAbortController.signal.throwIfAborted();
+				} catch (error) {
+					if (!walkAbortController.signal.aborted) throw error;
+					if (this.#retryAbortController !== walkAbortController) return false;
+					return this.#endCancelledRetry();
+				} finally {
+					if (this.#retryAbortController === walkAbortController) this.#retryAbortController = undefined;
+				}
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
 			// of the role-fallback setting: it's intrinsic to the Fast contract (speed

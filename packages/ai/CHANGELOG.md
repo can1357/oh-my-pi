@@ -14,6 +14,7 @@
 - Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added an `upstreamModel` option to mock provider responses, so a mocked turn can report a model that served it other than the one requested ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
 - Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
+- Added Bifrost virtual-key budget and rate-limit usage reporting ([#20287](https://github.com/can1357/oh-my-pi/pull/20287) by [@Xytronix](https://github.com/Xytronix))
 - `synthesizeSpeech` sends the model's configured `voice` when the request names none, and `speechModelSupportsFormat` reports whether a speech model returns a container (catalog `Model.speechFormats`) ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 - Added Kimi Code global-region support: `kimi-code-global` models stream with Kimi client headers and report quota from `api.kimi.ai` ([#15889](https://github.com/can1357/oh-my-pi/pull/15889) by [@z80dev](https://github.com/z80dev), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
 - GitHub Copilot Claude (Messages) and GPT (Responses) replies now record the server-reported AI-credit charge (`copilot_usage.total_nano_aiu` with its per-token-type split) on `usage.aiu`; a reply that finished without a billing frame sets `usage.aiuMissing` instead of reporting 0 ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
@@ -33,6 +34,7 @@
 - Fixed DeepSeek sessions failing every request with `400 … image special token` after a tool result quoted DeepSeek's chat template: `<｜…｜>` and `｜DSML｜` tokens in outgoing message text are now broken with a zero-width space ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
 - Usage checks no longer send a private gateway’s configured credential to a built-in provider’s public quota service.
 - Fixed auth-gateway (`pi-native`) requests sending options the gateway discards, such as `providerOptions`, `cwd`, and fallback-credit replay bodies
+- Usage-aware fallback now sees when a config- or env-keyed Bifrost or LiteLLM gateway key is out of quota ([#20287](https://github.com/can1357/oh-my-pi/pull/20287) by [@Xytronix](https://github.com/Xytronix))
 - Speech synthesis rejects a 2xx response with a JSON body as a `ProviderHttpError` (using the status the body reports, else 502) instead of returning it as audio ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 - Added xAI speech-to-text support, including use through the authentication gateway.
 - Added the `priority` service tier for Devin models, using the fast lane and corresponding fast pricing.
