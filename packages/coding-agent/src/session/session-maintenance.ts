@@ -55,7 +55,7 @@ import {
 	pruneToolOutputs,
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
-import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
+import { PrefixToolCallCache, type ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
@@ -125,7 +125,7 @@ import {
 	getReadableCompactionEntry,
 	isTranscriptEntry,
 } from "./session-context";
-import type { CompactionEntry, SessionEntry } from "./session-entries";
+import { type CompactionEntry, entriesAfterLatestReset, type SessionEntry } from "./session-entries";
 import type { HandoffGenerationOptions } from "./session-handoff";
 import type { SessionManager } from "./session-manager";
 import type { SessionProviderBoundary } from "./session-provider-boundary";
@@ -699,6 +699,15 @@ export class SessionMaintenance {
 		readonly AgentMessage[],
 		{ key: string; length: number; first: AgentMessage | undefined }
 	>();
+	/**
+	 * Tool calls before the latest compaction boundary, kept across the prune and
+	 * shake passes while that boundary and `bodyRevision` hold: any in-place
+	 * rewrite, as every persisted prune makes, bumps that revision, and the next
+	 * pass's first miss indexes the prefix again. It holds one boundary's calls: a
+	 * new compaction, branch, or root replaces them, and
+	 * {@link clearPrefixToolCalls} drops them when the conversation ends.
+	 */
+	readonly #prefixToolCalls = new PrefixToolCallCache(() => this.#host.sessionManager.bodyRevision);
 	readonly #host: SessionMaintenanceHost;
 
 	get #model(): Model | undefined {
@@ -764,6 +773,19 @@ export class SessionMaintenance {
 	/** Clears per-prompt recovery counters when a new user prompt starts. */
 	resetForNewPrompt(): void {
 		this.#incompleteRecoveryAttempts = 0;
+	}
+
+	/**
+	 * Drops the tool calls cached from the outgoing conversation's summarized-away
+	 * history. The session calls this when another conversation replaces it
+	 * (`/new`, `/clear`, a resume or reload, a branch), as soon as the old entries
+	 * are gone even when the new journal then fails to save, and when it releases
+	 * its memory on dispose, so the cache keeps none of the entries it let go of.
+	 * After `/clear` the passes read only the entries after its boundary, so they
+	 * cannot index the cleared history again.
+	 */
+	clearPrefixToolCalls(): void {
+		this.#prefixToolCalls.clear();
 	}
 
 	/** Whether blocking compaction owns prompt admission. */
@@ -840,7 +862,7 @@ export class SessionMaintenance {
 	}
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
-		const branchEntries = this.#host.sessionManager.getBranchView();
+		const branchEntries = entriesAfterLatestReset(this.#host.sessionManager.getBranchView());
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const model = this.#host.model();
 		const result = pruneToolOutputs(
@@ -852,6 +874,7 @@ export class SessionMaintenance {
 				// Cache-stable boundary: never re-write the warm, already-sent prefix
 				// (deep stale/age victims) or summarized-away entries every turn.
 				keepBoundaryId,
+				prefixToolCalls: this.#prefixToolCalls,
 				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
 				cacheWarmSuffixTokens: model?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
 				cacheLookbackPositions: model ? resolvePromptCacheLookback(model) : undefined,
@@ -887,7 +910,7 @@ export class SessionMaintenance {
 	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const { supersedeReads, dropUseless } = this.#compactionSettings;
 		if (!supersedeReads && !dropUseless) return undefined;
-		const branchEntries = this.#host.sessionManager.getBranchView();
+		const branchEntries = entriesAfterLatestReset(this.#host.sessionManager.getBranchView());
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const model = this.#host.model();
 		const result = pruneSupersededToolResults(
@@ -901,6 +924,7 @@ export class SessionMaintenance {
 				// Never re-write summarized-away entries; only flush the whole sent
 				// region once the cache is genuinely cold (idle exceeds the 1h TTL).
 				keepBoundaryId,
+				prefixToolCalls: this.#prefixToolCalls,
 				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
 				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
 				suffixTokenLimit: model?.thinking?.prefixBinding === true ? 0 : undefined,
@@ -1139,15 +1163,18 @@ export class SessionMaintenance {
 		assertCurrent();
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
+		// Only the entries after the latest `/clear` reach the prompt; a compaction before it bounds nothing.
+		const sentEntries = entriesAfterLatestReset(branchEntries);
 		const config = this.#withPlanProtection({
 			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
 			// Skip entries summarized away by the latest compaction — shaking them
 			// only churns persisted history with no prompt/cache effect. The cut is
 			// unconditional on the wire (see `buildSessionContext`), so a compaction
 			// the active model cannot replay still hides its prefix from the prompt.
-			keepBoundaryId: latestCompaction?.firstKeptEntryId,
+			keepBoundaryId: getLatestCompactionEntry(sentEntries)?.firstKeptEntryId,
+			prefixToolCalls: this.#prefixToolCalls,
 		});
-		let regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
+		let regions = collectShakeRegions(sentEntries, this.#tokenizer, config);
 		if (opts.toolResultsOnly) regions = regions.filter(region => region.kind === "toolResult");
 		if (regions.length === 0) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };

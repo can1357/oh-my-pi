@@ -17,7 +17,7 @@ import type { Context, Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { isPerCallContextMessage, markPerCallContextMessage } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import dateCwdReminderTemplate from "../prompts/system/date-cwd-reminder.md" with { type: "text" };
-import type { SessionEntry } from "./session-entries";
+import { entriesAfterLatestReset, type SessionEntry } from "./session-entries";
 
 /** Renders the reminder text for the given local calendar date and cwd. */
 export function renderDateCwdReminder(date: string, cwd: string): string {
@@ -114,9 +114,7 @@ export function createSessionDateCwdReminderJournal(sessionManager: {
 	return {
 		load: () => {
 			// The model's history starts after the latest `/clear`; earlier placements belong to a history it no longer sees.
-			const branch = sessionManager.getBranchView();
-			const start = branch.findLastIndex(entry => entry.type === "reset_boundary") + 1;
-			return branch.slice(start).flatMap(entry => placementOfEntry(entry) ?? []);
+			return entriesAfterLatestReset(sessionManager.getBranchView()).flatMap(entry => placementOfEntry(entry) ?? []);
 		},
 		record: placement => {
 			written.add(sessionManager.appendCustomEntry(DATE_CWD_REMINDER_CUSTOM_TYPE, placement));

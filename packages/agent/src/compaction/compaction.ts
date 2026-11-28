@@ -1539,6 +1539,30 @@ export function findReadableCompactionIndex(
 }
 
 /**
+ * Index on `path` of the first entry the context keeps from `compaction`, which
+ * sits at `compactionIndex`: its `firstKeptEntryId`, or the entry after
+ * `providerReplayThroughEntryId` when `firstKeptEntryId` is empty; the
+ * compaction itself when neither lies before it. Entries before this index
+ * reach the context only through the compaction's summary. The search runs
+ * back from the compaction: what it keeps lies just before it, while the
+ * history it summarized can be long.
+ */
+export function compactionKeptStart(
+	path: readonly SessionEntry[],
+	compaction: CompactionEntry,
+	compactionIndex: number,
+): number {
+	const { firstKeptEntryId, providerReplayThroughEntryId } = compaction;
+	const replayed = firstKeptEntryId === "";
+	const keptId = replayed ? providerReplayThroughEntryId : firstKeptEntryId;
+	if (!keptId) return compactionIndex;
+	for (let index = compactionIndex - 1; index >= 0; index--) {
+		if (path[index].id === keptId) return replayed ? index + 1 : index;
+	}
+	return compactionIndex;
+}
+
+/**
  * Pass the caller's warm `tokenizer` (the Agent's for the active model) so the
  * full-branch estimate walk hits its memo; the cold default is for one-shot
  * callers that have no live agent. A cold walk over a long branch blocks the
@@ -1606,22 +1630,12 @@ function prepareCompactionUnlabeled(
 			}
 		}
 	} else if (previousCompaction) {
-		// Local and Anthropic summaries exclude the retained tail, whose
-		// original entries precede the compaction record.
-		for (let i = resetBoundaryIndex + 1; i < prevCompactionIndex; i++) {
-			if (pathEntries[i].id === previousCompaction.firstKeptEntryId) {
-				boundaryStart = i;
-				break;
-			}
-		}
-		if (previousCompaction.firstKeptEntryId === "" && previousCompaction.providerReplayThroughEntryId) {
-			// An empty snapshot tail can still have turns appended during
-			// background compaction; those start after the summarized snapshot.
-			const snapshotIdx = pathEntries.findIndex(
-				entry => entry.id === previousCompaction.providerReplayThroughEntryId,
-			);
-			if (snapshotIdx >= 0 && snapshotIdx < prevCompactionIndex) boundaryStart = snapshotIdx + 1;
-		}
+		// Local and Anthropic summaries exclude the retained tail, whose original
+		// entries precede the compaction record. An empty snapshot tail can still
+		// have turns appended during background compaction; those start after the
+		// summarized snapshot.
+		const keptStart = compactionKeptStart(pathEntries, previousCompaction, prevCompactionIndex);
+		if (keptStart > resetBoundaryIndex && keptStart < prevCompactionIndex) boundaryStart = keptStart;
 	}
 
 	// Keep original IDs beside the converted messages so estimation, cutting,

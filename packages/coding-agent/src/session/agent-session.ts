@@ -7515,6 +7515,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.agent.setAppendOnlyContext(undefined);
 		this.rawSseDebugBuffer.clear();
 		this.sessionManager.releaseRetainedEntries();
+		this.#maintenance.clearPrefixToolCalls();
 	}
 
 	/** Releases deferred TTSR deliveries discarded by a session reset. */
@@ -7634,6 +7635,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// newSession()).
 		this.#clearCheckpointRuntimeState();
 		this.#clearSessionScopedToolState();
+		this.#maintenance.clearPrefixToolCalls();
 
 		// Rotate provider-side session state so a provider that keeps conversation
 		// history server-side starts a brand-new exchange rather than resuming the
@@ -13083,6 +13085,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
 			} finally {
+				// The manager drops the old entries before it writes the new journal, so release
+				// what the cache indexed from them even when that write fails.
+				this.#maintenance.clearPrefixToolCalls();
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
 
@@ -15110,6 +15115,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			// The switch has committed: a rolled-back one must not write the target's journal.
 			this.#persistRebuiltEvalStateContext(this.agent.state.messages);
+			// Even a reload of the same file loaded new entries in place of the ones the cache indexed.
+			this.#maintenance.clearPrefixToolCalls();
 			if (switchingToDifferentSession || didReloadConversationChange) {
 				this.#clearSessionScopedToolState();
 				this.#prunedTerminalFailure = undefined;
@@ -15395,6 +15402,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
 			} finally {
+				// Both manager calls replace the old entries before they write the new journal, so
+				// release what the cache indexed from them even when that write fails.
+				this.#maintenance.clearPrefixToolCalls();
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
 			this.#prunedTerminalFailure = undefined;
@@ -15519,6 +15529,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
 			} finally {
+				// The manager replaces the old entries before it writes the new journal, so release
+				// what the cache indexed from them even when that write fails.
+				this.#maintenance.clearPrefixToolCalls();
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
 

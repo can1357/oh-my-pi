@@ -4,16 +4,18 @@
 
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { Tokenizer } from "../tokenizer";
-import type { AgentMessage, AgentToolCall } from "../types";
+import type { AgentMessage } from "../types";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
 import { invalidateMessageCache } from "./message-cache";
 import { type ConvertToLlm, defaultConvertToLlm, getMessageFromEntry } from "./messages";
 import {
-	collectToolCallsById,
 	getToolResultMessage,
 	isProtectedToolResult,
 	isSkillReadToolResult,
+	type PrefixToolCallCache,
 	type ProtectedToolMatcher,
+	resolveBoundaryIndex,
+	SentToolCalls,
 } from "./tool-protection";
 import { isAlternateFormReadSelector, splitReadSelector } from "./utils";
 
@@ -57,10 +59,19 @@ export interface PruneConfig extends CacheLookbackConfig {
 	 * Compaction boundary: the `firstKeptEntryId` of the latest compaction on
 	 * the branch. Entries at indices BEFORE this id are summarized away and never
 	 * sent to the model, so mutating them only churns persisted history without
-	 * shrinking the prompt — they are skipped. Undefined = no compaction (the
-	 * whole branch is sent).
+	 * shrinking the prompt — they are skipped. `""` (a compaction that kept no
+	 * entry) puts the boundary where that compaction's context starts
+	 * (`compactionKeptStart`): the entry after its `providerReplayThroughEntryId`,
+	 * else the compaction itself. Undefined = no compaction (the whole branch
+	 * is sent).
 	 */
 	keepBoundaryId?: string;
+	/**
+	 * The session's cache of the tool calls before {@link keepBoundaryId}, kept
+	 * across passes (see {@link PrefixToolCallCache}). Undefined = each pass
+	 * indexes those calls itself on its first miss.
+	 */
+	prefixToolCalls?: PrefixToolCallCache;
 	/**
 	 * Prompt-cache guard. When set, a tool result whose all-message suffix
 	 * (tokens of every message after it) EXCEEDS this is part of the warm,
@@ -173,10 +184,15 @@ export interface SupersedePruneConfig extends CacheLookbackConfig {
 	/**
 	 * Compaction boundary (`firstKeptEntryId` of the latest compaction). Entries
 	 * before it are summarized away and never sent, so they are skipped in every
-	 * path — including the idle flush — to avoid pointless history churn.
+	 * path — including the idle flush — to avoid pointless history churn. `""`
+	 * (a compaction that kept no entry) puts the boundary where that compaction's
+	 * context starts (`compactionKeptStart`): the entry after its
+	 * `providerReplayThroughEntryId`, else the compaction itself.
 	 * Undefined = no compaction (the whole branch is sent).
 	 */
 	keepBoundaryId?: string;
+	/** The session's cache of the tool calls before {@link keepBoundaryId} (same contract as {@link PruneConfig.prefixToolCalls}). */
+	prefixToolCalls?: PrefixToolCallCache;
 	/** Tool-result protection matchers (same contract as {@link PruneConfig.protectedTools}). */
 	protectedTools: ProtectedToolMatcher[];
 }
@@ -294,46 +310,6 @@ export const MIN_PRUNE_TOKENS = 50;
 function estimatePrunedSavings(tokens: number, notice: string): number {
 	const noticeTokens = Math.ceil(notice.length / 4);
 	return Math.max(0, tokens - noticeTokens);
-}
-
-/**
- * Resolve the array index of the compaction boundary (`keepBoundaryId`). Entries
- * before this index are summarized away by the latest compaction and never sent,
- * so prune passes must not mutate them. Returns 0 when there is no boundary (no
- * compaction → whole branch is sent) or the id is absent from `entries`.
- */
-function resolveBoundaryIndex(entries: readonly SessionEntry[], keepBoundaryId: string | undefined): number {
-	if (keepBoundaryId === undefined) return 0;
-	for (let i = entries.length - 1; i >= 0; i--) {
-		if (entries[i].id === keepBoundaryId) return i;
-	}
-	return 0;
-}
-
-/**
- * Tool-call lookup for results in the sent region `entries[start, end)`.
- * Calls there are indexed eagerly; the summarized-away prefix is indexed only
- * on the first miss, so lookups match a whole-branch scan while the common
- * case never walks history the boundary already excludes.
- */
-class SentToolCalls {
-	readonly #entries: readonly SessionEntry[];
-	readonly #start: number;
-	readonly #sent: Map<string, AgentToolCall>;
-	#prefix: Map<string, AgentToolCall> | undefined;
-
-	constructor(entries: readonly SessionEntry[], start: number) {
-		this.#entries = entries;
-		this.#start = start;
-		this.#sent = collectToolCallsById(entries, start);
-	}
-
-	get(id: string): AgentToolCall | undefined {
-		const call = this.#sent.get(id);
-		if (call !== undefined || this.#start === 0) return call;
-		this.#prefix ??= collectToolCallsById(this.#entries, 0, this.#start);
-		return this.#prefix.get(id);
-	}
 }
 
 interface SupersedeCandidate {
@@ -455,7 +431,7 @@ export function pruneSupersededToolResults(
 	config: SupersedePruneConfig,
 ): PruneResult {
 	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
-	const toolCalls = new SentToolCalls(entries, boundaryIndex);
+	const toolCalls = new SentToolCalls(entries, boundaryIndex, config.prefixToolCalls);
 	const candidates = config.supersedeKey
 		? collectSupersededResults(
 				entries,
@@ -546,7 +522,7 @@ export function pruneToolOutputs(
 	// Entries before the compaction boundary are summarized away (never sent)
 	// and are never prune candidates, so no pass below walks them.
 	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
-	const toolCalls = new SentToolCalls(entries, boundaryIndex);
+	const toolCalls = new SentToolCalls(entries, boundaryIndex, config.prefixToolCalls);
 	const supersededMessages = config.supersedeKey
 		? new Set(
 				collectSupersededResults(

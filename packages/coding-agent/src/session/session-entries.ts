@@ -496,6 +496,18 @@ export function resolveSessionLeafId(entries: readonly SessionEntry[]): string |
 	return lastSelfSelectedLeafId(entries);
 }
 
+/**
+ * The entries of `branch` after its latest `/clear` boundary ({@link ResetBoundaryEntry}), or `branch`
+ * itself when it has none: the history the model still sees, since the prompt starts after that boundary
+ * (`buildSessionContext`). A compaction or other entry before it shapes nothing in this tail.
+ */
+export function entriesAfterLatestReset(branch: SessionEntry[]): SessionEntry[];
+export function entriesAfterLatestReset(branch: readonly SessionEntry[]): readonly SessionEntry[];
+export function entriesAfterLatestReset(branch: readonly SessionEntry[]): readonly SessionEntry[] {
+	const start = branch.findLastIndex(entry => entry.type === "reset_boundary") + 1;
+	return start === 0 ? branch : branch.slice(start);
+}
+
 /** Raw logical file entry after loaders strip any fixed-width title slot. */
 export type FileEntry = SessionHeader | SessionEntry;
 

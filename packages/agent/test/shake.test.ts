@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
-import type { SessionEntry, SessionMessageEntry, ShakeConfig } from "@oh-my-pi/pi-agent-core/compaction";
+import type {
+	CompactionEntry,
+	SessionEntry,
+	SessionMessageEntry,
+	ShakeConfig,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	AGGRESSIVE_SHAKE_CONFIG,
 	applyShakeRegion,
@@ -146,6 +151,37 @@ describe("collectShakeRegions — tool results", () => {
 		const tokens = tokenizer.countMessage(entry.message);
 		expect(collectShakeRegions([entry], tokenizer, cfg({ minSavings: tokens * 10 }))).toHaveLength(0);
 		expect(collectShakeRegions([entry], tokenizer, cfg({ minSavings: 0 }))).toHaveLength(1);
+	});
+});
+
+describe("collectShakeRegions — compaction boundary", () => {
+	test("a compaction that kept no entry starts the walk and the protect window at that compaction", () => {
+		const text = "word ".repeat(160);
+		const summarized = messageEntry(toolResultMessage("bash", text));
+		const compaction: CompactionEntry = {
+			type: "compaction",
+			id: nextId(),
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			summary: "summary of the turns before",
+			firstKeptEntryId: "",
+			tokensBefore: 10_000,
+		};
+		const older = messageEntry(toolResultMessage("bash", text));
+		const middle = messageEntry(toolResultMessage("bash", text));
+		const recent = messageEntry(toolResultMessage("bash", text));
+		const perEntry = tokenizer.countMessage(older.message);
+
+		// The window covers the most recent ~1.5 sent entries: middle & recent protected, older eligible,
+		// and the result the compaction summarized away is not sent, so it is not shaken.
+		const regions = collectShakeRegions(
+			[summarized, compaction, older, middle, recent],
+			tokenizer,
+			cfg({ keepBoundaryId: "", protectTokens: Math.floor(perEntry * 1.5) }),
+		);
+
+		expect(regions).toHaveLength(1);
+		expect(regions[0].entry).toBe(older);
 	});
 });
 

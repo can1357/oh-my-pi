@@ -17,12 +17,14 @@ import type { AgentMessage } from "../types";
 import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "./entries";
 import { invalidateMessageCache } from "./message-cache";
 import {
-	collectToolCallsById,
 	getToolResultMessage,
 	isArtifactRecoveryToolResult,
 	isProtectedToolResult,
 	isSkillReadToolResult,
+	type PrefixToolCallCache,
 	type ProtectedToolMatcher,
+	resolveBoundaryIndex,
+	SentToolCalls,
 } from "./tool-protection";
 
 export interface ShakeConfig {
@@ -37,11 +39,20 @@ export interface ShakeConfig {
 	/**
 	 * Compaction boundary (`firstKeptEntryId` of the latest compaction). Entries
 	 * before it are summarized away and never sent, so they are skipped — shaking
-	 * them only churns persisted history. Undefined = no compaction (whole branch
-	 * is sent). Note: shake still elides the warm cached prefix at/after the
+	 * them only churns persisted history. `""` (a compaction that kept no entry)
+	 * puts the boundary where that compaction's context starts
+	 * (`compactionKeptStart`): the entry after its `providerReplayThroughEntryId`,
+	 * else the compaction itself. Undefined = no compaction (whole branch is
+	 * sent). Note: shake still elides the warm cached prefix at/after the
 	 * boundary — that is its job as a compaction-class reducer.
 	 */
 	keepBoundaryId?: string;
+	/**
+	 * The session's cache of the tool calls before {@link keepBoundaryId}, kept
+	 * across passes (see {@link PrefixToolCallCache}). Undefined = each pass
+	 * indexes those calls itself on its first miss.
+	 */
+	prefixToolCalls?: PrefixToolCallCache;
 }
 
 /** Auto-shake config: protects the live tail, conservative thresholds. */
@@ -311,40 +322,35 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 	const n = entries.length;
 	if (n === 0) return [];
 
-	// Tokens of all entries strictly more recent than index i.
+	// Entries before the compaction boundary are summarized away and never sent —
+	// shaking them only churns persisted history (no prompt/cache effect), so
+	// neither the token count nor the region walk reads them. Only a kept result
+	// whose call lies there and is not cached reads that prefix (`SentToolCalls`).
+	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
+
+	// Tokens of all entries strictly more recent than index i, from the boundary on;
+	// slot i - boundaryIndex holds the count for entry i.
 	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
-	const accumulatedAfter = new Array<number>(n);
+	const accumulatedAfter = new Array<number>(n - boundaryIndex);
 	let acc = 0;
-	for (let i = n - 1; i >= 0; i--) {
-		accumulatedAfter[i] = acc;
+	for (let i = n - 1; i >= boundaryIndex; i--) {
+		accumulatedAfter[i - boundaryIndex] = acc;
 		acc += entryTokens(entries[i], tokenizer);
 	}
 
-	const toolCallsById = collectToolCallsById(entries);
-
-	// Entries before the compaction boundary are summarized away and never sent —
-	// shaking them only churns persisted history (no prompt/cache effect).
-	const boundaryIndex =
-		config.keepBoundaryId === undefined
-			? 0
-			: Math.max(
-					0,
-					entries.findIndex(entry => entry.id === config.keepBoundaryId),
-				);
+	const toolCalls = new SentToolCalls(entries, boundaryIndex, config.prefixToolCalls);
 
 	const regions: ShakeRegion[] = [];
-	for (let i = 0; i < n; i++) {
+	for (let i = boundaryIndex; i < n; i++) {
 		const entry = entries[i];
-		if (i < boundaryIndex) continue;
 		const toolResult = getToolResultMessage(entry);
 		// Useless-flagged results carry no information once consumed; they are
 		// eligible even inside the protect-recent window.
 		const uselessResult = toolResult !== undefined && toolResult.useless === true && toolResult.isError !== true;
-		if (!uselessResult && accumulatedAfter[i] < config.protectTokens) continue;
+		if (!uselessResult && accumulatedAfter[i - boundaryIndex] < config.protectTokens) continue;
 		if (toolResult) {
 			if (toolResult.prunedAt !== undefined) continue;
-			if (isProtectedToolResult(toolResult, toolCallsById.get(toolResult.toolCallId), config.protectedTools))
-				continue;
+			if (isProtectedToolResult(toolResult, toolCalls.get(toolResult.toolCallId), config.protectedTools)) continue;
 			const text = toolResultText(toolResult, tokenizer);
 			if (!text) continue;
 			// Replacing a result no larger than its placeholder only grows context.
