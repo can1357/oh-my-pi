@@ -79,6 +79,7 @@
 
 ### Changed
 
+- Clarified in `/settings` and the settings reference that `statusLine.separator` applies to built-in `box` and `band` composer layouts (and `top-border`/`top-band` attachments) and is ignored by other layouts ([#20890](https://github.com/can1357/oh-my-pi/pull/20890) by [@5UM-4N](https://github.com/5UM-4N)).
 - Launches with `--config` draw the composer before startup finishes unless an overlay sets a setting that frame shows (`tui.screen`, theme, symbols, composer shape, vim mode, quiet startup); `PI_CONFIG_FILES` overlays that set one now skip it too
 - OTLP export runs on OpenTelemetry JS SDK 3; `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`, `OTEL_BSP_*` and the span limit variables are no longer read (the documented `OTEL_*` variables work as before)
 - On public sites, browser `tab.console()` and `tab.errors()` record from the first call on a tab (the result's `captureStartedAt` marks when), so pages cannot detect the capture; local and dev pages still record from load
