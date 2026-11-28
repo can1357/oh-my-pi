@@ -76,15 +76,7 @@ export function ErrorBanner(props: ErrorBannerProps): JSXNode {
 	return (
 		<col>
 			{banner}
-			{() =>
-				nativeRendering() ? (
-					<row gap="sm" wrap>
-						{controls}
-					</row>
-				) : (
-					<col>{controls}</col>
-				)
-			}
+			{() => (nativeRendering() ? <row gap="sm" wrap>{controls}</row> : <col>{controls}</col>)}
 		</col>
 	);
 }

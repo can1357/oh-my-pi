@@ -182,11 +182,7 @@ function modelRow(
 	const prefix = state.selected && view.focused ? `${theme.style("accent", symbols.symbol("nav.cursor"))} ` : "  ";
 	const provider = view.showProvider && row.displayName === undefined ? theme.style("dim", `${row.provider}/`) : "";
 	const label = row.displayName ?? row.id;
-	const name = row.labelColor
-		? theme.fg(row.labelColor, label)
-		: state.selected
-			? theme.style("accent", label)
-			: label;
+	const name = row.labelColor ? theme.fg(row.labelColor, label) : state.selected ? theme.style("accent", label) : label;
 	const current = row.current ? ` ${theme.style("success", symbols.symbol("status.enabled"))}` : "";
 	const over = row.overContext ? ` ${symbols.symbol("status.disabled")} context>${row.overContext}` : "";
 	const cells: string[] = [];
