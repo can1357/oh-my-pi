@@ -32,6 +32,7 @@ import {
 	resolveModelScope,
 	resolveRoleChain,
 	resolveSessionModelSelector,
+	resolveStartupDefaultStatus,
 	scopeAllowList,
 	rolePriorityDefaults,
 	resolveProviderModelReference,
@@ -1218,6 +1219,34 @@ describe("resolveModelRoleValue", () => {
 		expect(result.thinkingLevel).toBe("auto");
 		expect(result.explicitThinkingLevel).toBe(true);
 		expect(result.warning).toBeUndefined();
+	});
+});
+describe("resolveStartupDefaultStatus", () => {
+	const registry = { getAvailable: () => allModels, isUsingSubscription: () => true };
+	// Prepaint reads persisted roles only, not runtime overrides.
+	function persistedDefault(value: string): Settings {
+		const settings = Settings.isolated();
+		settings.setModelRole("default", value);
+		return settings;
+	}
+
+	test("primaryOnly skips a default that resolved through a fallback pattern", () => {
+		// Before extensions register their providers, an extension-backed first pattern misses.
+		const settings = persistedDefault("my-ext/custom-model,anthropic/claude-sonnet-4-5");
+
+		expect(resolveStartupDefaultStatus(settings, registry)?.model.id).toBe("claude-sonnet-4-5");
+		expect(resolveStartupDefaultStatus(settings, registry, { primaryOnly: true })).toBeUndefined();
+	});
+
+	test("primaryOnly keeps a default resolved by its first pattern", () => {
+		const settings = persistedDefault("anthropic/claude-sonnet-4-5:low,openai/gpt-4o");
+
+		expect(resolveStartupDefaultStatus(settings, registry, { primaryOnly: true })).toMatchObject({
+			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+			thinkingLevel: Effort.Low,
+			autoThinking: false,
+			usingSubscription: true,
+		});
 	});
 });
 

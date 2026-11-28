@@ -19,6 +19,7 @@
  */
 import type { Database, Statement } from "bun:sqlite";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { ResizeScrollback } from "@oh-my-pi/pi-tui/driver/index";
 import type { ScreenMode } from "@oh-my-pi/pi-tui/term/backend";
@@ -137,6 +138,15 @@ function parseUi(
 	};
 }
 
+/**
+ * A status row this host wrote. A shared `~/.omp` (NFS, synced homes, copied caches) would
+ * otherwise paint another machine's default model; rows without a host stamp are dropped too.
+ */
+function parseLocalStatus(value: unknown): StatusPrediction | undefined {
+	if (!isRecord(value) || value.hostname !== os.hostname()) return undefined;
+	return parseStatusPrediction(value);
+}
+
 /** {@link StartupCache} `#known` key. */
 function knownKey(kind: string, project: string): string {
 	return `${kind}\0${project}`;
@@ -212,7 +222,7 @@ export class StartupCache {
 		const parsed = <T>(kind: EntryKind, parse: (value: unknown) => T | undefined): T | undefined =>
 			parse(parseJson(own.get(kind))) ?? parse(parseJson(anyProject.get(kind)));
 		const appearance = parsed("terminal", parseAppearance);
-		const status = parsed("status", parseStatusPrediction);
+		const status = parsed("status", parseLocalStatus);
 		return { ...parsed("ui", parseUi), ...(appearance ? { appearance } : {}), ...(status ? { status } : {}) };
 	}
 
@@ -228,7 +238,7 @@ export class StartupCache {
 
 	/** The status bar the next prepaint draws; a failed write only costs that speculation. */
 	writeStatus(cwd: string, status: StatusPrediction): void {
-		this.#put("status", cwd, JSON.stringify(status));
+		this.#put("status", cwd, JSON.stringify({ ...status, hostname: os.hostname() }));
 	}
 
 	#put(kind: EntryKind, cwd: string, json: string): void {

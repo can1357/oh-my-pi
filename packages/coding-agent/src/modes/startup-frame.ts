@@ -1,6 +1,7 @@
 /** The lifecycle of an already-started prepaint frame, without loading the interactive UI. */
 import type { AppFrame } from "./interactive/frame";
 import type { StartupCache, StartupPreferences } from "./interactive/startup-cache";
+import type { StartupDefaultStatus } from "./interactive/status-prediction";
 import type { ComposerThemePreferences } from "./view-model/prompt/composer-cache";
 
 /** Final settings pushed into the live frame after Settings and the theme resolve. */
@@ -13,6 +14,8 @@ interface PendingFrame {
 	/** Settles once the frame drew its first frame. */
 	readonly started: Promise<void>;
 	readonly cwd: string;
+	/** Repaints the predicted bar with a resolved default; `undefined` when nothing was predicted. */
+	readonly repaintStatus: ((update: StartupDefaultStatus) => void) | undefined;
 	/** Speculation store to refresh; `undefined` when caching is off or unavailable. */
 	readonly cache: StartupCache | undefined;
 	/** Drops the prepaint key handler (emergency Ctrl+C / Ctrl+D). */
@@ -89,4 +92,15 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	// A stale cached mode switches live: the commit frontier keeps every block written once.
 	frame.screen.set(preferences.screen);
 	current.cache?.write(current.cwd, preferences, theme);
+}
+
+/**
+ * Refresh the pending frame's predicted status bar once real settings/models resolve.
+ * `resolve` runs only while a prepaint frame shows a prediction; `undefined` keeps it.
+ */
+export function updateStartupComposerStatus(resolve: () => StartupDefaultStatus | undefined): void {
+	const repaint = pending?.repaintStatus;
+	if (!repaint) return;
+	const update = resolve();
+	if (update) repaint(update);
 }

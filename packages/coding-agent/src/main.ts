@@ -65,6 +65,7 @@ import {
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
 	resolveModelScope,
+	resolveStartupDefaultStatus,
 	type ScopedModel,
 	scopeAllowList,
 	tryResolveExplicitProviderCliModel,
@@ -109,6 +110,7 @@ import {
 	type ComposerLease,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
+	updateStartupComposerStatus,
 } from "./modes/startup-frame";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
@@ -2313,6 +2315,18 @@ export async function runRootCommand(
 				lightTheme: cfgThemeLight.get(settingsInstance),
 			},
 		});
+
+		// Shrink the stale-model window: the predicted status line still shows
+		// the previous launch's model; re-resolve the configured default
+		// role against the now-loaded settings/registry and repaint. Extensions
+		// and credential-scoped catalogs load later, so a default resolved only
+		// through a fallback pattern, like an unresolvable one, keeps the
+		// prediction until the session mounts.
+		logger.time("updateStartupComposerStatus", () =>
+			updateStartupComposerStatus(() =>
+				resolveStartupDefaultStatus(settingsInstance, modelRegistry, { primaryOnly: true }),
+			),
+		);
 
 		let hydrateLaunchModelCaches = modelRegistry.createStartupModelCacheHydrator();
 		// ACP's settings-derived scope belongs to each session/new workspace.

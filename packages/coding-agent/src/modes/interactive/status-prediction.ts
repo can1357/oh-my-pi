@@ -10,6 +10,7 @@
  * the interactive mode attaches.
  */
 import * as os from "node:os";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import {
 	CONTEXT_LINE_MODE_VALUES,
@@ -62,6 +63,48 @@ export function predictStatus(facts: StatusFacts, settings: StatusLineSettings, 
 			autoCompact: facts.autoCompact,
 			...(fresh.fastTier ? { fastTier: fresh.fastTier } : {}),
 			context: fresh.context,
+		},
+	};
+}
+
+/** A fresh session's status-bar inputs on the configured default role (`resolveStartupDefaultStatus`). */
+export interface StartupDefaultStatus {
+	readonly model: Model;
+	readonly thinkingLevel: string | undefined;
+	readonly autoThinking: boolean;
+	readonly usingSubscription: boolean;
+}
+
+/**
+ * `prediction` with the resolved default model in place of the cached one. The fast tier and the
+ * compaction boundaries belong to the cached model, so they drop when the model changes, and the
+ * fresh session's occupancy is measured against the new model's window.
+ */
+export function withStartupDefault(prediction: StatusPrediction, update: StartupDefaultStatus): StatusPrediction {
+	const { model } = update;
+	const previous = prediction.facts.model;
+	const changed = previous?.id !== model.id || previous?.provider !== model.provider;
+	const { thinkingLevel: _level, compaction, fastTier, context, ...facts } = prediction.facts;
+	const window = model.contextWindow ?? 0;
+	return {
+		settings: prediction.settings,
+		facts: {
+			...facts,
+			model: {
+				id: model.id,
+				...(model.name ? { name: model.name } : {}),
+				...(model.provider ? { provider: model.provider } : {}),
+				thinking: model.thinking !== undefined,
+				...(model.contextWindow ? { contextWindow: model.contextWindow } : {}),
+			},
+			...(update.thinkingLevel !== undefined ? { thinkingLevel: update.thinkingLevel } : {}),
+			autoThinking: update.autoThinking,
+			usingSubscription: update.usingSubscription,
+			...(!changed && fastTier ? { fastTier } : {}),
+			...(!changed && compaction ? { compaction } : {}),
+			context: changed
+				? { tokens: context.tokens, window, percent: window ? (context.tokens / window) * 100 : null }
+				: context,
 		},
 	};
 }

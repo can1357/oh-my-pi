@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { Database } from "bun:sqlite";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -59,6 +60,21 @@ describe("startup cache status prediction", () => {
 		store.writeStatus("/work/beta", beta);
 		expect(store.read("/work/alpha").status?.facts.thinkingLevel).toBe("high");
 		expect(store.read("/work/gamma").status?.facts.thinkingLevel).toBe("low");
+	});
+
+	it.each([
+		["another host", "json_set(value, '$.hostname', 'elsewhere.invalid')"],
+		["no host", "json_remove(value, '$.hostname')"],
+	])("drops a prediction stamped by %s", (_, rewrite) => {
+		const store = open();
+		store.writeStatus("/work/alpha", prediction);
+		expect(store.read("/work/alpha").status).toEqual(prediction);
+		store.close();
+		// A shared ~/.omp hands this host rows another machine (or an older build) wrote.
+		const db = new Database(path.join(dir!.path(), "composer.db"));
+		db.run(`UPDATE entries SET value = ${rewrite} WHERE kind = 'status'`);
+		db.close();
+		expect(open().read("/work/alpha").status).toBeUndefined();
 	});
 
 	it("remembers the screen mode for the next first frame; older entries start inline", () => {

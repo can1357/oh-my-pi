@@ -15,7 +15,12 @@ import { initTheme } from "../ui/theme/service";
 import { composerBorderColor } from "./interactive/border-color";
 import { AppFrame } from "./interactive/frame";
 import { type StartupCache, type StartupPreferences, sharedStartupCache } from "./interactive/startup-cache";
-import { predictedStatusLine, type StatusPrediction } from "./interactive/status-prediction";
+import {
+	predictedStatusLine,
+	type StartupDefaultStatus,
+	type StatusPrediction,
+	withStartupDefault,
+} from "./interactive/status-prediction";
 import { ownStartupFrame } from "./startup-frame";
 import type { ComposerThemePreferences } from "./view-model/prompt/composer-cache";
 
@@ -148,7 +153,17 @@ function startFrame(options: PrepaintComposerOptions) {
 	});
 	// Remember the background the terminal reports (OSC 11), so the next launch paints for it.
 	if (cache) void started.then(() => rememberAppearance(frame, cache, cwd));
-	return { frame, started, cwd, cache, releaseKeys };
+	const repaintStatus = status ? statusRepainter(frame, cwd, status) : undefined;
+	return { frame, started, cwd, repaintStatus, cache, releaseKeys };
+}
+
+/** Repaint `frame`'s predicted bar, starting from `initial`, with each resolved default. */
+function statusRepainter(frame: AppFrame, cwd: string, initial: StatusPrediction) {
+	let status = initial;
+	return (update: StartupDefaultStatus): void => {
+		status = withStartupDefault(status, update);
+		frame.setStatusLine(predictedStatusLine(status, cwd), null);
+	};
 }
 
 /** Cache each appearance the terminal reports for the frame's lifetime (its driver's). */

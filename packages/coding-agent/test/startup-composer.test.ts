@@ -7,6 +7,7 @@ import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings/keybindings";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resolveStartupDefaultStatus } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as pluginHelpers from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { clearOmpExtensionCliRoots } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
@@ -18,13 +19,15 @@ import {
 	type ComposerLease,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
+	updateStartupComposerStatus,
 } from "@oh-my-pi/pi-coding-agent/modes/startup-frame";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
 import { getProjectDir, isInteractiveHost, setInteractiveHost, setProjectDir } from "@oh-my-pi/pi-utils";
 import type { StartupPreferences } from "../src/modes/interactive/startup-cache";
-import type { StatusPrediction } from "../src/modes/interactive/status-prediction";
+import { type StatusPrediction, withStartupDefault } from "../src/modes/interactive/status-prediction";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { initTheme } from "../src/ui/theme/service";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./collab/helpers/in-memory-relay";
 import { createModeTerminal, type ModeTerminal } from "./helpers/mode-terminal";
@@ -724,6 +727,96 @@ describe("startup prepaint frame", () => {
 
 		term.type("still editable");
 		await term.waitFor(rows => rows.some(row => row.includes("still editable")));
+	});
+
+	it("resolves the startup default only while a prepaint composer is pending", () => {
+		const registry = { getAvailable: vi.fn(() => []), isUsingSubscription: () => false };
+		const resolve = () => resolveStartupDefaultStatus(settings, registry, { primaryOnly: true });
+		// Headless and non-TTY launches never prepaint; the model catalog stays untouched.
+		updateStartupComposerStatus(resolve);
+		expect(registry.getAvailable).not.toHaveBeenCalled();
+
+		// A pending frame with a predicted bar re-resolves it once the real settings and models load.
+		term = createModeTerminal({ columns: 80, rows: 24 });
+		beginStartupComposer({
+			driver: term.memory.options,
+			version: "9.9.9",
+			cache: false,
+			preferences: config,
+			status: {
+				settings: { preset: "default" },
+				facts: {
+					model: { id: "prophet-9", name: "Prophet 9", thinking: true, contextWindow: 200_000 },
+					usingSubscription: false,
+					autoCompact: true,
+					context: { tokens: 0, window: 200_000, percent: 0 },
+				},
+			},
+		});
+		updateStartupComposerStatus(resolve);
+		expect(registry.getAvailable).toHaveBeenCalledTimes(1);
+	});
+
+	it("repaints the predicted model with the resolved default, dropping the cached model's fast tier", async () => {
+		term = createModeTerminal({ columns: 100, rows: 24 });
+		beginStartupComposer({
+			driver: term.memory.options,
+			version: "9.9.9",
+			cache: false,
+			preferences: config,
+			status: {
+				settings: { preset: "custom", leftSegments: ["model"], rightSegments: [] },
+				facts: {
+					model: { id: "prophet-9", name: "Prophet 9", thinking: true, contextWindow: 200_000 },
+					thinkingLevel: "high",
+					usingSubscription: false,
+					autoCompact: true,
+					fastTier: "priority",
+					compaction: { thresholdPercent: 80, speculationPercent: null },
+					context: { tokens: 0, window: 200_000, percent: 0 },
+				},
+			},
+		});
+		await term.waitFor(rows => rows.some(row => row.includes("Prophet 9")));
+		const resolved = getBundledModel("anthropic", "claude-opus-4-6");
+		updateStartupComposerStatus(() => ({
+			model: resolved,
+			thinkingLevel: "low",
+			autoThinking: false,
+			usingSubscription: false,
+		}));
+		await term.waitFor(
+			rows => rows.some(row => row.includes("Opus")) && !rows.some(row => row.includes("Prophet 9")),
+		);
+	});
+
+	it("predicts the resolved default with the fast tier and boundaries only while the model is unchanged", () => {
+		const model = getBundledModel("anthropic", "claude-opus-4-6");
+		const base: StatusPrediction = {
+			settings: { preset: "default" },
+			facts: {
+				model: { id: model.id, provider: model.provider, thinking: true },
+				thinkingLevel: "high",
+				usingSubscription: false,
+				autoCompact: true,
+				fastTier: "priority",
+				compaction: { thresholdPercent: 80, speculationPercent: null },
+				context: { tokens: 12_000, window: 1_000_000, percent: 1.2 },
+			},
+		};
+		const update = { model, thinkingLevel: "low", autoThinking: false, usingSubscription: true };
+		const same = withStartupDefault(base, update);
+		expect(same.facts).toMatchObject({ thinkingLevel: "low", fastTier: "priority", usingSubscription: true });
+		expect(same.facts.compaction).toEqual(base.facts.compaction);
+		expect(same.facts.context).toEqual(base.facts.context);
+		const sonnet = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const other = withStartupDefault(base, { ...update, model: sonnet });
+		expect(other.facts.model?.id).toBe("claude-sonnet-4-5");
+		expect(other.facts.fastTier).toBeUndefined();
+		expect(other.facts.compaction).toBeUndefined();
+		const window = sonnet.contextWindow ?? 0;
+		expect(window).not.toBe(base.facts.context.window);
+		expect(other.facts.context).toEqual({ tokens: 12_000, window, percent: (12_000 / window) * 100 });
 	});
 
 	it("starts a fullscreen session on the alternate screen without erasing the shell's scrollback", async () => {
