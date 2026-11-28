@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- RPC form hosts can submit selected-option notes and images alongside form answers ([#20156](https://github.com/can1357/oh-my-pi/issues/20156), [#20469](https://github.com/can1357/oh-my-pi/pull/20469) by [@tingQian](https://github.com/tingQian)).
 ### Breaking Changes
 
 - `/fast`, `/ultrafast`, and `/computer` toggle without arguments and accept explicit `on` or `off`. Check their status with `/session info`. The legacy `/fast ultra` still enables Ultrafast.

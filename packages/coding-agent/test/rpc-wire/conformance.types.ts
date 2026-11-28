@@ -32,6 +32,7 @@ import type {
 	RpcDictationEndFrame,
 	RpcDictationStateFrame,
 	RpcDictationTranscriptFrame,
+	RpcFormNote,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcHostToolCallRequest,
@@ -238,6 +239,7 @@ export type Frames = Assert<
 		uiCancel: Inbound<Wire.CancelUiResponse, Extract<RpcExtensionUIResponse, { cancelled: unknown }>>;
 		uiAnswers: Inbound<Wire.AnswersUiResponse, Extract<RpcExtensionUIResponse, { answers: unknown }>>;
 		uiData: Inbound<Wire.DataUiResponse, Extract<RpcExtensionUIResponse, { data: unknown }>>;
+		formOptionNote: Inbound<Wire.FormOptionNote, RpcFormNote>;
 		responseFailure: Outbound<Extract<RpcResponse, { success: false }>, Wire.RpcResponse>;
 	}>
 >;

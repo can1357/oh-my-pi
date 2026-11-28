@@ -954,8 +954,16 @@ class RpcClient(WireClient):
             {"type": "extension_ui_response", "id": request_id, "answers": wire_answers}
         )
 
-    def send_ui_data(self, request_id: str, data: Mapping[str, str | int | float | Sequence[str]]) -> None:
-        """Answer a `form` request with the submitted values by control `name`.
+    def send_ui_data(self, request_id: str, data: Mapping[str, str | int | float | Sequence[str]],
+        *,
+        notes: Sequence[Mapping[str, JsonValue]] | None = None,
+    ) -> None:
+        """Answer a `form` request with submitted values and optional selected-option notes.
+
+        Send notes only when the request has `supports_notes is True`. Each note
+        carries `name`, `value`, `text`, and optional inline `images`. Images also
+        require `request.supports_note_images is True`. The server validates the
+        selection and supplies question/option labels.
 
         Raises `TypeError` for a `bool` (forms submit option values, never booleans),
         a value that is neither a string, a number nor a sequence of strings (`None`,
@@ -980,9 +988,13 @@ class RpcClient(WireClient):
             if not all(isinstance(member, str) for member in members):
                 raise TypeError(f"form field {name!r} must be a list of strings, not {members!r}")
             wire_data[name] = members
-        self._send_notification(
-            {"type": "extension_ui_response", "id": request_id, "data": wire_data}
-        )
+        payload: JsonObject = {"type": "extension_ui_response", "id": request_id, "data": wire_data}
+        if notes is not None:
+            wire_notes = [dict(note) for note in notes]
+            # Fail before writing if any nested value cannot be represented by strict JSON.
+            json.dumps(wire_notes, allow_nan=False)
+            payload["notes"] = cast(JsonValue, wire_notes)
+        self._send_notification(payload)
 
     def cancel_ui_request(self, request_id: str, *, timed_out: bool = False) -> None:
         payload: JsonObject = {

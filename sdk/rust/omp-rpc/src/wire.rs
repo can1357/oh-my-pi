@@ -4714,6 +4714,12 @@ pub struct FormUiRequest {
 	pub html: String,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub timeout: Option<i64>,
+	/// True when this server accepts text option notes; image notes also require supportsNoteImages.
+	#[serde(rename = "supportsNotes", default, skip_serializing_if = "Option::is_none")]
+	pub supports_notes: Option<bool>,
+	/// True only when this form opts in to inline note images.
+	#[serde(rename = "supportsNoteImages", default, skip_serializing_if = "Option::is_none")]
+	pub supports_note_images: Option<bool>,
 }
 
 /// Close the dialog opened by request `targetId`; a later answer to it is ignored.
@@ -4887,12 +4893,24 @@ pub struct AnswersUiResponse {
 	pub answers: Vec<AskAnswer>,
 }
 
+/// A submitted note on a selected enabled choice; the server supplies question and option labels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FormOptionNote {
+	pub name: String,
+	pub value: String,
+	pub text: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub images: Option<Vec<ImageContent>>,
+}
+
 /// Answers a `form` request with the submitted form data.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DataUiResponse {
 	pub id: String,
 	/// Submitted values by control `name`: a string, a number, or a string array.
 	pub data: Map<String, Value>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub notes: Option<Vec<FormOptionNote>>,
 }
 
 /// Host reply to an extension UI request; variants share `type` and differ by their payload key.

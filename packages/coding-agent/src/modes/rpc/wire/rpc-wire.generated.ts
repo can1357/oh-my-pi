@@ -1414,6 +1414,10 @@ export interface FormUiRequest {
 	method: "form";
 	html: string;
 	timeout?: number;
+	/** True when this server accepts text option notes; image notes also require supportsNoteImages. */
+	supportsNotes?: boolean;
+	/** True only when this form opts in to inline note images. */
+	supportsNoteImages?: boolean;
 }
 
 /** Close the dialog opened by request `targetId`; a later answer to it is ignored. */
@@ -1512,12 +1516,21 @@ export interface AnswersUiResponse {
 	answers: AskAnswer[];
 }
 
+/** A submitted note on a selected enabled choice; the server supplies question and option labels. */
+export interface FormOptionNote {
+	name: string;
+	value: string;
+	text: string;
+	images?: ImageContent[];
+}
+
 /** Answers a `form` request with the submitted form data. */
 export interface DataUiResponse {
 	type: "extension_ui_response";
 	id: string;
 	/** Submitted values by control `name`: a string, a number, or a string array. */
 	data: Record<string, unknown>;
+	notes?: FormOptionNote[];
 }
 
 /** Host reply to an extension UI request; variants share `type` and differ by their payload key. */

@@ -199,8 +199,8 @@ export type { HtmlFormData, HtmlFormValue, OptionNote } from "../../tools/html-f
 export interface ExtensionFormDialogResult {
 	data: HtmlFormData;
 	/**
-	 * Notes on selected options, separate from `data`. Only the interactive form
-	 * dialog collects them; ACP elicitation and field-by-field hosts never do.
+	 * Notes on selected options, separate from `data`. Interactive and RPC form
+	 * dialogs collect them; ACP elicitation and field-by-field hosts never do.
 	 */
 	notes?: OptionNote[];
 	timedOut?: boolean;

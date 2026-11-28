@@ -73,6 +73,7 @@ import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpe
 import { cfgSttEnabled } from "../../stt/settings";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
+import { normalizeRpcFormNoteImages, parseRpcFormNotes } from "./rpc-form-notes";
 import { selectRpcEntries } from "./rpc-compat";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
 import {
@@ -1314,6 +1315,7 @@ function parseFormDialogResponse(
 	// carry the entry. Rules such as `required` or `pattern` are not checked: the form dialogs only flag them.
 	// A null prototype keeps a control named `__proto__` an ordinary key instead of hitting the inherited setter.
 	const data: HtmlFormData = Object.assign(Object.create(null), Object.fromEntries(form.hidden));
+	const selections = new Map<ChoiceField, HtmlFormValue | undefined>();
 	const hidden = new Map(form.hidden);
 	const byName = Map.groupBy(named, field => field.name!);
 	for (const [name, fields] of byName) {
@@ -1336,11 +1338,18 @@ function parseFormDialogResponse(
 			}
 		});
 		if (!values.some(({ carried }) => carried)) throw mismatch;
-		for (const { value, carried } of values) {
+		for (const { field, value, carried } of values) {
+			if (carried && field.kind === "choice") selections.set(field, value);
 			if (carried && value !== undefined) data[name] = value;
 		}
 	}
-	return { data };
+	const notes = parseRpcFormNotes(
+		form,
+		selections,
+		"notes" in response ? response.notes : undefined,
+		dialogOptions.acceptImages === true,
+	);
+	return { data, ...(notes.length ? { notes } : {}) };
 }
 
 /**
@@ -1353,9 +1362,16 @@ export async function requestRpcFormDialog(
 	maxFrameBytes: number,
 	html: string,
 	dialogOptions?: ExtensionUIDialogOptions,
+	imageModel?: Model,
 ): Promise<ExtensionFormDialogResult | undefined> {
 	// Protocol v1 shrinks an oversized frame and cuts the HTML, so the host could not answer the controls past the cut.
-	const request = { method: "form", html, timeout: dialogOptions?.timeout };
+	const request = {
+		method: "form",
+		html,
+		timeout: dialogOptions?.timeout,
+		supportsNotes: true,
+		...(dialogOptions?.acceptImages === true ? { supportsNoteImages: true } : {}),
+	};
 	// A throwaway id measures the frame: Snowflake ids are always 16 characters, so it encodes to the real id's length.
 	const bytes = encodedBytes({ type: "extension_ui_request", id: Snowflake.next(), ...request });
 	if (bytes > maxFrameBytes) {
@@ -1376,7 +1392,11 @@ export async function requestRpcFormDialog(
 	const result = await requestRpcDialog(pendingRequests, output, opts, undefined, request, response =>
 		parseFormDialogResponse(response, form, opts),
 	);
-	return timedOut ? { data: defaultFormData(form), timedOut: true } : result;
+	if (timedOut) return { data: defaultFormData(form), timedOut: true };
+	if (!result?.notes) return result;
+	// The response has already claimed the request and removed its timer/abort listener.
+	// Normalize images before any tool result can enter conversation history.
+	return { ...result, notes: await normalizeRpcFormNoteImages(result.notes, imageModel) };
 }
 
 export function requestRpcEditor(
@@ -1730,6 +1750,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					frameEncoder.maxIntactFrameBytes,
 					html,
 					dialogOptions,
+					session.model,
 				);
 		}
 
