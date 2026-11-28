@@ -23,6 +23,9 @@
 
 ### Fixed
 
+- Fixed shell `rg --null-data` ending records, counts, file names and context separators with a newline instead of NUL, and missing matches anchored at the end of a record (for example `rg --null-data -o '[0-9]$'`) ([#20574](https://github.com/can1357/oh-my-pi/pull/20574) by [@sjawhar](https://github.com/sjawhar))
+- Fixed shell `rg --replace` and `--vimgrep` finding an extra empty match after the end of each line ([#20574](https://github.com/can1357/oh-my-pi/pull/20574) by [@sjawhar](https://github.com/sjawhar))
+- Fixed shell `grep -z` ending `-c` counts, `-l` and `-L` file names and the `--` context separator with NUL instead of a newline, as GNU grep does ([#20574](https://github.com/can1357/oh-my-pi/pull/20574) by [@sjawhar](https://github.com/sjawhar))
 - Reduced Snapcompact frame sizes with indexed PNGs while retaining antialiased text.
 - Improved URL reading to preserve model tables, source-code indentation, linked content cards, meaningful button labels, and sign-in instructions while removing unrelated news, footer content, and empty whitespace-only paragraphs.
 - Fixed `Process.terminate` so descendants that start their own sessions are still terminated reliably.

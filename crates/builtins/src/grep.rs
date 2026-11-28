@@ -62,8 +62,14 @@ pub(crate) struct RecordFormat {
 	/// End a printed path with NUL instead of its separator or terminator
 	/// (`grep -Z`, `rg -0`).
 	pub null_paths:     bool,
-	/// Ends each record: `\n`, or NUL under `grep -z`.
+	/// Ends each line record (a matched or context line, an `-o` match): `\n`,
+	/// or NUL under `grep -z` and `rg --null-data`.
 	pub terminator:     u8,
+	/// Ends each file-name or count record (`-c`, `-l`, `-L`, `rg --files`):
+	/// `\n`, or NUL in an `rg --null-data` search, as in ripgrep. GNU grep ends
+	/// them with `\n` under `-z`, and ripgrep its `--files` paths under
+	/// `--null-data`.
+	pub summary_term:   u8,
 }
 
 impl RecordFormat {
@@ -115,8 +121,8 @@ impl RecordFormat {
 	}
 
 	/// Writes a file-name record (`-l`, `-L`, `rg --files`): the path ended
-	/// by NUL under `null_paths`, else by the terminator. An unnamed input
-	/// prints only the terminator, and nothing under `null_paths`.
+	/// by NUL under `null_paths`, else by `summary_term`. An unnamed input
+	/// prints only `summary_term`, and nothing under `null_paths`.
 	pub fn write_path_record<W: Write + ?Sized>(
 		&self,
 		out: &mut W,
@@ -125,14 +131,15 @@ impl RecordFormat {
 		match path {
 			Some(path) => {
 				self.write_path(out, path)?;
-				out.write_all(&[if self.null_paths { b'\0' } else { self.terminator }])
+				out.write_all(&[if self.null_paths { b'\0' } else { self.summary_term }])
 			},
 			None if self.null_paths => Ok(()),
-			None => out.write_all(&[self.terminator]),
+			None => out.write_all(&[self.summary_term]),
 		}
 	}
 
-	/// Writes a `-c` record: the optional `PATH:` prefix, then `count`.
+	/// Writes a `-c` record: the optional `PATH:` prefix, then `count`, ended
+	/// by `summary_term`.
 	pub fn write_count_record<W: Write + ?Sized>(
 		&self,
 		out: &mut W,
@@ -141,7 +148,7 @@ impl RecordFormat {
 	) -> io::Result<()> {
 		self.write_prefix(out, path, None, None, None, b':')?;
 		out.write_all(count.format_into(&mut fmt::NumBuffer::new()).as_bytes())?;
-		out.write_all(&[self.terminator])
+		out.write_all(&[self.summary_term])
 	}
 }
 
@@ -1034,8 +1041,9 @@ impl<M: Matcher, W: Write> GrepSink<'_, M, W> {
 
 	fn write_group_separator(&mut self) -> io::Result<()> {
 		if let Some(separator) = &self.opts.group_separator {
+			// GNU grep ends the separator with `\n` under `-z` too.
 			self.out.write_all(separator)?;
-			self.out.write_all(&[self.opts.record.terminator])?;
+			self.out.write_all(b"\n")?;
 			self.flush_record()?;
 		}
 		Ok(())
@@ -2172,6 +2180,7 @@ impl AsyncUtility for Grep {
 			path_separator: None,
 			null_paths:     cli.null_paths,
 			terminator:     if cli.null_data { b'\0' } else { b'\n' },
+			summary_term:   b'\n',
 		},
 		group_separator: resolve_group_separator(&cli, &matches),
 		zero_context_groups,
@@ -2232,6 +2241,7 @@ mod tests {
 			path_separator: Some(b'#'),
 			null_paths:     false,
 			terminator:     b'\n',
+			summary_term:   b'\n',
 		}
 		.write_path(&mut out, b"a\\b/c")
 		.unwrap();
@@ -2403,6 +2413,98 @@ mod tests {
 		// `$` ends the NUL-terminated record, not a line inside it.
 		let (code, out, err) = run(&["-zo", "b$"], "ab\ncd\0").await;
 		assert_eq!((code, out.as_str()), (1, ""), "{err}");
+	}
+
+	/// Under `-z`, `-c` ends each count line with `\n`, not NUL, while `-Z`
+	/// still puts NUL after a prefixed file name. Expectations are GNU grep
+	/// 3.8's bytes.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn null_data_count_ends_with_newline() {
+		let (code, out, err) = run(&["-zc", "[0-9]$"], "a1\0b2\0").await;
+		assert_eq!((code, out.as_str()), (0, "2\n"), "stdin: {err}");
+
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("f"), "a1\0b2\0").unwrap();
+		std::fs::write(tree.path().join("g"), "xx\0").unwrap();
+		let (code, capture) =
+			run_async_util::<Grep>(&["-zc", "[0-9]$", "f", "g"], "", tree.path()).await;
+		assert_eq!((code, capture.out().as_str()), (0, "f:2\ng:0\n"), "files: {}", capture.err());
+		let (code, capture) =
+			run_async_util::<Grep>(&["-zZc", "[0-9]$", "f", "g"], "", tree.path()).await;
+		assert_eq!(
+			(code, capture.out().as_str()),
+			(0, concat!("f\0", "2\n", "g\0", "0\n")),
+			"-zZc: {}",
+			capture.err()
+		);
+	}
+
+	/// Under `-z`, `-l` ends each matching path with `\n`, not NUL, unless `-Z`
+	/// asks for NUL-terminated paths. Expectations are GNU grep 3.8's bytes.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn null_data_files_with_matches_ends_with_newline() {
+		let (code, out, err) = run(&["-zl", "[0-9]$"], "a1\0b2\0").await;
+		assert_eq!((code, out.as_str()), (0, "(standard input)\n"), "stdin: {err}");
+
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("f"), "a1\0b2\0").unwrap();
+		std::fs::write(tree.path().join("g"), "xx\0").unwrap();
+		let (code, capture) =
+			run_async_util::<Grep>(&["-zl", "[0-9]$", "f", "g"], "", tree.path()).await;
+		assert_eq!((code, capture.out().as_str()), (0, "f\n"), "files: {}", capture.err());
+		let (code, capture) =
+			run_async_util::<Grep>(&["-zZl", "[0-9]$", "f", "g"], "", tree.path()).await;
+		assert_eq!((code, capture.out().as_str()), (0, "f\0"), "-zZl: {}", capture.err());
+	}
+
+	/// Under `-z`, `-L` ends each non-matching path with `\n`, not NUL, unless
+	/// `-Z` asks for NUL-terminated paths. Expectations are GNU grep 3.8's
+	/// bytes.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn null_data_files_without_match_ends_with_newline() {
+		let (code, out, err) = run(&["-zL", "[0-9]$"], "xx\0").await;
+		assert_eq!((code, out.as_str()), (1, "(standard input)\n"), "stdin: {err}");
+
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("f"), "a1\0b2\0").unwrap();
+		std::fs::write(tree.path().join("g"), "xx\0").unwrap();
+		let (code, capture) =
+			run_async_util::<Grep>(&["-zL", "[0-9]$", "f", "g"], "", tree.path()).await;
+		assert_eq!((code, capture.out().as_str()), (0, "g\n"), "files: {}", capture.err());
+		let (code, capture) =
+			run_async_util::<Grep>(&["-zZL", "[0-9]$", "f", "g"], "", tree.path()).await;
+		assert_eq!((code, capture.out().as_str()), (0, "g\0"), "-zZL: {}", capture.err());
+	}
+
+	/// Under `-z`, context lines keep NUL while the separator between context
+	/// groups, `--` or the one `--group-separator` gives, ends with `\n`.
+	/// Expectations are GNU grep 3.8's bytes.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn null_data_group_separator_ends_with_newline() {
+		let input = "a1\0bb\0cc\0dd\0e2\0";
+		let tree = tempfile::tempdir().unwrap();
+		std::fs::write(tree.path().join("f"), input).unwrap();
+		for (args, want) in [
+			(&["-zA", "1", "[0-9]$"][..], concat!("a1\0", "bb\0", "--\n", "e2\0")),
+			(
+				&["-zn", "-C", "1", "[0-9]$"][..],
+				concat!("1:a1\0", "2-bb\0", "--\n", "4-dd\0", "5:e2\0"),
+			),
+			(
+				&["-zA", "1", "--group-separator=XX", "[0-9]$"][..],
+				concat!("a1\0", "bb\0", "XX\n", "e2\0"),
+			),
+			// An explicit zero context separates non-adjacent records too.
+			(&["-zA0", "[0-9]$"][..], concat!("a1\0", "--\n", "e2\0")),
+		] {
+			let (code, out, err) = run(args, input).await;
+			assert_eq!((code, out.as_str()), (0, want), "stdin {args:?}: {err}");
+			let mut file_args = args.to_vec();
+			file_args.push("f");
+			let (code, capture) = run_async_util::<Grep>(&file_args, "", tree.path()).await;
+			let out = capture.out();
+			assert_eq!((code, out.as_str()), (0, want), "file {args:?}: {}", capture.err());
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
