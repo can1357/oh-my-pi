@@ -3398,12 +3398,15 @@ export class ModelRegistry {
 			return `${providerConfig.provider}:lm-studio-${reasoning}context-v1`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
+			// rich-v8 invalidates rosters the `/v1/models` fallback cached before the
+			// `reasoning` object ladder was read. The namespace follows the config,
+			// not the path that answered, so rich rosters refetch once as well.
 			// rich-v7 invalidates incomplete /v2/model/info rosters cached before
 			// pagination. rich-v6 moved decisions-mode groups to the Decisions
 			// runner; rich-v5 filtered known non-conversational modes. Bump this
 			// namespace alongside the catalog package's `litellm:rich-vN` when
 			// discovery behavior changes.
-			return `${providerConfig.provider}:litellm-rich-v7`;
+			return `${providerConfig.provider}:litellm-rich-v8`;
 		}
 		return providerConfig.provider;
 	}

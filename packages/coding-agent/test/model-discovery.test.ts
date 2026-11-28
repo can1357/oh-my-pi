@@ -2920,6 +2920,7 @@ describe("ModelRegistry runtime discovery", () => {
 		["openai-models-list", "gw:openai-models-list-context-v8"],
 		["proxy", "gw:proxy-v2-context-v6"],
 		["lm-studio", "gw"],
+		["litellm", "gw:litellm-rich-v7"],
 	] as const)(
 		"%s discovery refetches rows cached before the reasoning object ladder was read",
 		async (type, retiredCacheProviderId) => {

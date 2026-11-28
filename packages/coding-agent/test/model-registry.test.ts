@@ -3857,7 +3857,7 @@ describe("ModelRegistry", () => {
 			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v7",
+						"litellm-proxy:litellm-rich-v8",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3")],
 						true,
@@ -3942,7 +3942,7 @@ describe("ModelRegistry", () => {
 			expect(getModelsForProvider(litellmStaleNamespaceCache, "litellm-proxy")).toHaveLength(0);
 		});
 
-		test("restores LiteLLM backend session policy from rich-v7 alias rows without changing their API", () => {
+		test("restores LiteLLM backend session policy from rich-v8 alias rows without changing their API", () => {
 			const model = litellmCurrentNamespaceCache.find("litellm-proxy", "minimax/minimax-m3");
 			expect(model?.name).toBe("MiniMax-M3");
 			expect(model?.provider).toBe("litellm-proxy");
