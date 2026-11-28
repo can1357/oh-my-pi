@@ -1349,6 +1349,50 @@ describe("AuthStorage codex oauth ranking", () => {
 		expectExclusivePreference(counts, "api-acct-uncapped-pro", "api-acct-capped");
 	});
 
+	test.each([
+		[
+			"prefers the earlier weekly reset despite 85% usage",
+			{ windowId: "7d", windowLabel: "7 Days", durationMs: WEEK_MS },
+			20,
+			57,
+			"near",
+		],
+		[
+			"demotes a 5-hour window at 85% usage despite its earlier reset",
+			{ windowId: "5h", windowLabel: "5 Hours", durationMs: FIVE_HOUR_MS },
+			1,
+			4,
+			"far",
+		],
+	] as const)(
+		"%s when Codex reports a single primary-slot meter",
+		async (_behavior, primaryWindow, nearResetHours, farResetHours, preferred) => {
+			if (!authStorage) throw new Error("test setup failed");
+
+			await authStorage.credentials.set("openai-codex", [
+				{ type: "oauth", ...createCredential("acct-near", "near@example.com") },
+				{ type: "oauth", ...createCredential("acct-far", "far@example.com") },
+			]);
+			for (const [accountId, usedFraction, resetHours] of [
+				["acct-near", 0.85, nearResetHours],
+				["acct-far", 0.8, farResetHours],
+			] as const) {
+				const report = createCodexUsageReport({
+					accountId,
+					primary: { usedFraction, resetInMs: resetHours * HOUR_MS },
+					secondary: { usedFraction: 0, resetInMs: WEEK_MS },
+					primaryWindow,
+				});
+				report.limits = report.limits.filter(limit => limit.id === "openai-codex:primary");
+				usageByAccount.set(accountId, report);
+			}
+
+			const counts = await countApiKeySelections(authStorage, "openai-codex", `single-meter-${preferred}`);
+			const fallback = preferred === "near" ? "far" : "near";
+			expectExclusivePreference(counts, `api-acct-${preferred}`, `api-acct-${fallback}`);
+		},
+	);
+
 	test("does not boost incomplete or differently-scoped Codex usage over measured quota", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
