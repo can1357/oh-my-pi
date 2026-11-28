@@ -28,13 +28,14 @@ function defaultMeterProvider(): MeterProvider {
 /**
  * How a prediction request settled:
  * - `offered`: usable reply, offered to the composer (shown once a frame paints it)
+ * - `submitted`: usable reply, automatically sent as a bounded follow-up prompt
  * - `skipped`: the model declined (`NO_PREDICTION`) or replied with nothing usable
  * - `stale`: the conversation moved on before the reply arrived
  * - `cancelled`: superseded or cancelled (new turn, newer request, setting off)
  * - `timeout`: no reply before the prediction deadline
  * - `error`: the side turn failed
  */
-export type PredictionOutcome = "offered" | "skipped" | "stale" | "cancelled" | "timeout" | "error";
+export type PredictionOutcome = "offered" | "submitted" | "skipped" | "stale" | "cancelled" | "timeout" | "error";
 /** What became of a shown prediction: one of its alternatives inserted with Tab/Right, or retired without that. */
 export type PredictionResolution = { result: "accepted"; rank: number } | { result: "ignored" };
 

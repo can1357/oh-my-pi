@@ -477,7 +477,9 @@ export class EventController {
 		this.#toolArgsReveal = new ToolArgsRevealController({
 			getSmoothStreaming: () => cfgDisplaySmoothStreaming.get(this.ctx.settings),
 		});
-		this.composerPrediction = new ComposerPredictionController(ctx);
+		this.composerPrediction = new ComposerPredictionController(ctx, {
+			onAutomaticStop: reason => ctx.showStatus(`Auto-prompt stopped: ${reason}.`),
+		});
 		this.#handlers = {
 			agent_start: e => this.#handleAgentStart(e),
 			agent_pause: e => this.#handleAgentPause(e),
@@ -2678,9 +2680,13 @@ export class EventController {
 				this.ctx.restoreCompactionQueueToEditor("Run stopped: queued compaction returned to the editor");
 			else this.ctx.runYieldCompaction();
 		}
-		// The user stopped the run themselves: no prediction or toast for it.
-		if (options?.interrupted) return;
+		// The user stopped the run themselves: stop automatic follow-ups without a toast.
+		if (options?.interrupted) {
+			this.composerPrediction.stopAutomatic();
+			return;
+		}
 		if (this.#settledRunStatus(event).state === "done") this.composerPrediction.request();
+		else this.composerPrediction.stopAutomatic();
 		this.sendErrorNotification(event);
 		this.sendCompletionNotification(event);
 	}

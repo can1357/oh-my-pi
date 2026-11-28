@@ -89,9 +89,11 @@ function userMessage(content: string, timestamp: number): Message {
 
 function harness(options: HarnessOptions = {}) {
 	const turns: PendingTurn[] = [];
+	const sentPrompts: string[] = [];
 	const sessionManager = SessionManager.inMemory();
 	const firstLeafId = sessionManager.appendMessage(userMessage("fix the bug", 1));
 	const messages: AgentMessage[] = [userMessage("fix the bug", 1)];
+	let stats = { tokens: { total: 0 }, cost: 0 };
 	const session = {
 		model: MODEL,
 		// Provider-facing id, as after `/fresh` or with an SDK `providerSessionId`: not the journal's.
@@ -100,6 +102,11 @@ function harness(options: HarnessOptions = {}) {
 		isCompacting: options.compacting ?? false,
 		messages,
 		sessionManager,
+		getSessionStats: () => stats,
+		prompt: async (text: string) => {
+			sentPrompts.push(text);
+			return true;
+		},
 		ephemeralMaxTokensPreservesRequest: () => options.capPreservesRequest ?? true,
 		runEphemeralTurn(turnOptions: EphemeralTurnOptions): Promise<EphemeralTurnResult> {
 			const { promise, resolve, reject } = Promise.withResolvers<EphemeralTurnResult>();
@@ -154,6 +161,10 @@ function harness(options: HarnessOptions = {}) {
 		controller,
 		editor,
 		turns,
+		sentPrompts,
+		setStats: (tokens: number, dollars: number) => {
+			stats = { tokens: { total: tokens }, cost: dollars };
+		},
 		messages,
 		firstLeafId,
 		reply,
@@ -179,6 +190,71 @@ function harness(options: HarnessOptions = {}) {
 }
 
 describe("ComposerPredictionController", () => {
+	it("submits bounded automatic follow-ups and stops when the model declines", async () => {
+		const { controller, turns, reply, sentPrompts } = harness();
+		controller.startAutomatic({ minutes: 60, tokens: 1_000, dollars: 1, turns: 2 });
+		expect(turns).toHaveLength(1);
+
+		await reply(0, "run the tests");
+		expect(sentPrompts).toEqual(["run the tests"]);
+
+		controller.request();
+		expect(turns).toHaveLength(2);
+		await reply(1, "NO_PREDICTION");
+		expect(controller.getAutomaticStatus()).toBeUndefined();
+		expect(sentPrompts).toEqual(["run the tests"]);
+	});
+
+	it("stops before submitting when token or estimated-spend limits are reached", async () => {
+		for (const [tokens, dollars] of [
+			[1_000, 0],
+			[0, 1],
+		]) {
+			const { controller, turns, reply, sentPrompts, setStats } = harness();
+			controller.startAutomatic({ minutes: 60, tokens: 100, dollars: 0.5, turns: 2 });
+			setStats(tokens, dollars);
+			await reply(0, "run the tests");
+
+			expect(sentPrompts).toEqual([]);
+			expect(controller.getAutomaticStatus()).toBeUndefined();
+			expect(turns).toHaveLength(1);
+		}
+	});
+
+	it("stops before submitting when the time limit is reached", async () => {
+		const { controller, turns, reply, sentPrompts } = harness();
+		const originalNow = Date.now;
+		let now = originalNow();
+		Date.now = () => now;
+		try {
+			controller.startAutomatic({ minutes: 1, tokens: 1_000, dollars: 1, turns: 2 });
+			now += 60_001;
+			await reply(0, "run the tests");
+
+			expect(sentPrompts).toEqual([]);
+			expect(controller.getAutomaticStatus()).toBeUndefined();
+			expect(turns).toHaveLength(1);
+		} finally {
+			Date.now = originalNow;
+		}
+	});
+
+	it("stops at its turn limit and does not repeat the original request", async () => {
+		const capped = harness();
+		capped.controller.startAutomatic({ minutes: 60, tokens: 1_000, dollars: 1, turns: 1 });
+		await capped.reply(0, "run the tests");
+		expect(capped.sentPrompts).toEqual(["run the tests"]);
+		capped.controller.request();
+		expect(capped.controller.getAutomaticStatus()).toBeUndefined();
+		expect(capped.turns).toHaveLength(1);
+
+		const repeated = harness();
+		repeated.controller.startAutomatic({ minutes: 60, tokens: 1_000, dollars: 1, turns: 2 });
+		await repeated.reply(0, "fix the bug");
+		expect(repeated.sentPrompts).toEqual([]);
+		expect(repeated.controller.getAutomaticStatus()).toBeUndefined();
+	});
+
 	it("offers the reply for the conversation it was predicted from", async () => {
 		const { controller, reply, renders } = harness();
 		controller.request();
