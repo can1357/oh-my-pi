@@ -7638,7 +7638,7 @@ pub mod named_writer {
 
 use std::{
 	cell::RefCell,
-	io::{BufWriter, Write},
+	io::{self, Write},
 	path::PathBuf,
 	rc::Rc,
 };
@@ -7660,7 +7660,7 @@ thread_local! {
 /// Where a `w` file's lines go.
 #[derive(Debug)]
 enum Target {
-	File(BufWriter<File>),
+	File(BlockWriter),
 	/// `w /dev/stdout`: sed's own output stream, as GNU sed does, so the lines
 	/// interleave with `p` output in order instead of racing it through a
 	/// second open of the same file.
@@ -7669,6 +7669,84 @@ enum Target {
 	Stderr,
 	/// A file already flushed and closed by [`flush_all`].
 	Closed,
+}
+
+/// A `w` file's output buffer, filled as GNU sed fills its own, so a name
+/// has already written the same bytes as GNU's when another name of its file
+/// closes: a block of the file's `st_blksize`, at most 8 KiB, filled to the
+/// byte and written when one more byte arrives. A write into an empty buffer,
+/// and the rest of a write that filled it, send their whole blocks straight to
+/// the file.
+#[derive(Debug)]
+struct BlockWriter {
+	file:   File,
+	buffer: Vec<u8>,
+	block:  usize,
+}
+
+impl BlockWriter {
+	/// The block of a file that reports no `st_blksize`, or 0.
+	const DEFAULT_BLOCK: usize = 4096;
+	/// The largest block GNU sed buffers a `w` file in.
+	const MAX_BLOCK: usize = 8192;
+
+	fn new(file: File) -> Self {
+		let block = Self::block_size(file.metadata().ok().and_then(|meta| meta.blksize()));
+		Self { file, buffer: Vec::with_capacity(block), block }
+	}
+
+	/// The block for a file whose `st_blksize` is `blksize`: that size, at
+	/// most 8 KiB, or [`Self::DEFAULT_BLOCK`].
+	fn block_size(blksize: Option<u64>) -> usize {
+		match blksize {
+			None | Some(0) => Self::DEFAULT_BLOCK,
+			Some(size) => usize::try_from(size).map_or(Self::MAX_BLOCK, |size| size.min(Self::MAX_BLOCK)),
+		}
+	}
+
+	/// Write the buffered bytes to the file.
+	fn write_buffer(&mut self) -> io::Result<()> {
+		if !self.buffer.is_empty() {
+			self.file.write_all(&self.buffer)?;
+			self.buffer.clear();
+		}
+		Ok(())
+	}
+
+	/// Write the buffered bytes and close the file, surfacing errors a
+	/// provider defers to close.
+	fn close(mut self) -> io::Result<()> {
+		self.write_buffer()?;
+		self.file.close()
+	}
+}
+
+impl Write for BlockWriter {
+	fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+		let mut rest = bytes;
+		if !self.buffer.is_empty() {
+			let room = self.block - self.buffer.len();
+			if bytes.len() <= room {
+				self.buffer.extend_from_slice(bytes);
+				return Ok(bytes.len());
+			}
+			// Fill the buffer to the byte and write it, since more bytes follow.
+			self.buffer.extend_from_slice(&bytes[..room]);
+			self.write_buffer()?;
+			rest = &bytes[room..];
+		}
+		let whole = rest.len() - rest.len() % self.block;
+		if whole > 0 {
+			self.file.write_all(&rest[..whole])?;
+		}
+		self.buffer.extend_from_slice(&rest[whole..]);
+		Ok(bytes.len())
+	}
+
+	fn flush(&mut self) -> io::Result<()> {
+		self.write_buffer()?;
+		self.file.flush()
+	}
 }
 
 #[derive(Debug)]
@@ -7706,7 +7784,7 @@ impl NamedWriter {
 					.map_err(|e| {
 						SedError::new(4, format!("couldn't open file {}: {}", path.display(), strip_errno(&e)))
 					})?;
-				Target::File(BufWriter::new(file))
+				Target::File(BlockWriter::new(file))
 			},
 		};
 
@@ -7783,7 +7861,17 @@ impl NamedWriter {
 				return Ok(());
 			},
 		};
-		writer.into_inner().map_err(|e| e.into_error()).and_then(File::close).map_err(|e| self.flush_error(&e))
+		writer.close().map_err(|e| self.flush_error(&e))
+	}
+}
+
+/// A writer that [`flush_all`] did not close, as after a panic, still writes
+/// what it buffered when it is dropped.
+impl Drop for NamedWriter {
+	fn drop(&mut self) {
+		if let Target::File(writer) = &mut self.target {
+			let _ = writer.write_buffer();
+		}
 	}
 }
 
@@ -7810,17 +7898,21 @@ fn write_record_to(
 	Ok(())
 }
 
-/// Flush buffered content to the files and close them, returning
-/// descriptive errors.
+/// Flush buffered content to the files and close them, returning a
+/// descriptive error. GNU sed closes them in the reverse of the order it
+/// opened them, so of two names of one file the first opened writes it last;
+/// it closes every file even when closing one fails, and reports the error
+/// of the file opened last that failed.
 // the registry is drained (not just
 // iterated) so open files do not outlive the invocation on a reused thread.
 pub fn flush_all() -> SedResult<()> {
 	FLUSH_LIST.with(|cell| {
-		for handle in cell.borrow_mut().drain(..) {
-			handle.borrow_mut().close()?;
+		let mut result = Ok(());
+		for handle in cell.borrow_mut().drain(..).rev() {
+			let closed = handle.borrow_mut().close();
+			result = result.and(closed);
 		}
-
-		Ok(())
+		result
 	})
 }
 
@@ -7829,6 +7921,25 @@ pub fn flush_all() -> SedResult<()> {
 /// failed before reaching `flush_all`) cannot leak into this run.
 pub fn reset() {
 	FLUSH_LIST.with(|cell| cell.borrow_mut().clear());
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A `w` file's block is its `st_blksize`, at most 8 KiB; a file that
+	/// reports no `st_blksize`, or 0, gets the default.
+	#[test]
+	fn block_is_the_files_st_blksize_at_most_8_kib() {
+		for (blksize, block) in [
+			(Some(131_072), 8192),
+			(Some(4096), 4096),
+			(Some(0), BlockWriter::DEFAULT_BLOCK),
+			(None, BlockWriter::DEFAULT_BLOCK),
+		] {
+			assert_eq!(BlockWriter::block_size(blksize), block, "{blksize:?}");
+		}
+	}
 }
 }
 pub mod processor {
@@ -9537,6 +9648,11 @@ impl Utility for Sed {
 		match sed_main(&self.matches, host) {
 			Ok(()) => host.exit_code(),
 			Err(error) => {
+				// GNU writes its `w` files when it exits on an error too, but a
+				// closed reader kills it with SIGPIPE before it writes them.
+				if !host.sigpipe_hit() {
+					let _ = named_writer::flush_all();
+				}
 				let code = error.code();
 				host.error(error, if code == 0 { 1 } else { code });
 				host.exit_code()
@@ -10415,5 +10531,86 @@ mod tests {
 		// A regex reused from another `s` expands its missing groups to nothing.
 		let (code, capture) = crate::host::run_util::<Sed>(&[r"s/a/b/;s//\1/"], "aa\n", "/");
 		assert_eq!((code, capture.out().as_str()), (0, "b\n"), "{}", capture.err());
+	}
+
+	/// GNU sed 4.9 closes its `w` files in the reverse of the order it opened
+	/// them, so when two names of one file write it, the first opened writes
+	/// it last. A name that writes more than one block (the file's
+	/// `st_blksize`, 4096 here) has written that block before then, and the
+	/// other name's close writes over its start. Input `1 2 3`, or `1 2` and
+	/// `3` as two files under `-s`, or `big` (999 lines `aaaa`, then `ZZZZ`:
+	/// 5,000 bytes); `d/o` after the run.
+	#[test]
+	fn w_files_close_in_reverse_open_order() {
+		let big = format!("{}ZZZZ\n", "aaaa\n".repeat(999));
+		let big_written = format!("ZZZZ\n{}ZZZZ\n", "aaaa\n".repeat(998));
+		for (args, written) in [
+			(&["-n", "-e", "2w ./d/o", "-e", "w d/o"][..], "2\n2\n3\n"),
+			(&["-s", "-n", "-e", "w ./d/o", "-e", "$w d/o", "in1", "in2"], "1\n2\n3\n"),
+			(&["-n", "-e", "w ./d/o", "-e", "$w d/o", "big"], big_written.as_str()),
+		] {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::create_dir(dir.path().join("d")).unwrap();
+			std::fs::write(dir.path().join("in1"), "1\n2\n").unwrap();
+			std::fs::write(dir.path().join("in2"), "3\n").unwrap();
+			std::fs::write(dir.path().join("big"), &big).unwrap();
+			let (code, capture) = crate::host::run_util::<Sed>(args, "1\n2\n3\n", dir.path());
+			assert_eq!((code, capture.err().as_str()), (0, ""), "{args:?}");
+			let file = std::fs::read_to_string(dir.path().join("d/o")).unwrap();
+			assert_eq!(file, written, "{args:?}");
+		}
+	}
+
+	/// GNU sed 4.9 closes every `w` file when closing one fails, so it exits 4
+	/// with `out` holding both lines. The backward branch matters: without it,
+	/// a writer left open is still written when the script is dropped.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn w_files_all_close_when_one_fails() {
+		let dir = tempfile::tempdir().unwrap();
+		let args = ["-n", "-e", ":a", "-e", "w out", "-e", "w /dev/full", "-e", "/x/ba"];
+		let (code, capture) = crate::host::run_util::<Sed>(&args, "1\n2\n", dir.path());
+		assert_eq!(code, 4, "{}", capture.err());
+		assert_eq!(std::fs::read_to_string(dir.path().join("out")).unwrap(), "1\n2\n");
+	}
+
+	/// GNU sed 4.9 writes its `w` files when it stops on an error: `w out` takes
+	/// the line, then `s//x/` fails with exit 1. `in9` is one 9,000-byte line
+	/// with no newline; `abc` comes on stdin.
+	#[test]
+	fn w_files_are_written_when_sed_stops_on_an_error() {
+		let in9 = format!("{:>9000}", "x");
+		for (args, stdin, written) in [
+			(&["-n", "-e", "w out", "-e", "s//x/", "in9"][..], "", in9.as_str()),
+			(&["-n", "-e", "w out", "-e", "s//x/"], "abc\n", "abc\n"),
+		] {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("in9"), &in9).unwrap();
+			let (code, capture) = crate::host::run_util::<Sed>(args, stdin, dir.path());
+			assert_eq!(code, 1, "{args:?}: {}", capture.err());
+			let out = std::fs::read_to_string(dir.path().join("out")).unwrap();
+			assert_eq!(out.len(), written.len(), "{args:?}");
+			assert_eq!(out, written, "{args:?}");
+		}
+	}
+
+	/// A closed reader kills GNU sed 4.9 with SIGPIPE before it writes its `w`
+	/// files: `{ sleep 0.3; seq 2000; } | sed -n -e '1w out' -e p | true`
+	/// leaves `out` empty.
+	#[cfg(unix)]
+	#[test]
+	fn w_files_stay_unwritten_when_a_closed_reader_stops_sed() {
+		use crate::openfile::OpenFile;
+
+		let dir = tempfile::tempdir().unwrap();
+		let input: String = (1..=2000).map(|n| format!("{n}\n")).collect();
+		let (mut host, capture) = crate::host::Host::for_test("sed", input, dir.path());
+		let (reader, writer) = std::io::pipe().unwrap();
+		drop(reader);
+		host.set_test_stdout(OpenFile::from(writer));
+		let parsed = <Sed as clap::Parser>::try_parse_from(["sed", "-n", "-e", "1w out", "-e", "p"]).unwrap();
+		let code = crate::host::run_caught::<Sed>(parsed, &mut host);
+		assert_eq!((code, capture.err().as_str()), (crate::host::SIGPIPE_EXIT_CODE, ""));
+		assert_eq!(std::fs::read_to_string(dir.path().join("out")).unwrap(), "");
 	}
 }
