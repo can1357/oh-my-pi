@@ -24,6 +24,7 @@ import {
 	type HtmlFormData,
 	type HtmlFormValue,
 	type OptionNote,
+	optionText,
 	textValue,
 } from "../../../tools/html-form/data";
 import type { ChoiceField, FormField, HtmlForm, TextField } from "../../../tools/html-form/parse";
@@ -541,7 +542,7 @@ export class HtmlFormModel {
 				out.push({
 					name: field.name,
 					question: untrack(() => this.question(index)),
-					option: spansText(field.options[option]!.label),
+					option: optionText(field.options[option]!),
 					value: field.options[option]!.value,
 					text,
 					...(images?.length ? { images: [...images] } : {}),

@@ -1,6 +1,14 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { flattenLine } from "@oh-my-pi/pi-tui/text/sanitize";
-import { type ChoiceField, type FormBlock, type FormField, type HtmlForm, spansText, type TextField } from "./parse";
+import {
+	type ChoiceField,
+	type ChoiceOption,
+	type FormBlock,
+	type FormField,
+	type HtmlForm,
+	spansText,
+	type TextField,
+} from "./parse";
 
 /** Submitted value of one control: text, a number for `number`/`range` inputs, or a group's checked values. */
 export type HtmlFormValue = string | number | string[];
@@ -35,6 +43,132 @@ export interface OptionNote {
 	text: string;
 	/** Pasted images of the note; present only when non-empty. */
 	images?: ImageContent[];
+}
+
+/** One reason submitted data is not an answer of the form: the field (or unknown key) and why. */
+export interface FormDataError {
+	name: string;
+	message: string;
+}
+
+/** An option's plain label, as the dialog reports it, without terminal control bytes. */
+export function optionText(option: ChoiceOption): string {
+	return (
+		spansText(option.label)
+			.replace(/[\x00-\x09\x0b-\x1f\x7f]/g, "")
+			.replace(/\s+/g, " ")
+			.trim() || option.value
+	);
+}
+
+/**
+ * `data` and `notes` as the form's dialog would submit them, or why it never would.
+ *
+ * `data` is the whole answer, not a change to the form's defaults: a named field left out is
+ * unanswered (a text field blank, a group empty, a single choice not chosen), so a caller can
+ * leave a preselected option unanswered. Start from {@link defaultFormData} to keep what the
+ * form prefills and preselects.
+ */
+export function formSubmission(
+	form: HtmlForm,
+	data: HtmlFormData,
+	notes: readonly OptionNote[] = [],
+): { data: HtmlFormData; notes: OptionNote[] } | { errors: FormDataError[] } {
+	const errors: FormDataError[] = [];
+	const fields = new Map(form.fields.filter(field => field.name).map(field => [field.name, field]));
+	const hidden = new Map(form.hidden);
+	const normalized: HtmlFormData = Object.create(null);
+	for (const name of Object.keys(data)) {
+		if (!fields.has(name) && !hidden.has(name)) errors.push({ name, message: "Unknown field" });
+	}
+	for (const [name, value] of hidden) {
+		normalized[name] = value;
+		if (Object.hasOwn(data, name) && data[name] !== value) {
+			errors.push({ name, message: "Hidden input cannot be changed" });
+		}
+	}
+	for (const field of form.fields) {
+		const name = field.name;
+		if (!name) continue;
+		const raw = Object.hasOwn(data, name) ? data[name] : undefined;
+		let value: HtmlFormValue | undefined;
+		if (field.kind === "text") {
+			if (raw === undefined) value = "";
+			else if (
+				typeof raw === "string" ||
+				(typeof raw === "number" && (field.type === "number" || field.type === "range"))
+			) {
+				value = textValue(field, String(raw));
+			} else errors.push({ name, message: "Expected text" });
+		} else {
+			const array = isArrayChoice(field);
+			if (raw === undefined) value = array ? [] : undefined;
+			else if (array ? !Array.isArray(raw) : typeof raw !== "string") {
+				errors.push({ name, message: array ? "Expected an array of distinct strings" : "Expected one string" });
+			} else {
+				const values = Array.isArray(raw) ? raw : [raw];
+				const seen = new Set<string>();
+				const checked = new Set<number>();
+				let other: string | undefined;
+				for (const item of values) {
+					if (typeof item !== "string" || seen.has(item)) {
+						errors.push({ name, message: "Expected distinct strings" });
+						continue;
+					}
+					seen.add(item);
+					const index = field.options.findIndex(option => option.value === item && !option.disabled);
+					if (index >= 0) {
+						checked.add(index);
+					} else if (
+						field.other &&
+						item.trim() &&
+						!field.options.some(option => option.value === item || option.value === item.trim())
+					) {
+						if (other !== undefined) errors.push({ name, message: "Only one Other answer is allowed" });
+						else other = item;
+					} else errors.push({ name, message: `Unavailable option: ${item}` });
+				}
+				value = choiceValue(field, checked, other);
+			}
+		}
+		if (value !== undefined) normalized[name] = value;
+		const message = fieldError(field, value);
+		if (message) errors.push({ name, message });
+	}
+	const questions = fieldQuestions(form);
+	const selected: OptionNote[] = [];
+	const noted = new Map<string, Set<string>>();
+	for (const note of notes) {
+		const field = fields.get(note.name);
+		const name = note.name;
+		const text = typeof note.text === "string" ? note.text.trim() : "";
+		if (!text) errors.push({ name, message: "Note text is required" });
+		if (field?.kind !== "choice") {
+			errors.push({ name, message: "Notes need a choice field" });
+			continue;
+		}
+		const options = field.options.filter(option => option.value === note.value && !option.disabled);
+		// Equal-valued options still have distinct labels in the dialog's notes.
+		const option = options.find(option => optionText(option) === note.option) ?? options[0];
+		const value = normalized[name];
+		if (!option || !(Array.isArray(value) ? value.includes(note.value) : value === note.value)) {
+			errors.push({ name, message: "Note option must be enabled and checked" });
+			continue;
+		}
+		let values = noted.get(name);
+		if (!values) noted.set(name, (values = new Set()));
+		if (values.has(note.value)) errors.push({ name, message: "Only one note per option is allowed" });
+		values.add(note.value);
+		selected.push({
+			name,
+			question: questions.get(field) ?? name,
+			option: optionText(option),
+			value: note.value,
+			text,
+			...(note.images?.length ? { images: [...note.images] } : {}),
+		});
+	}
+	return errors.length ? { errors } : { data: normalized, notes: selected };
 }
 
 /** Label of the free-text answer the UI adds to radio and checkbox groups ({@link ChoiceField.other}). */

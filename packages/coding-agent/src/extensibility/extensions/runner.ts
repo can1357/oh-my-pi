@@ -670,6 +670,9 @@ export class ExtensionRunner {
 	#shutdownHandler: ShutdownHandler = () => {};
 	#resolvePlanReviewFn: NonNullable<ExtensionContextActions["resolvePlanReview"]> = () => false;
 	#getPendingPlanReviewFn: NonNullable<ExtensionContextActions["getPendingPlanReview"]> = () => undefined;
+	#getPendingAsksFn: NonNullable<ExtensionContextActions["getPendingAsks"]> = () => [];
+	#resolveAskFn: NonNullable<ExtensionContextActions["resolveAsk"]> = () => ({ ok: false, reason: "not_pending" });
+	#resetAskTimeoutFn: NonNullable<ExtensionContextActions["resetAskTimeout"]> = () => false;
 	#openPlanReviewFn: NonNullable<ExtensionContextActions["openPlanReview"]> = async () => false;
 	#sessionModes?: ExtensionContextActions["sessionModes"];
 	#keybindings?: ExtensionContextActions["keybindings"];
@@ -1048,6 +1051,9 @@ export class ExtensionRunner {
 		this.#shutdownHandler = contextActions.shutdown;
 		if (contextActions.resolvePlanReview) this.#resolvePlanReviewFn = contextActions.resolvePlanReview;
 		if (contextActions.getPendingPlanReview) this.#getPendingPlanReviewFn = contextActions.getPendingPlanReview;
+		this.#getPendingAsksFn = contextActions.getPendingAsks ?? (() => []);
+		this.#resolveAskFn = contextActions.resolveAsk ?? (() => ({ ok: false, reason: "not_pending" }));
+		this.#resetAskTimeoutFn = contextActions.resetAskTimeout ?? (() => false);
 		if (contextActions.openPlanReview) this.#openPlanReviewFn = contextActions.openPlanReview;
 		// Assigned unconditionally: a headless rebind must not inherit a previous host's controls.
 		this.#sessionModes = contextActions.sessionModes;
@@ -2166,6 +2172,9 @@ export class ExtensionRunner {
 			shutdown: () => this.#shutdownHandler(),
 			resolvePlanReview: (reviewId, choice, input) => this.#resolvePlanReviewFn(reviewId, choice, input),
 			getPendingPlanReview: () => this.#getPendingPlanReviewFn(),
+			getPendingAsks: () => this.#getPendingAsksFn(),
+			resolveAsk: (toolCallId, answer) => this.#resolveAskFn(toolCallId, answer),
+			resetAskTimeout: toolCallId => this.#resetAskTimeoutFn(toolCallId),
 			openPlanReview: () => this.#openPlanReviewFn(),
 			// Live: a context saved before or across a host rebind sees the current controls.
 			get sessionModes() {

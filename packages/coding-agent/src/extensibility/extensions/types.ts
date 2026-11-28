@@ -192,8 +192,8 @@ export type {
 	ExtensionAskDialogResult,
 } from "../../modes/view-model/overlays/ask-dialog";
 
-import type { HtmlFormData, OptionNote } from "../../tools/html-form/data";
-export type { HtmlFormData, HtmlFormValue, OptionNote } from "../../tools/html-form/data";
+import type { FormDataError, HtmlFormData, OptionNote } from "../../tools/html-form/data";
+export type { FormDataError, HtmlFormData, HtmlFormValue, OptionNote } from "../../tools/html-form/data";
 
 /** A submitted {@link ExtensionUIContext.formDialog}: form values and optional notes on selected options. */
 export interface ExtensionFormDialogResult {
@@ -237,6 +237,12 @@ export function timedOutAskDialogResult(questions: ExtensionAskDialogQuestion[])
 export interface ExtensionUIDialogOptions {
 	signal?: AbortSignal;
 	timeout?: number;
+	/**
+	 * `formDialog` only: the `ask` tool call this form answers. Makes it visible to `ctx.getPendingAsks` and
+	 * answerable with `ctx.resolveAsk`. An id names one pending form: a form given an id that is still
+	 * pending is shown untracked, and the first keeps the id.
+	 */
+	toolCallId?: string;
 	/** Invoked when the UI times out while waiting for a selection/input */
 	onTimeout?: () => void;
 	/** Invoked when the UI-managed timeout countdown starts */
@@ -898,6 +904,23 @@ export interface ExtensionContext {
 	 */
 	getPendingPlanReview(): PlanReviewRequestedEvent | undefined;
 	/**
+	 * Interactive ask forms still awaiting an answer, oldest first, including queued forms.
+	 * Returns detached snapshots; empty outside interactive mode.
+	 */
+	getPendingAsks(): PendingAsk[];
+	/**
+	 * Answer an open interactive ask form as if the operator submitted it.
+	 * `data` is the whole answer, not a change to the form's defaults: a field left out is unanswered,
+	 * so start from `defaultFormData(form)` to keep what the form prefills and preselects. It replaces
+	 * whatever the mounted dialog held, edits in progress included.
+	 * `{ ok: true }` means this answer is the one the tool returns; the first answer wins.
+	 * `not_pending` means it already closed, the id is unknown, or the mode has no interactive forms.
+	 * `invalid` reports every field error, leaving the form and its countdown unchanged.
+	 */
+	resolveAsk(toolCallId: string, answer: { data: HtmlFormData; notes?: OptionNote[] }): AskResolveResult;
+	/** Restart a mounted ask form's inactivity countdown; false when none is running, including queued forms. */
+	resetAskTimeout(toolCallId: string): boolean;
+	/**
 	 * Open the interactive plan review on the newest plan file, like `/plan-review`, while the
 	 * session is idle. True once a review is awaiting an answer (an already-open review is kept,
 	 * not replaced), without waiting for a choice. False, without aborting anything or showing
@@ -1557,6 +1580,49 @@ export interface PlanReviewResolvedEvent {
 }
 
 /**
+ * An interactive ask form opened (interactive mode only). Resolve it with `ctx.resolveAsk`.
+ * `ask_resolved` waits until every handler of this event returns, so handlers should hand
+ * long work (a remote round-trip, a dialog) off rather than await it.
+ */
+export interface AskRequestedEvent {
+	type: "ask_requested";
+	toolCallId: string;
+	sessionId: string;
+	html: string;
+	/** Inactivity in ms after which the form submits its current values; absent when it never times out. */
+	timeoutMs?: number;
+}
+
+/** An interactive ask form closed, with its answer when submitted. */
+export interface AskResolvedEvent {
+	type: "ask_resolved";
+	toolCallId: string;
+	sessionId: string;
+	/** Absent when the form closed unanswered (Esc, an abort, a queued message). */
+	data?: HtmlFormData;
+	notes?: OptionNote[];
+	/** The inactivity timeout submitted the form's current values. */
+	timedOut?: boolean;
+	/** `"extension"` only for an answer given through `ctx.resolveAsk`. */
+	by: "local" | "extension";
+}
+
+/** An open ask form as `ctx.getPendingAsks` reports it: what `ask_requested` carried, with its countdown's deadline. */
+export interface PendingAsk extends Omit<AskRequestedEvent, "type"> {
+	/** When the running inactivity countdown fires (epoch ms); absent while none runs. */
+	deadline?: number;
+}
+
+/**
+ * What `ctx.resolveAsk` did. `not_pending`: no open form has that tool call id (unknown, or settled
+ * first). `invalid`: the form stays open, and `errors` names each field its own rules refuse.
+ */
+export type AskResolveResult =
+	| { ok: true }
+	| { ok: false; reason: "not_pending" }
+	| { ok: false; reason: "invalid"; errors: FormDataError[] };
+
+/**
  * An explicit, idempotent mode transition. Requesting a state that already holds succeeds with
  * `changed: false`. No transition submits a prompt; send one separately (e.g. `pi.sendUserMessage`).
  * Plan `exit` leaves plan mode fully without approving the plan or deleting its draft. Loop `prompt`
@@ -1805,6 +1871,8 @@ export type ExtensionEvent =
 	| ToolApprovalResolvedEvent
 	| PlanReviewRequestedEvent
 	| PlanReviewResolvedEvent
+	| AskRequestedEvent
+	| AskResolvedEvent
 	| ModeChangedEvent
 	| AgentViewChangedEvent;
 
@@ -2087,6 +2155,8 @@ export interface ExtensionAPI {
 	on(event: "tool_approval_resolved", handler: ExtensionHandler<ToolApprovalResolvedEvent>): void;
 	on(event: "plan_review_requested", handler: ExtensionHandler<PlanReviewRequestedEvent>): void;
 	on(event: "plan_review_resolved", handler: ExtensionHandler<PlanReviewResolvedEvent>): void;
+	on(event: "ask_requested", handler: ExtensionHandler<AskRequestedEvent>): void;
+	on(event: "ask_resolved", handler: ExtensionHandler<AskResolvedEvent>): void;
 	on(event: "mode_changed", handler: ExtensionHandler<ModeChangedEvent>): void;
 	on(event: "agent_view_changed", handler: ExtensionHandler<AgentViewChangedEvent>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
@@ -2641,6 +2711,9 @@ export interface ExtensionContextActions {
 		input?: { feedback?: string; role?: string },
 	) => boolean;
 	getPendingPlanReview?: () => PlanReviewRequestedEvent | undefined;
+	getPendingAsks?: () => PendingAsk[];
+	resolveAsk?: (toolCallId: string, answer: { data: HtmlFormData; notes?: OptionNote[] }) => AskResolveResult;
+	resetAskTimeout?: (toolCallId: string) => boolean;
 	openPlanReview?: () => Promise<boolean>;
 	sessionModes?: ExtensionSessionModes;
 	/** The host's effective keymap, user remaps included; omitted outside the TUI, where omp's default keymap applies. */

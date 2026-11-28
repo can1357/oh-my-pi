@@ -622,7 +622,10 @@ describe("RPC form dialog", () => {
 	it("sends the form in one frame and returns the submitted data checked against it", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
-		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, DEPLOY_FORM, { timeout: 60_000 });
+		const result = requestRpcFormDialog(pendingRequests, output, FRAME_LIMIT, DEPLOY_FORM, {
+			timeout: 60_000,
+			toolCallId: "local-only",
+		});
 		const request = requireRequest(output.mock.calls[0]?.[0]);
 
 		expect(output).toHaveBeenCalledWith({

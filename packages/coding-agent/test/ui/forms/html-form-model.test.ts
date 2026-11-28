@@ -4,7 +4,7 @@
  * text boxes and rows.
  */
 import { describe, expect, it, vi } from "bun:test";
-import type { HtmlFormData, OptionNote } from "../../../src/tools/html-form/data";
+import { formSubmission, type HtmlFormData, type OptionNote } from "../../../src/tools/html-form/data";
 import { parseHtmlForm } from "../../../src/tools/html-form/parse";
 import type { DialogVim } from "../../../src/ui/composer/vim-editor";
 import { type HtmlFormCallbacks, HtmlFormModel } from "../../../src/ui/forms/html-form";
@@ -45,6 +45,35 @@ function clipboardRead() {
 }
 
 describe("html form model", () => {
+	it("agrees with the model on selected notes, radio and checkbox Other answers and typed defaults", () => {
+		const html = DB_FORM.replace(
+			"</form>",
+			`<label><input type="checkbox" name="extras" value="ci" checked>CI</label>
+			<label><input type="checkbox" name="extras" value="docker">Docker</label>
+			<select name="region"><option>US</option></select><input type="number" name="workers" value="4"></form>`,
+		);
+		const { model, press } = dialog(html);
+		const form = parseHtmlForm(html);
+		press("n", '"sqlite note"', "enter");
+		expect(model.notes()).toMatchObject([{ option: "SQLite", text: "sqlite note" }]);
+		expect(formSubmission(form, model.data(), model.notes())).toEqual({ data: model.data(), notes: model.notes() });
+		press("down", "down", '"MySQL 8"', "tab", "down", "down", '"terraform"');
+		expect(model.data()).toEqual({ db: "MySQL 8", extras: ["ci", "terraform"], region: "US", workers: 4 });
+		expect(formSubmission(form, model.data(), model.notes())).toEqual({ data: model.data(), notes: model.notes() });
+	});
+
+	it("keeps image notes and equal-valued option labels as the model reports them", () => {
+		const html = `<form><label><input type="radio" name="pick" value="same" checked>First</label>
+			<label><input type="radio" name="pick" value="same">Second</label></form>`;
+		const { model, press } = dialog(html);
+		press("down", "n", '"second only"');
+		model.attachNoteImage({ type: "image", data: "AA==", mimeType: "image/png" });
+		press("enter", "space");
+		const notes = model.notes();
+		expect(notes).toMatchObject([{ option: "Second", images: [{ data: "AA==" }] }]);
+		expect(formSubmission(parseHtmlForm(html), model.data(), notes)).toEqual({ data: model.data(), notes });
+	});
+
 	it("flags rule breaks without blocking Submit, an empty required field once passed over", () => {
 		const { model, press, onSubmit } = dialog(`<form>
 <label>Name <input name="name" required></label>
