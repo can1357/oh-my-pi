@@ -1,4 +1,5 @@
 import { describe, expect, it, mock } from "bun:test";
+import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildFactoryDroidModel } from "@oh-my-pi/pi-catalog/discovery";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -254,6 +255,51 @@ describe("Factory Droid completions wire (Droid Core)", () => {
 		expect(systemChannel).toContain("OMP system prompt");
 		// Toolless requests leave parallel tool calls at the API default.
 		expect(request.body.parallel_tool_calls).toBeUndefined();
+	});
+
+	it.each([
+		["/o/v1/chat/completions", kimiK3, completionsChunks("OK", "kimi-k3")],
+		["/o/v1/responses", gptTerra, responsesChunks("OK")],
+		["/a/v1/messages", sonnet5, anthropicChunks("OK")],
+		["/g/v1/generate", gemini, geminiChunks("OK")],
+	] as const)(
+		"posts %s without OMP's identity sentence, which Factory's policy check rejects, keeping the caller's separators",
+		async (_path, model, chunks) => {
+			const captured: CapturedRequest[] = [];
+			await streamFactoryDroid(
+				model(),
+				{
+					systemPrompt: [
+						"You are omp's trusted coding assistant.\n\n# Engineering\nCorrectness first.",
+						"Before. You are omp's trusted coding assistant.\n\n# Tone\nConcise.",
+					],
+					messages: [{ role: "user", content: "hello", timestamp: 1 }],
+				},
+				{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, [...chunks]) },
+			).result();
+
+			const body = JSON.stringify(captured[0].body);
+			expect(body).not.toContain("You are omp's trusted coding assistant.");
+			expect(body).toContain(JSON.stringify("# Engineering\nCorrectness first.").slice(1, -1));
+			expect(body).toContain(JSON.stringify("Before. \n\n# Tone\nConcise.").slice(1, -1));
+		},
+	);
+
+	it("strips the identity line of coding-agent's bundled system prompt", async () => {
+		const bundledPrompt = await Bun.file(
+			path.resolve(import.meta.dir, "../../coding-agent/src/prompts/system/system-prompt.md"),
+		).text();
+		const identityLine = bundledPrompt.split("\n", 1)[0]!;
+		const captured: CapturedRequest[] = [];
+		await streamFactoryDroid(
+			kimiK3(),
+			{ systemPrompt: [bundledPrompt], messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{ apiKey: WORKOS_TOKEN, fetch: captureFetch(captured, completionsChunks("OK", "kimi-k3")) },
+		).result();
+
+		const body = JSON.stringify(captured[0].body);
+		expect(body).not.toContain(identityLine);
+		expect(body).toContain("# Engineering");
 	});
 
 	it.each([
