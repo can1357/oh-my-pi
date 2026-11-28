@@ -355,7 +355,6 @@
 - Model discovery reads the reasoning effort ladder, default level and mandatory flag from `/v1/models` rows that publish them as a `reasoning: { supported_efforts, default_effort, mandatory }` object (the OpenRouter shape), not only from flat `supported_reasoning_levels` ([#20879](https://github.com/can1357/oh-my-pi/pull/20879) by [@Xytronix](https://github.com/Xytronix))
 - Declining a provider's consent screen during `/login` or `omp login` now reports the sign-in as canceled, in the terminal and on the browser page, instead of as a failed login
 - SIGTERM or SIGHUP during an `omp acp` turn records `Previous OMP process exited before completing the turn.` That turn resumes with `omp --restore` ([#20446](https://github.com/can1357/oh-my-pi/pull/20446) by [@nick-maderight](https://github.com/nick-maderight)).
-- SIGTERM or SIGHUP during an `omp acp` turn records `Previous OMP process exited before completing the turn.` That turn resumes with `omp --restore` ([#20446](https://github.com/can1357/oh-my-pi/pull/20446) by [@nick-maderight](https://github.com/nick-maderight))
 
 ### Removed
 
