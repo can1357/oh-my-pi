@@ -33,6 +33,7 @@ use omp_xfs::{
 };
 use crate::bre;
 use crate::host::{AsyncUtility, Host, StdoutFile, StreamWriter, strip_errno};
+use crate::locale;
 use crate::root_guard;
 use crate::stdio;
 
@@ -740,11 +741,12 @@ fn normalize_context_args(argv: Vec<OsString>) -> Vec<OsString> {
 /// `grep-regex` at all, and escaping the TRANSLATION would make `\(a\)\1`
 /// match the text `(a)\1` rather than the bytes the user typed. The literal
 /// fallback must reproduce the user's pattern, which is what it did before the
-/// translation step existed.
+/// translation step existed. `utf8` is the locale's, as for [`for_locale`].
 fn build_default_matcher<P: AsRef<str>, F: AsRef<str>>(
 	builder: &RegexMatcherBuilder,
 	patterns: &[P],
 	fallbacks: &[F],
+	utf8: bool,
 ) -> Result<RegexMatcher, String> {
 	debug_assert_eq!(patterns.len(), fallbacks.len());
 	let error = match builder.build_many(patterns) {
@@ -758,7 +760,9 @@ fn build_default_matcher<P: AsRef<str>, F: AsRef<str>>(
 			let pattern = pattern.as_ref();
 			match builder.build(pattern) {
 				Ok(_) => Ok(pattern.to_owned()),
-				Err(_) if has_backreference(pattern) => Ok(regex::escape(fallback.as_ref())),
+				Err(_) if has_backreference(pattern) => {
+					Ok(for_locale(regex::escape(fallback.as_ref()), utf8))
+				},
 				Err(error) => Err(engine_error_message(&error)),
 			}
 		})
@@ -795,6 +799,34 @@ fn engine_error_message(error: &grep_regex::Error) -> String {
 	}
 }
 
+/// `pattern`, written in the regex crate's syntax, for a matcher built with
+/// Unicode on where `utf8`, else off. With Unicode off (the C locale, where
+/// each byte is a character) each character outside ASCII is written as the
+/// `\x` escapes of its UTF-8 bytes, which the regex crate then reads as those
+/// bytes: `é*` repeats its last byte and `[é]` holds either byte, as GNU grep
+/// reads them. A character after a backslash is left for the regex crate to
+/// refuse, as before.
+fn for_locale(pattern: String, utf8: bool) -> String {
+	use std::fmt::Write as _;
+
+	if utf8 || pattern.is_ascii() {
+		return pattern;
+	}
+	let mut written = String::with_capacity(pattern.len() * 4);
+	let mut escaped = false;
+	for c in pattern.chars() {
+		if c.is_ascii() || escaped {
+			written.push(c);
+		} else {
+			for byte in c.encode_utf8(&mut [0; 4]).bytes() {
+				let _ = write!(written, r"\x{byte:02X}");
+			}
+		}
+		escaped = c == '\\' && !escaped;
+	}
+	written
+}
+
 /// Compile all patterns using the last-selected matcher mode.
 fn build_matcher(
 	host: &Host,
@@ -803,14 +835,22 @@ fn build_matcher(
 	mode: MatchMode,
 	ignore_case: bool,
 ) -> Result<Engine, String> {
+	// In the C locale each byte is a character, as GNU grep reads it: `.` and
+	// a bracket expression match one byte, and the classes, word edges and
+	// case folding are ASCII. A pattern byte that is not UTF-8 reaches grep as
+	// U+FFFD (the shell's and `-f`'s lossy reading), which only the Unicode
+	// matcher reads as one character, as before.
+	let utf8 = locale::ctype_is_utf8(host)
+		|| patterns.iter().any(|pattern| pattern.contains(char::REPLACEMENT_CHARACTER));
+	let encoding = if utf8 { bre::Encoding::Utf8 } else { bre::Encoding::Bytes };
 	if mode == MatchMode::Perl {
 		let mut builder = PcreMatcherBuilder::new();
 		builder
 			.caseless(ignore_case)
 			.word(cli.word && !cli.line_regexp)
 			.whole_line(cli.line_regexp)
-			.utf(true)
-			.ucp(true)
+			.utf(utf8)
+			.ucp(utf8)
 			.jit_if_available(pcre2_jit_enabled(host.var("OMP_PCRE2_JIT")));
 		return builder
 			.build_many(patterns)
@@ -821,13 +861,15 @@ fn build_matcher(
 	let mut builder = RegexMatcherBuilder::new();
 	builder
 		.case_insensitive(ignore_case)
+		.unicode(utf8)
 		.word(cli.word && !cli.line_regexp)
 		.whole_line(cli.line_regexp);
 	if cli.null_data {
 		builder.line_terminator(Some(b'\0'));
 	}
 	if mode == MatchMode::Fixed {
-		let escaped: Vec<String> = patterns.iter().map(|pattern| regex::escape(pattern)).collect();
+		let escaped: Vec<String> =
+			patterns.iter().map(|pattern| for_locale(regex::escape(pattern), utf8)).collect();
 		return builder
 			.build_many(&escaped)
 			.map(Engine::Rust)
@@ -847,15 +889,22 @@ fn build_matcher(
 		// this translation step existed.
 		let translated: Vec<String> = patterns
 			.iter()
-			.map(|pattern| bre::bre_to_ere(pattern, bre::Backrefs::Unsupported, bre::StackedRepeats::Allowed))
+			.map(|pattern| {
+				bre::bre_to_ere(pattern, bre::Backrefs::Unsupported, bre::StackedRepeats::Allowed, encoding)
+					.map(|ere| for_locale(ere, utf8))
+			})
 			.collect::<Result<_, _>>()
 			.map_err(|error: bre::BreError| error.gnu_message().to_owned())?;
-		return build_default_matcher(&builder, &translated, patterns).map(Engine::Rust);
+		return build_default_matcher(&builder, &translated, patterns, utf8).map(Engine::Rust);
 	}
 
 	let patterns = patterns
 		.iter()
-		.map(|pattern| bre::ere_to_rust(pattern, true).map_err(|error| error.gnu_message().to_owned()))
+		.map(|pattern| {
+			bre::ere_to_rust(pattern, true, encoding)
+				.map(|ere| for_locale(ere.into_owned(), utf8))
+				.map_err(|error| error.gnu_message().to_owned())
+		})
 		.collect::<Result<Vec<_>, _>>()?;
 
 	builder
@@ -3175,6 +3224,91 @@ mod tests {
 				(2, "grep: missing: No such file or directory\n"),
 				"{args:?}"
 			);
+		}
+	}
+
+	/// Runs `grep` with `args` on `stdin` in the shell locale `locale`
+	/// (`LC_ALL`), returning its exit status, the bytes of its stdout and its
+	/// stderr.
+	async fn run_in_locale(args: &[&str], stdin: &[u8], locale: &str) -> (i32, Vec<u8>, String) {
+		let (mut host, capture) = Host::for_test_async("grep", stdin.to_vec(), "/");
+		host.set_test_var("LC_ALL", locale);
+		let code = run_parsed(args, &mut host).await;
+		host.sync_output().await.expect("output is delivered");
+		(code, capture.stdout(), capture.err())
+	}
+
+	/// In the C locale each byte is a character, so on a line that is not
+	/// UTF-8 `.`, a bracket expression, `-w`'s word edges and `-P` read the
+	/// bytes 0xE9 and 0xC3 one character each, a quantifier after a character
+	/// outside ASCII repeats its last byte, also stacked on another (`é*\+`),
+	/// and a collating symbol or an equivalence class of such a character
+	/// (`[[=é=]]`) is several collating elements, which GNU grep refuses. A
+	/// pattern byte that is not UTF-8 reaches grep as U+FFFD (the shell's and
+	/// `-f`'s lossy reading), and stays one character there. Failure mode:
+	/// such a line was read as UTF-8, where neither byte is a character, so
+	/// `f.o` skipped `f\xe9o`, `-w caf` found `caf` inside a word, `-P` matched
+	/// nothing there, and `[[=é=]]` was searched as `é`. Each expectation is
+	/// GNU grep 3.11's under `LC_ALL=C`, for a pattern byte with the byte
+	/// itself.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn the_c_locale_reads_a_line_that_is_not_utf8_a_byte_to_a_character() {
+		let input = b"caf\xe9 foo\nx\xc3(y foo\nplain foo bar\ncafe\nf\xe9o\n";
+		for (args, expected) in [
+			(&["-o", "f.o"][..], &b"foo\nfoo\nfoo\nf\xe9o\n"[..]),
+			(&["caf."], b"caf\xe9 foo\ncafe\n"),
+			(&["-n", "x.("], b"2:x\xc3(y foo\n"),
+			(&["-i", "X.(Y"], b"x\xc3(y foo\n"),
+			(&["-v", "[^a-z ]"], b"plain foo bar\ncafe\n"),
+			(&["-c", r"^.\{8\}$"], b"2\n"),
+			(&["-oE", "caf|x."], b"caf\nx\xc3\ncaf\n"),
+			(&["-w", "caf"], b"caf\xe9 foo\n"),
+			(&["-ow", "f.o"], b"foo\nfoo\nfoo\nf\xe9o\n"),
+			(&["-P", "caf."], b"caf\xe9 foo\ncafe\n"),
+			(&["-cP", r"x.\("], b"1\n"),
+		] {
+			let (code, out, err) = run_in_locale(args, input, "C").await;
+			assert_eq!((code, out), (0, expected.to_vec()), "grep {args:?}: {err}");
+		}
+		let input = b"e\n\xc3\n\xc3\xa9\n";
+		for args in [
+			&["-c", "[[=\u{e9}=]]"][..],
+			&["-c", "[[.\u{e9}.]]"],
+			&["-cE", "[[=\u{e9}=]]"],
+			&["-cE", "[[.\u{e9}.]]"],
+		] {
+			let refused = (2, Vec::new(), "grep: Invalid collation character\n".to_owned());
+			assert_eq!(run_in_locale(args, input, "C").await, refused, "grep {args:?}");
+		}
+		assert_eq!(run_in_locale(&["-c", "[[=e=]]"], input, "C").await, (0, b"1\n".to_vec(), String::new()));
+		// `$'ab\377*c'` and `$'[\351]'`, as the shell and `-f` hand them over.
+		let dir = tempfile::tempdir().unwrap();
+		let file = |name: &str, bytes: &[u8]| {
+			let path = dir.path().join(name);
+			std::fs::write(&path, bytes).unwrap();
+			path.to_str().unwrap().to_owned()
+		};
+		let (optional, bracket) = (file("optional", b"ab\xff?c\n"), file("bracket", b"[\xe9]\n"));
+		for (args, stdin, expected) in [
+			(&["-c", "ab\u{fffd}*c"][..], &b"abc\n"[..], (0, &b"1\n"[..])),
+			(&["-cE", "ab\u{fffd}?c"], b"abc\n", (0, b"1\n")),
+			(&["-cP", "ab\u{fffd}?c"], b"abc\n", (0, b"1\n")),
+			(&["-cEf", optional.as_str()], b"abc\n", (0, b"1\n")),
+			(&["-c", "[\u{fffd}]"], b"a\xbd\n", (1, b"0\n")),
+			(&["-cf", bracket.as_str()], b"a\xbd\n", (1, b"0\n")),
+			(&["-c", "[a-\u{fffd}]"], b"\xee\n", (1, b"0\n")),
+		] {
+			let (code, out, err) = run_in_locale(args, stdin, "C").await;
+			assert_eq!((code, out), (expected.0, expected.1.to_vec()), "grep {args:?}: {err}");
+		}
+		for (args, stdin, expected) in [
+			(&["-c", "x\u{e9}*\\+y"][..], &b"x\xc3\xc3y\n"[..], (1, &b"0\n"[..])),
+			(&["-cE", "x\u{e9}*+y"], b"x\xc3\xc3y\n", (1, b"0\n")),
+			(&["-cx", "\u{e9}*\\+"], b"\xc3\xc3\n", (1, b"0\n")),
+			(&["-o", "\u{e9}*\\+"], b"\xc3\xc3\n", (0, b"\xc3\n\xc3\n")),
+		] {
+			let (code, out, err) = run_in_locale(args, stdin, "C").await;
+			assert_eq!((code, out), (expected.0, expected.1.to_vec()), "grep {args:?}: {err}");
 		}
 	}
 }

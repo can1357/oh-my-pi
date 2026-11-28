@@ -1185,9 +1185,15 @@ fn compile_regex(
 	}
 
 	let translated = if context.regex_extended {
-		crate::bre::ere_to_rust(pattern, false)
+		crate::bre::ere_to_rust(pattern, false, crate::bre::Encoding::Utf8)
 	} else {
-		crate::bre::bre_to_ere(pattern, crate::bre::Backrefs::Supported, crate::bre::StackedRepeats::Refused).map(std::borrow::Cow::Owned)
+		crate::bre::bre_to_ere(
+			pattern,
+			crate::bre::Backrefs::Supported,
+			crate::bre::StackedRepeats::Refused,
+			crate::bre::Encoding::Utf8,
+		)
+		.map(std::borrow::Cow::Owned)
 	}
 	.map_err(|e| e.gnu_message().to_string())?;
 	let multiline_classes;

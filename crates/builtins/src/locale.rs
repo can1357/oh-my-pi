@@ -7,7 +7,8 @@
 //! change the C locale of the whole host process.
 //!
 //! Used by `sort` and `comm` (collation), `sort` (numerics), `uniq`, `date`,
-//! `du`, `df`, `env`, `fold`, and `column` (tree art).
+//! `du`, `df`, `env`, `fold`, `grep` (bytes or characters), and `column`
+//! (tree art).
 
 #![allow(dead_code, reason = "each utility uses a subset")]
 
@@ -35,11 +36,12 @@ pub(crate) fn shell_locale<'h>(host: &'h Host, category: &str) -> Option<&'h str
 }
 
 /// Whether a `language_TERRITORY[.codeset][@modifier]` name has a UTF-8
-/// codeset (`C.UTF-8` included).
+/// codeset (`C.UTF-8` included), or is that codeset alone (`UTF-8`, the form
+/// macOS sets).
 pub(crate) fn codeset_is_utf8(name: &str) -> bool {
-	name.split(['.', '@']).nth(1).is_some_and(|codeset| {
-		codeset.eq_ignore_ascii_case("utf-8") || codeset.eq_ignore_ascii_case("utf8")
-	})
+	let name = name.split('@').next().unwrap_or(name);
+	let codeset = name.split_once('.').map_or(name, |(_, codeset)| codeset);
+	codeset.eq_ignore_ascii_case("utf-8") || codeset.eq_ignore_ascii_case("utf8")
 }
 
 /// Whether the shell's `LC_CTYPE` is a UTF-8 locale the system can load: the
@@ -189,5 +191,24 @@ pub(crate) fn numeric_symbols(host: &Host) -> NumericSymbols {
 			[0xc2, 0xa0] if !utf8 => Some(0xa0),
 			_ => None,
 		},
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::codeset_is_utf8;
+
+	/// A locale name is UTF-8 by its codeset (`C.UTF-8`, `en_US.utf8@euro`),
+	/// or by being that codeset alone, the form macOS sets (`LC_CTYPE=UTF-8`).
+	/// Failure mode: a codeset-only name read as no UTF-8, so `grep` would
+	/// read bytes in a UTF-8 locale.
+	#[test]
+	fn a_codeset_only_name_of_utf8_is_utf8() {
+		for name in ["C.UTF-8", "en_US.utf8@euro", "UTF-8", "utf8"] {
+			assert!(codeset_is_utf8(name), "{name}");
+		}
+		for name in ["en_US", "en_US.ISO-8859-1", "de_DE@euro"] {
+			assert!(!codeset_is_utf8(name), "{name}");
+		}
 	}
 }
