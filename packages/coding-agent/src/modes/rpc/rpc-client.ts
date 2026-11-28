@@ -855,6 +855,15 @@ export class RpcClient {
 	}
 
 	/**
+	 * Clear the conversation in place (the TUI's `/clear`), keeping the session id and transcript file.
+	 * Rejects with `session_busy` while a response streams or a foreground bash/eval runs.
+	 */
+	async clearContext(): Promise<{ droppedCount: number }> {
+		const response = await this.#send({ type: "clear_context" });
+		return this.#getData(response);
+	}
+
+	/**
 	 * Get current session state.
 	 */
 	async getState(): Promise<RpcSessionState> {

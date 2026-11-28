@@ -13,3 +13,6 @@ system-exit	my $v=system('sh','-c','exit 7'); print "$v|",$?>>8,"\n";	1792|7␊
 system-explicit	my $v=system {'echo'} 'echo','hello'; print "$v|$?\n";	hello␊0|0␊
 system-list	my $v=system('echo','hello'); print "$v|$?\n";	hello␊0|0␊
 system-shell	my $v=system(q{printf 'left\n' | cat}); print "$v|$?\n";	left␊0|0␊
+sigpipe-ignore	local $SIG{PIPE}="IGNORE"; pipe(my $r,my $w) or die; close $r; print defined(syswrite $w,"x") ? "wrote\n" : "syswrite: $!\n"; print {$w} "y"; print close($w) ? "closed\n" : "close: $!\n"; pipe(my $s,my $t) or die; close $s; select $t; $|=1; my $i=0; $i++ while $i<5 and print "z"; my $e="$!"; select STDOUT; close $t; print "printed $i: $e\n";	syswrite: Broken pipe␊close: Broken pipe␊printed 0: Broken pipe␊
+sigpipe-handler	my $got="none"; $SIG{PIPE}=sub { $got=$_[0] }; pipe(my $r,my $w) or die; close $r; my $n=syswrite $w,"x"; my $err="$!"; print defined $n ? "wrote\n" : "syswrite: $err\n"; print "handler: $got\n";	syswrite: Broken pipe␊handler: PIPE␊
+exec-skips-end	END { print "END\n" } sub DESTROY { print "DESTROY\n" } my $o = bless {}; print "before\n"; exec "sh", "-c", "echo exec; exit 3"; print "after\n";	before␊exec␊	status=3

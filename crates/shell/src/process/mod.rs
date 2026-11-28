@@ -15,6 +15,7 @@
 //! with a runtime that owns signal handlers and descriptors: see
 //! [`ProcessOptions::embedded`] for what changes.
 
+mod callouts;
 mod host;
 mod pending_fs;
 pub mod pretty;
@@ -32,12 +33,15 @@ use std::{
 
 use bstr::BString;
 
-pub use self::host::{NativeHost, ignored_on_entry, inherited_fds};
 use self::signals::RuntimeSignals;
+pub use self::{
+	callouts::Callouts,
+	host::{ExtrasOrder, NativeHost, ignored_on_entry, inherited_fds},
+};
 use crate::{
 	bash::{
-		Budget, CallOutcome, Cx, Dialect, Engine, EngineConfig, EventMask, MemStore, ModeId, Origin,
-		Profile, RunId, Script, Shell, ShellInit, Step, Vpid,
+		Budget, Cx, Dialect, Engine, EngineConfig, EventMask, MemStore, ModeId, Origin, Profile,
+		RunId, Script, Shell, ShellInit, Step, Vpid,
 		diag::strerror,
 		invocation::{self, ShellArgs},
 		store::OptId,
@@ -71,6 +75,9 @@ pub struct ProcessOptions {
 	/// Nothing outlives the call: a second [`main`] in the same process
 	/// starts from the same state.
 	pub embedded: bool,
+	/// Where the shell offers pi's extras ([`NativeHost::offer_extras`]);
+	/// `None`: every command the shell does not build in comes from `PATH`.
+	pub extras:   Option<ExtrasOrder>,
 }
 
 /// What to run, and as whom.
@@ -530,10 +537,8 @@ fn run(args: &ShellArgs, env: Vec<(BString, BString)>, input: Input, opts: Proce
 	// Before the process opens any fd of its own.
 	let inherited = inherited_fds(opts.embedded);
 	let mut host = NativeHost::new(None, false, inherited, ignored_on_entry(), 0, opts.embedded);
-	// `omp zsh` on Windows: pi's utilities stand in for the Unix tools it
-	// lacks. Elsewhere, and in obash, a missing command stays not found.
-	if opts.embedded && cfg!(windows) {
-		host.offer_extras(&env);
+	if let Some(order) = opts.extras {
+		host.offer_extras(&env, order);
 	}
 	let cfg = EngineConfig::default();
 	let engine = Engine::new(cfg);
@@ -873,38 +878,33 @@ pub fn drive(
 	root: Vpid,
 ) -> i32 {
 	let mut parker = Parker::new();
+	let mut callouts = Callouts::new(&parker);
 	loop {
 		NativeHost::dispatch_signals(&shell.control(), root);
+		callouts.poll(shell, host, store);
 		match shell.step(&mut Cx { host: &mut *host, store: &mut *store }, Budget::default()) {
 			Step::Done { run: done, status } if done == run => return status,
-			Step::Call { id, .. } => no_callouts(shell, id),
-			Step::Blocked | Step::Paused => wait_runnable(&mut parker, shell, root),
+			Step::Done { run, status } => callouts.on_done(shell, run, status),
+			Step::Call { id, call } => callouts.on_call(shell, host, store, id, call),
+			Step::Blocked | Step::Paused => wait_runnable(&mut parker, shell, root, &callouts),
 			// A busy shell never parks: notice background exits here.
 			Step::Yield => parker.poll_exits(),
-			Step::Done { .. } | Step::SuspendReady => {},
+			Step::SuspendReady => {},
 			Step::Idle => return 0,
 		}
 	}
 }
 
-/// A process shell has no host callouts: answer each with an error.
-pub fn no_callouts(shell: &mut Shell, id: crate::bash::CallId) {
-	shell.complete(
-		id,
-		CallOutcome::Error("host callouts are not available in a process shell".into()),
-	);
-}
-
-/// Park until the shell may make progress, forwarding OS signals (a signal
-/// caught on this thread ends the park at once on Linux; otherwise within
-/// 50 ms).
-pub fn wait_runnable(parker: &mut Parker, shell: &Shell, root: Vpid) {
+/// Park until the shell may make progress or a worker of `callouts` rings,
+/// forwarding OS signals (a signal caught on this thread ends the park at
+/// once on Linux; otherwise within 50 ms).
+pub fn wait_runnable(parker: &mut Parker, shell: &Shell, root: Vpid, callouts: &Callouts) {
 	let ctl = shell.control();
 	let waker = parker.waker().clone();
 	let mut cx = Context::from_waker(&waker);
 	loop {
 		NativeHost::dispatch_signals(&ctl, root);
-		if ctl.poll_runnable(&mut cx).is_ready() {
+		if ctl.poll_runnable(&mut cx).is_ready() || callouts.rung() {
 			break;
 		}
 		parker.park(Duration::from_millis(50));

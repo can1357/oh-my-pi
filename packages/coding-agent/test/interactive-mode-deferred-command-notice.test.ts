@@ -308,7 +308,7 @@ describe("InteractiveMode deferred command preview", () => {
 		// into the transcript, mid-stream or otherwise — mounting above the
 		// growing live block is what duplicated in native scrollback (#6767).
 		expect(showDashboard).toHaveBeenCalledTimes(1);
-		expect(showDashboard).toHaveBeenCalledWith(usageReports);
+		expect(showDashboard).toHaveBeenCalledWith(usageReports, undefined);
 		expect(mode.shell.transcript.blocks()).toEqual([streamedReply]);
 
 		setStreaming(false);

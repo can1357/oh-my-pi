@@ -45,6 +45,12 @@ export const DEFAULT_CUSTOM_MESSAGE_TYPE = "custom-message";
 /** Custom message carrying a coding request delegated by the live voice model. */
 export const LIVE_DELEGATION_MESSAGE_TYPE = "live-delegation";
 
+/**
+ * Custom type of the notice telling the coding agent that the live voice session ended. LLM conversion
+ * places it before the first prompt the user writes after spoken requests; nothing saves it.
+ */
+export const LIVE_ENDED_MESSAGE_TYPE = "live-ended";
+
 /** Content shape accepted for extension-injected messages. */
 export type CustomMessageContent = string | (TextContent | ImageContent)[];
 

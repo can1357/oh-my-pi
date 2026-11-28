@@ -14,7 +14,7 @@ import type { Block, PaintContext } from "@oh-my-pi/pi-tui/term/paint";
 import { styledText } from "@oh-my-pi/pi-tui/term/painters/layout";
 import { truncate } from "@oh-my-pi/pi-tui/text/width";
 import type { ToolCommandTerm } from "../../tools/tool-command";
-import { defaultCardRows, tint } from "./default";
+import { defaultCard, tint } from "./default";
 import { legacyPartRows } from "./legacy";
 import { statusGlyph, statusIcon, statusLine } from "./frame";
 import { defineToolLook, isExpanded, toolLook, toolProps } from "./look";
@@ -41,18 +41,20 @@ export function toolCommandRows(node: UiNode, cx: PaintContext, width: number, e
 	if (inner)
 		return [...inner.paint(node, Object.create(cx, { width: { value: Math.max(1, width), enumerable: true } })).rows];
 	const failed = term.exitCode !== 0;
-	return defaultCardRows(
-		cx.theme,
-		{
-			glyph: statusIcon(cx, failed ? "error" : "success"),
-			title: term.commandLabel,
-			tint: failed ? "toolErrorBg" : "toolSuccessBg",
-			args: term.args,
-			expanded,
-			body: node.children().slice(1),
-		},
-		width,
-	);
+	return [
+		...defaultCard(
+			cx.theme,
+			{
+				glyph: statusIcon(cx, failed ? "error" : "success"),
+				title: term.commandLabel,
+				tint: failed ? "toolErrorBg" : "toolSuccessBg",
+				args: term.args,
+				expanded,
+				body: node.children().slice(1),
+			},
+			width,
+		).rows,
+	];
 }
 
 function paintToolCommand(node: UiNode, cx: PaintContext): Block {
@@ -63,20 +65,18 @@ function paintToolCommand(node: UiNode, cx: PaintContext): Block {
 	if (term.mode === "legacy") return { rows: legacyPartRows(cx, term.parts ?? [], cx.width) };
 	const inner = term.inner && term.inner !== "default" ? toolLook(term.inner) : undefined;
 	if (inner) return inner.paint(node, cx);
-	return {
-		rows: defaultCardRows(
-			cx.theme,
-			{
-				glyph: statusGlyph(node, cx),
-				title: styledText(cx.theme, props.title),
-				tint: tint(props),
-				args: term.args,
-				expanded: isExpanded(props),
-				body: node.children(),
-			},
-			cx.width,
-		),
-	};
+	return defaultCard(
+		cx.theme,
+		{
+			glyph: statusGlyph(node, cx),
+			title: styledText(cx.theme, props.title),
+			tint: tint(props),
+			args: term.args,
+			expanded: isExpanded(props),
+			body: node.children(),
+		},
+		cx.width,
+	);
 }
 
 defineToolLook("tool-command", { paint: paintToolCommand });

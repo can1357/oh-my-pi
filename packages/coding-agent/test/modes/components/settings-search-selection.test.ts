@@ -47,8 +47,8 @@ describe("settings search selection", () => {
 		// `Omit Thinking summaries` leaves the `compo` results; the released rule
 		// falls to its previous (last) index instead of restarting at the top.
 		term.type("o");
-		expect(selectedRow(term)).toContain("Experimental Speculative Execution");
-		expect(highlightedTab(term)).toContain("Tools");
+		expect(selectedRow(term)).toContain("Cache Bridge Compaction Tokens");
+		expect(highlightedTab(term)).toContain("Providers");
 	});
 
 	it("keeps the selected row when deleting a character, while it still matches", () => {

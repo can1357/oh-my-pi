@@ -54,6 +54,8 @@ export interface SpotlightOpenRead {
 	at?: number;
 	/** `original.url`: the session artifact holding the original text. */
 	url: string | null;
+	/** Opened by a reset fork's copied entry: the parent's read, whose needs this transcript never files. */
+	inherited?: true;
 }
 
 /** Spotlight state a tail parse needs from earlier bytes of the same transcript. */
@@ -807,7 +809,8 @@ function joinedText(content: unknown): string {
 /**
  * Reduces one transcript's entries to {@link SpotlightParseRows}, carrying {@link SpotlightParserState} across tail
  * parses. With `record` false it only advances the state (a prefix scan that rebuilds the state of a cursor without
- * one).
+ * one). An entry visited as `inherited` (a reset fork's copy of its parent's entry) advances the state the same way
+ * but emits none of the rows keyed by the copied entry or its calls, which belong to the parent's transcript.
  *
  * Needed lines: once a shaped read's result lands (applied, held out or score-free: any read with
  * `details.spotlight.original`), later calls of the session, all from later requests, add to its needs: a `read` of the
@@ -822,6 +825,8 @@ export class SpotlightCollector {
 	readonly #sessionFile: string;
 	readonly #folder: string;
 	readonly #record: boolean;
+	/** The entry being visited is a reset fork's copy; see {@link visit}. */
+	#inherited = false;
 	/** Rows of this parse by call id, so a shape entry and its result details merge before the upsert. */
 	readonly #shapes = new Map<string, SpotlightShapeRow>();
 	/** Need rows of this parse by call id (the changes this parse makes; the upsert merges them). */
@@ -867,6 +872,16 @@ export class SpotlightCollector {
 		this.#locates.length = 0;
 	}
 
+	/** Whether rows keyed by the visited entry or its calls are emitted. */
+	get #emits(): boolean {
+		return this.#record && !this.#inherited;
+	}
+
+	/** Whether this transcript files `read`'s need row: never for a read its parent opened. */
+	#owns(read: SpotlightOpenRead): boolean {
+		return this.#emits && read.inherited !== true;
+	}
+
 	#need(read: SpotlightOpenRead): SpotlightNeedRow {
 		let row = this.#needs.get(read.toolCallId);
 		if (!row) {
@@ -888,7 +903,7 @@ export class SpotlightCollector {
 		const open = (this.state.open ?? []).filter(other => other !== read);
 		this.state.open = open;
 		// A list read collects until none of its windows does.
-		if (this.#record) this.#need(read).open = open.some(other => other.toolCallId === read.toolCallId);
+		if (this.#owns(read)) this.#need(read).open = open.some(other => other.toolCallId === read.toolCallId);
 	}
 
 	/**
@@ -913,9 +928,10 @@ export class SpotlightCollector {
 				lines: window.lines,
 				at: window.at,
 				url: original.url,
+				...(this.#inherited && { inherited: true as const }),
 			};
 			this.state.open = [...(this.state.open ?? []), read];
-			if (this.#record) this.#need(read);
+			if (this.#emits) this.#need(read);
 		}
 	}
 
@@ -933,7 +949,7 @@ export class SpotlightCollector {
 					this.#close(read);
 					continue;
 				}
-				if (!this.#record) continue;
+				if (!this.#owns(read)) continue;
 				// Positions in the whole original: the window's own, past the windows before it.
 				const at = read.at ?? 0;
 				const end = read.start + read.lines - 1;
@@ -965,7 +981,7 @@ export class SpotlightCollector {
 		const fallback = typeof args.path === "string" ? args.path : null;
 		for (const read of open) {
 			if (!exact.has(read.file) && !globs.some(glob => glob.match(read.file))) continue;
-			if (this.#record) {
+			if (this.#owns(read)) {
 				const own = blocks.filter(block => {
 					const file = block.file ?? fallback;
 					return file !== null && resolveReadPath(file, this.state.cwd) === read.file;
@@ -976,7 +992,16 @@ export class SpotlightCollector {
 		}
 	}
 
-	visit(entry: unknown): void {
+	visit(entry: unknown, inherited = false): void {
+		this.#inherited = inherited;
+		try {
+			this.#visit(entry);
+		} finally {
+			this.#inherited = false;
+		}
+	}
+
+	#visit(entry: unknown): void {
 		if (!isRecord(entry)) return;
 		const state = this.state;
 		switch (entry.type) {
@@ -1015,7 +1040,7 @@ export class SpotlightCollector {
 				cwd: this.state.cwd,
 				title: this.state.title,
 			});
-		} else if (entry.customType === "spotlight:shape" && this.state.experiment && this.#record) {
+		} else if (entry.customType === "spotlight:shape" && this.state.experiment && this.#emits) {
 			const row = shapeFromEntry(this.#sessionFile, entry.data, timestamp);
 			if (row) this.#addShape(row);
 		}
@@ -1028,7 +1053,7 @@ export class SpotlightCollector {
 			const details = message.details;
 			// Traces count only from the session's Spotlight marker on.
 			const traced = state.experiment && isRecord(details) && isRecord(details.spotlight);
-			if (!this.#record) {
+			if (!this.#emits) {
 				// A prefix scan only rebuilds the open reads.
 				if (traced) {
 					const row = shapeFromDetails(this.#sessionFile, message.toolCallId, details, "", 0);
@@ -1056,7 +1081,7 @@ export class SpotlightCollector {
 		}
 		if (message.role !== "assistant" || !state.experiment || typeof entry.id !== "string") return;
 		const timestamp = entryTime(message.timestamp, entry.timestamp);
-		if (this.#record) this.rows.requests.push({ sessionFile: this.#sessionFile, entryId: entry.id, timestamp });
+		if (this.#emits) this.rows.requests.push({ sessionFile: this.#sessionFile, entryId: entry.id, timestamp });
 		if (!Array.isArray(message.content)) return;
 		const blocks = message.content.filter(
 			(block): block is Record<string, unknown> =>
@@ -1069,7 +1094,7 @@ export class SpotlightCollector {
 			const seq = state.seq++;
 			const toolName = String(block.name).trim();
 			this.#noteCall(toolName, block.arguments);
-			if (!this.#record) continue;
+			if (!this.#emits) continue;
 			this.rows.calls.push({
 				sessionFile: this.#sessionFile,
 				toolCallId: String(block.id),

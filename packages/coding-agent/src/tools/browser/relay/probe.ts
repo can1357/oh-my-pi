@@ -6,10 +6,13 @@
  * restart, while Chrome starts the next host. A 503 means a relay is up and its browser has not said hello yet,
  * which takes moments.
  */
+import { untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import { VERSION } from "@oh-my-pi/pi-utils/dirs";
-import { throwIfAborted } from "../../tool-errors";
+import { ToolError, throwIfAborted } from "../../tool-errors";
 import { probeCdpResponse } from "../attach";
+import type { RelayKind } from "./kind";
 import { DISCARDED_TABS_PROTOCOL_VERSION, isOlderOmpVersion, RELAY_RESTART_PATH } from "./protocol";
+import { discoverWindowsRelay } from "./windows-discovery";
 
 /** How long a relay that is up may go without its browser's hello. */
 const HELLO_WINDOW_MS = 10_000;
@@ -19,6 +22,7 @@ const HELLO_WINDOW_MS = 10_000;
  */
 const RESTART_WINDOW_MS = 20_000;
 const PROBE_TIMEOUT_MS = 2_000;
+const WSL_RELAY_PROBE_TIMEOUT_MS = 500;
 const POLL_INTERVAL_MS = 150;
 
 /** Outcome of {@link waitForRelayExtension}. */
@@ -58,6 +62,75 @@ function parseVersionBody(body: string): object | null {
 	}
 }
 
+function reportedRelayInstance(info: object | null): string | undefined {
+	if (info && relayVersionOf(info) && "ompRelayInstance" in info && typeof info.ompRelayInstance === "string") {
+		return info.ompRelayInstance;
+	}
+}
+
+/** The Windows relay discovery last verified; reused only after its identity answers again. */
+let lastWindowsRelay: RelayKind | undefined;
+/** The discovery in flight, shared so concurrent opens start one helper. */
+let pendingWindowsDiscovery: Promise<RelayKind> | undefined;
+
+function discoverWindowsRelayShared(signal?: AbortSignal): Promise<RelayKind> {
+	// Runs to its own deadline: one caller cancelling must not fail the others waiting on it.
+	pendingWindowsDiscovery ??= discoverWindowsRelay()
+		.then(relay => {
+			lastWindowsRelay = relay;
+			return relay;
+		})
+		.finally(() => {
+			pendingWindowsDiscovery = undefined;
+		});
+	return untilAborted(signal, pendingWindowsDiscovery);
+}
+
+/** `readyOnly` rejects a relay whose browser is gone (503): a native host that lost Chrome is about to exit. */
+async function probeRelayIdentity(
+	cdpUrl: string,
+	signal?: AbortSignal,
+	readyOnly = false,
+): Promise<string | undefined> {
+	// The raw probe bounds its response but still awaits the TCP connect.
+	const reply = await withTimeout(
+		probeCdpResponse(`${cdpUrl}/json/version`, { timeoutMs: WSL_RELAY_PROBE_TIMEOUT_MS, signal }),
+		WSL_RELAY_PROBE_TIMEOUT_MS,
+		"Relay identity probe timed out",
+		signal,
+	).catch(() => null);
+	throwIfAborted(signal);
+	if (reply && (reply.status === 200 || (!readyOnly && reply.status === 503)))
+		return reportedRelayInstance(parseVersionBody(reply.body));
+}
+
+/** A stale local record can outlive its relay even when the PID and port are both reused. */
+export async function resolveWslRelay(local: RelayKind, signal?: AbortSignal, bound?: RelayKind): Promise<RelayKind> {
+	const windows = bound?.windowsInstance === undefined ? undefined : bound;
+	const instance = windows ? await probeRelayIdentity(windows.cdpUrl, signal) : undefined;
+	if (windows && instance === windows.windowsInstance) return windows;
+	if (local.cdpUrl && (local.cdpUrl === windows?.cdpUrl ? instance : await probeRelayIdentity(local.cdpUrl, signal)))
+		return local;
+
+	// The bound relay already failed its probe above; any other last-verified relay saves a helper launch.
+	const cached = lastWindowsRelay;
+	if (
+		cached &&
+		cached.windowsInstance !== windows?.windowsInstance &&
+		(await probeRelayIdentity(cached.cdpUrl, signal, true)) === cached.windowsInstance
+	)
+		return cached;
+
+	const discovered = await discoverWindowsRelayShared(signal);
+	if (windows && discovered.cdpUrl === windows.cdpUrl && discovered.windowsInstance === windows.windowsInstance) {
+		// Windows can still see its relay when WSL's loopback no longer reaches it.
+		throw new ToolError(
+			`The bound Windows omp browser relay at ${windows.cdpUrl} did not answer from WSL. Retry or close the tab before reopening it.`,
+		);
+	}
+	return discovered;
+}
+
 /** The id of the relay server answering at `cdpUrl`, ready or waiting; null when none answers. */
 async function relayInstanceAt(cdpUrl: string, signal?: AbortSignal): Promise<string | null> {
 	const response = await probeCdpResponse(`${cdpUrl}/json/version`, { timeoutMs: PROBE_TIMEOUT_MS, signal });
@@ -68,31 +141,24 @@ async function relayInstanceAt(cdpUrl: string, signal?: AbortSignal): Promise<st
 		: "";
 }
 
-function readyOutcome(body: string): RelayWaitOutcome {
-	try {
-		const parsed: unknown = JSON.parse(body);
-		if (
-			typeof parsed !== "object" ||
-			parsed === null ||
-			!("ompRelayDiscardedTabsProtocol" in parsed) ||
-			parsed.ompRelayDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
-		) {
-			return "outdated-relay";
-		}
-		if (
-			!("ompExtensionDiscardedTabsProtocol" in parsed) ||
-			parsed.ompExtensionDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
-		) {
-			// A relay from another OMP version is the likelier culprit than the extension.
-			if (relayVersionOf(parsed) !== VERSION) return "outdated-relay";
-			return "outdated-extension";
-		}
-		if (isOlderOmpVersion(relayVersionOf(parsed), VERSION) && relayCdpClientsOf(parsed) === 0)
-			return "idle-older-relay";
-		return "ready";
-	} catch {
+function readyOutcome(parsed: object | null, windowsRelay: boolean): RelayWaitOutcome {
+	if (
+		parsed === null ||
+		!("ompRelayDiscardedTabsProtocol" in parsed) ||
+		parsed.ompRelayDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
+	) {
 		return "outdated-relay";
 	}
+	if (
+		!("ompExtensionDiscardedTabsProtocol" in parsed) ||
+		parsed.ompExtensionDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
+	) {
+		// A local relay from another OMP version is the likelier culprit than the extension.
+		return !windowsRelay && relayVersionOf(parsed) !== VERSION ? "outdated-relay" : "outdated-extension";
+	}
+	if (!windowsRelay && isOlderOmpVersion(relayVersionOf(parsed), VERSION) && relayCdpClientsOf(parsed) === 0)
+		return "idle-older-relay";
+	return "ready";
 }
 
 /**
@@ -102,10 +168,11 @@ function readyOutcome(body: string): RelayWaitOutcome {
 export async function waitForRelayExtension(
 	cdpUrl: string,
 	signal?: AbortSignal,
-	options?: { restarted?: boolean },
+	options?: { restarted?: boolean; windowsInstance?: string },
 ): Promise<RelayWaitOutcome> {
 	const probeUrl = `${cdpUrl}/json/version`;
 	const reachableBy = Date.now() + (options?.restarted ? RESTART_WINDOW_MS : 0);
+	const windowsInstance = options?.windowsInstance;
 	let helloBy: number | null = null;
 	for (;;) {
 		throwIfAborted(signal);
@@ -113,16 +180,18 @@ export async function waitForRelayExtension(
 		throwIfAborted(signal);
 		if (response === null) {
 			if (Date.now() >= reachableBy) return "unreachable";
-		} else if (response.status >= 200 && response.status < 300) {
-			return readyOutcome(response.body);
-		} else if (response.status !== 503) {
-			return "unreachable";
 		} else {
+			const parsed = parseVersionBody(response.body);
+			if (windowsInstance !== undefined && reportedRelayInstance(parsed) !== windowsInstance) return "unreachable";
+			if (response.status >= 200 && response.status < 300)
+				return readyOutcome(parsed, windowsInstance !== undefined);
+			if (response.status !== 503) return "unreachable";
 			helloBy ??= Date.now() + HELLO_WINDOW_MS;
 			if (Date.now() >= helloBy) {
 				// A relay from another version reads as outdated: no browser is behind it to blame instead.
-				const parsed = parseVersionBody(response.body);
-				return parsed !== null && relayVersionOf(parsed) !== VERSION ? "outdated-relay" : "no-extension";
+				return windowsInstance === undefined && parsed !== null && relayVersionOf(parsed) !== VERSION
+					? "outdated-relay"
+					: "no-extension";
 			}
 		}
 		await Bun.sleep(POLL_INTERVAL_MS);

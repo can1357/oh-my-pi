@@ -1,5 +1,6 @@
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import type { AiuTotals } from "../session/aiu-billing";
 
 /** Identity of the ambient main session in the agent roster. */
 export const MAIN_AGENT_ID = "Main";
@@ -27,7 +28,7 @@ export interface AgentHubSession {
 	readonly agent?: { state: { messages: AgentMessage[] } };
 	/** Existing session ledger includes off-transcript model usage and nested-task attribution. */
 	readonly sessionManager?: {
-		getUsageStatistics(): { cost: number; subagentCost: number };
+		getUsageStatistics(): { cost: number; subagentCost: number; aiuNano?: number; aiuUnknownCalls?: number };
 	};
 	getSessionStats(): {
 		tokens: { input: number; output: number; cacheWrite: number };
@@ -59,6 +60,8 @@ export interface AgentRecordLike {
 		metrics?: AgentMetricsSummary;
 		/** Cumulative own-session assistant and model_usage cost, excluding nested task results. */
 		directCost?: number;
+		/** Cumulative own-session AI credits, counted where calls are recorded (assistant messages, model_usage). */
+		directAiu?: AiuTotals;
 		readOnly?: boolean;
 		outputPath?: string;
 		patchPath?: string;

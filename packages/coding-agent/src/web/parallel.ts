@@ -238,7 +238,7 @@ export function parseParallelSearchPayload(
 	};
 }
 
-export function findParallelApiKey(storage: AgentStorageApi | null | undefined): string | null {
+export function findParallelApiKey(storage: AgentStorageApi | null | undefined): Promise<string | null> {
 	return findCredential(storage, getEnvApiKey("parallel"), "parallel");
 }
 
@@ -300,7 +300,7 @@ export async function searchWithParallel(
 	options: ParallelSearchOptions,
 	storage: AgentStorageApi | null | undefined,
 ): Promise<ParallelSearchResult> {
-	const apiKey = findParallelApiKey(storage);
+	const apiKey = await findParallelApiKey(storage);
 	if (!apiKey) {
 		throw new ParallelApiError(
 			"Parallel credentials not found. Set PARALLEL_API_KEY or login with 'omp /login parallel'.",
@@ -334,7 +334,7 @@ export async function extractWithParallel(
 	options: ParallelExtractOptions,
 	storage: AgentStorageApi | null | undefined,
 ): Promise<ParallelExtractResult> {
-	const apiKey = findParallelApiKey(storage);
+	const apiKey = await findParallelApiKey(storage);
 	if (!apiKey) {
 		throw new ParallelApiError(
 			"Parallel credentials not found. Set PARALLEL_API_KEY or login with 'omp /login parallel'.",

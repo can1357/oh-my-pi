@@ -40,6 +40,10 @@ beforeAll(async () => {
 		models: [{
 			id: "test-model",
 			name: "Test Model",
+			compat: {
+				extraBody: { token: "private-default" },
+				whenThinking: { extraBody: { options: { token: "private-thinking" } } },
+			},
 			reasoning: false,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -146,6 +150,8 @@ test("omp models surfaces extension-registered providers", async () => {
 				modelRegistry,
 				cwd: tmp.path(),
 				action: "ls",
+				json: true,
+				pattern: "test-gw",
 				additionalExtensionPaths: [extPath],
 				disableExtensionDiscovery: true,
 			});
@@ -154,8 +160,18 @@ test("omp models surfaces extension-registered providers", async () => {
 		}
 
 		const output = captured.join("");
-		expect(output).toContain("test-gw");
-		expect(output).toContain("test-model");
+		expect(output).not.toContain("private-default");
+		expect(output).not.toContain("private-thinking");
+		expect(JSON.parse(output).models).toMatchObject([
+			{
+				provider: "test-gw",
+				id: "test-model",
+				compat: {
+					extraBody: { token: "[redacted]" },
+					whenThinking: { extraBody: { options: "[redacted]" } },
+				},
+			},
+		]);
 	} finally {
 		authStorage.close();
 	}

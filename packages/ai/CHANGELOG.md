@@ -2,20 +2,36 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the `KnownProvider` and `OAuthProvider` types; provider ids are plain strings (`Provider`, `OAuthProviderId`)
+- Renamed the OpenAI `promptCache.breakpoint` value `latest-stable-message` to `message-boundaries`; explicit mode now marks every boundary a later request repeats instead of a single block
+
 ### Added
 
-- Added encryption at rest to `SqliteAuthCredentialStore`: with `open(path, { encrypt: true })` (or `unlock({ encrypt: true })`) new credential rows are sealed with AES-256-GCM under a master key kept in the OS credential vault, each with its own salt; `encrypt: "auto"` keeps a store's current mode and encrypts a fresh one only when the vault answers without prompting; `openLocalAuthCredentialStore()` opens this machine's `agent.db` with `"auto"` unless `auth.encrypt`/`OMP_AUTH_ENCRYPT` forces it
+- Added encryption at rest to `SqliteAuthCredentialStore`: with `open(path, { encrypt: true })` (or `unlock({ encrypt: true })`) new credential rows are sealed with AES-256-GCM under a master key kept in the OS credential vault, each with its own salt; `encrypt: "auto"` keeps a store's current mode and encrypts a fresh one only when the vault answers without prompting; macOS processes without a Team ID signature (ad-hoc local builds) never touch the vault; `encrypt: false` decrypts rows sealed earlier so later opens never read the vault; `openLocalAuthCredentialStore()` opens this machine's `agent.db` with `"auto"` unless `auth.encrypt`/`OMP_AUTH_ENCRYPT` forces it
+- `omp usage` shows Venice USD and DIEM balances, bundled credits when available, and the DIEM epoch reset with a regular API key ([#20701](https://github.com/can1357/oh-my-pi/pull/20701) by [@dagurval](https://github.com/dagurval)).
 - Added xAI speech-to-text (`xai-stt`) transcription, including through the auth gateway ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added an `upstreamModel` option to mock provider responses, so a mocked turn can report a model that served it other than the one requested ([#20466](https://github.com/can1357/oh-my-pi/pull/20466) by [@byhow](https://github.com/byhow))
 - Added the `priority` service tier on Devin models: it sends the model's fast lane and bills the fast price
 - `synthesizeSpeech` sends the model's configured `voice` when the request names none, and `speechModelSupportsFormat` reports whether a speech model returns a container (catalog `Model.speechFormats`) ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
+- Added Kimi Code global-region support: `kimi-code-global` models stream with Kimi client headers and report quota from `api.kimi.ai` ([#15889](https://github.com/can1357/oh-my-pi/pull/15889) by [@z80dev](https://github.com/z80dev), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
+- GitHub Copilot Claude (Messages) and GPT (Responses) replies now record the server-reported AI-credit charge (`copilot_usage.total_nano_aiu` with its per-token-type split) on `usage.aiu`; a reply that finished without a billing frame sets `usage.aiuMissing` instead of reporting 0 ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
+- Added the `onDiscardedAttempt` stream option: it receives each attempt a replay-safe retry throws away (an empty completion, a transient provider error), which the provider may still have billed; attempts with no tokens and no charge are skipped ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
+- Factory Droid Gemini requests send the `xhigh` thinking level for models whose ladder offers it (Gemini 4 Neon) instead of capping at `HIGH` ([#19841](https://github.com/can1357/oh-my-pi/issues/19841))
+- Added `PI_ANTHROPIC_OAUTH_CALLBACK_PORT` to override the Anthropic login callback port (default `54545`, `0` for a random free port) ([#14135](https://github.com/can1357/oh-my-pi/issues/14135))
 
 ### Removed
 
+- Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
 - Removed the `SPEECH_FORMATS` value export; import it from `@oh-my-pi/pi-catalog/types`. The `SpeechFormat` type is still exported ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
 
+- Fixed startup failing with `no such column: salt` when `agent.db` records auth schema v9 but its credentials table has no `salt` column
+- An OpenAI Responses request retried after an empty completion keeps the provider session it started with, so a session the host retired mid-request (a model switch) is not recreated for the next model ([#20858](https://github.com/can1357/oh-my-pi/pull/20858) by [@JustasMasiulis](https://github.com/JustasMasiulis))
+- Fixed DeepSeek sessions failing every request with `400 … image special token` after a tool result quoted DeepSeek's chat template: `<｜…｜>` and `｜DSML｜` tokens in outgoing message text are now broken with a zero-width space ([#20832](https://github.com/can1357/oh-my-pi/pull/20832) by [@dany-on-demand](https://github.com/dany-on-demand))
+- Usage checks no longer send a private gateway’s configured credential to a built-in provider’s public quota service.
 - Fixed auth-gateway (`pi-native`) requests sending options the gateway discards, such as `providerOptions`, `cwd`, and fallback-credit replay bodies
 - Speech synthesis rejects a 2xx response with a JSON body as a `ProviderHttpError` (using the status the body reports, else 502) instead of returning it as audio ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 - Added xAI speech-to-text support, including use through the authentication gateway.
@@ -23,11 +39,24 @@
 - Added an `upstreamModel` option for mock provider responses so tests and integrations can report the model that actually served a request.
 - Added `JudgmentResult.cached`, set when every answer came from an answer cache and no provider request was made ([#19907](https://github.com/can1357/oh-my-pi/pull/19907) by [@Xytronix](https://github.com/Xytronix))
 - Added a `sign-out` provider hook and `OAuthApi.signOut`: removing a login runs the hook, which deletes the account's secrets kept outside the credential store and revokes the grant at the provider
+- Fixed Kimi Code quota probing skipping API-key credentials (`KIMI_API_KEY` / `KIMI_CODE_GLOBAL_API_KEY` without an OAuth login), so `omp usage` now reports the plan windows for key-only setups ([#12405](https://github.com/can1357/oh-my-pi/pull/12405) by [@evanmaranzano](https://github.com/evanmaranzano), [#20509](https://github.com/can1357/oh-my-pi/pull/20509) by [@digi4care](https://github.com/digi4care)).
+- Logging in again to an MCP OAuth server now clears the disabled credential left by its earlier refresh failure ([#20627](https://github.com/can1357/oh-my-pi/issues/20627))
+- Fixed GitHub Copilot Claude text replies arriving as a `msg_blocked` placeholder prefixed with "cached data for request … not found": Copilot Anthropic Messages requests now send the conversation id as `X-Client-Session-Id` ([#20678](https://github.com/can1357/oh-my-pi/issues/20678))
+- Fixed a `/session pin` made while an account selection was still running (such as the Codex connection prewarm at session start) being replaced by the account that selection picked ([#20634](https://github.com/can1357/oh-my-pi/issues/20634), [#20638](https://github.com/can1357/oh-my-pi/pull/20638) by [@roboomp](https://github.com/roboomp))
+- Fixed OpenAI Responses and Codex turns ignoring `input_transformations`: they are now recorded on the message and `prefix_mismatch` reasoning-item removals are logged ([#19721](https://github.com/can1357/oh-my-pi/issues/19721))
+- Fixed `google-vertex` API-key mode ignoring `GOOGLE_CLOUD_PROJECT`: with a project configured, requests now use the `projects/{project}/locations/{location}` path so models published only on `locations/global` no longer 404 in the key's default region ([#18827](https://github.com/can1357/oh-my-pi/issues/18827))
+- Fixed OAuth login failing on Android/Termux when interface enumeration (`getifaddrs`) is denied; the callback server now falls back to IPv4 loopback ([#16127](https://github.com/can1357/oh-my-pi/issues/16127))
+- Fixed Anthropic rate limits sent inside a streaming response carrying no HTTP status: they now report 429 like a rate limit returned as an HTTP response, also after text has streamed, where they were treated as a dropped connection. An overload sent before the response starts now reports 529 ([#20835](https://github.com/can1357/oh-my-pi/pull/20835) by [@sjawhar](https://github.com/sjawhar))
 
 ### Changed
 
+- Explicit OpenAI prompt caching (`promptCache: { mode: "explicit" }`) now marks the leading instructions, every user message, and each run of tool outputs, so each request reads the prefix the previous one wrote, and nested gateway markers are rejected ([#12880](https://github.com/can1357/oh-my-pi/pull/12880) by [@ZenAlexa](https://github.com/ZenAlexa)).
+- GitHub Copilot Responses requests for `gpt-6.2-sol` now default to `reasoning.summary: "detailed"` instead of `"auto"`, which often came back blank; an explicit summary level still wins ([#20804](https://github.com/can1357/oh-my-pi/pull/20804) by [@wapenshaw](https://github.com/wapenshaw))
 - Expanded xAI text-to-speech support with configurable playback speed, PCM output, and inputs up to 60,000 characters.
 - Devin sessions now automatically switch to another stored login when the active login has exhausted its weekly quota and has no on-demand balance.
+- The tool-call loop guard now also detects consecutive tool calls whose arguments drift only in numbers, such as `echo merge-live-3` after `echo merge-live-2`, when the assistant's text repeats. Progress-bearing arguments (`grep`'s `skip`, `offset`, cursor keys) and digits inside path-like tokens of command strings keep their values. Legitimate pagination and sweeps over distinct files are not interrupted ([#13426](https://github.com/can1357/oh-my-pi/pull/13426) by [@nick-maderight](https://github.com/nick-maderight))
+- GitHub Copilot requests on token-billed (AI credit) accounts no longer record a premium-request estimate (`usage.premiumRequests`); request-billed accounts, and logins whose billing mode is not yet known, keep it. The mode is read at `/login`, refreshed by each Copilot quota fetch, and probed once in the background for older logins and `COPILOT_GITHUB_TOKEN` ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20807](https://github.com/can1357/oh-my-pi/pull/20807) by [@wapenshaw](https://github.com/wapenshaw))
+- GitHub Copilot quota reports label the allowance "AI Credits" (unit `credits`) when GitHub flags the account as usage-billed (`token_based_billing`); request-billed accounts keep "Premium Requests" ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20807](https://github.com/can1357/oh-my-pi/pull/20807) by [@wapenshaw](https://github.com/wapenshaw))
 
 ### Fixed
 
@@ -38,10 +67,10 @@
 - Fixed cancelled inference requests being sent when cancellation occurs while the request body is being prepared.
 - Fixed reasoning-loop detection for unspaced writing systems such as Chinese, Japanese, and Thai, avoiding false aborts while still detecting genuine loops.
 - Corrected Claude usage reporting to label Team premium seats as “Team 5x” rather than “Max 5x”.
-
-### Removed
-
-- Removed the paused Google Antigravity provider (`google-antigravity`) and the Gemini CLI (Cloud Code Assist) transport (`google-gemini-cli` api); Gemini remains available through a Gemini API key and Vertex AI
+- Fixed OpenCode Go usage limits disappearing when the active model lives under a first-party path other than `/inference/go` (Gemini, Jev)
+- Devin sessions now switch to another stored login when the current one's weekly quota is spent and it has no on-demand balance, instead of failing every request on it ([#20524](https://github.com/can1357/oh-my-pi/pull/20524) by [@will-bogusz](https://github.com/will-bogusz))
+- The thinking-loop guard no longer aborts healthy reasoning written in Chinese, Japanese, Thai, or other unspaced scripts when the same English tool or metric names recur, and now also catches loops in that text ([#20096](https://github.com/can1357/oh-my-pi/issues/20096))
+- Pi-native stream requests now use a configured `Authorization` header regardless of its casing and fall back to the API key when the header is empty or absent ([#20472](https://github.com/can1357/oh-my-pi/pull/20472) by [@enieuwy](https://github.com/enieuwy))
 
 ## [19.2.1] - 2026-11-25
 

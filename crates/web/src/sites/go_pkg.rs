@@ -394,10 +394,36 @@ fn inner_html(nodes: &[Node], range: Range<usize>) -> String {
 	out
 }
 
+/// Appends `text` with the characters HTML text needs escaped: `&`, `<`, `>`.
+fn encode_text_to_string(text: &str, out: &mut String) {
+	for character in text.chars() {
+		match character {
+			'&' => out.push_str("&amp;"),
+			'<' => out.push_str("&lt;"),
+			'>' => out.push_str("&gt;"),
+			_ => out.push(character),
+		}
+	}
+}
+
+/// Appends `value` with the characters a double-quoted attribute needs
+/// escaped: `&`, `<`, `>`, `"`.
+fn encode_double_quoted_attribute_to_string(value: &str, out: &mut String) {
+	for character in value.chars() {
+		match character {
+			'&' => out.push_str("&amp;"),
+			'<' => out.push_str("&lt;"),
+			'>' => out.push_str("&gt;"),
+			'"' => out.push_str("&quot;"),
+			_ => out.push(character),
+		}
+	}
+}
+
 fn write_node(nodes: &[Node], node: &Node, out: &mut String) {
 	match node {
 		Node::Text(text) => {
-			html_escape::encode_text_to_string(text, out);
+			encode_text_to_string(text, out);
 		},
 		Node::Tag(element) => {
 			out.push('<');
@@ -422,7 +448,7 @@ fn write_node(nodes: &[Node], node: &Node, out: &mut String) {
 fn write_attr(element: &Element, name: &str, out: &mut String) {
 	if let Some(value) = element.attr(name) {
 		let _ = write!(out, " {name}=\"");
-		html_escape::encode_double_quoted_attribute_to_string(value, out);
+		encode_double_quoted_attribute_to_string(value, out);
 		out.push('"');
 	}
 }

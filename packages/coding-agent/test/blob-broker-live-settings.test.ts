@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as os from "node:os";
-import { ImageUrlService, LiveImageUrlService } from "@oh-my-pi/pi-coding-agent/blob-broker/service";
+import { LiveImageUrlService } from "@oh-my-pi/pi-coding-agent/blob-broker/live-service";
+import { ImageUrlService } from "@oh-my-pi/pi-coding-agent/blob-broker/service";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 import { cfgImagesUrlsEnabled, cfgImagesUrlsTtlHours } from "@oh-my-pi/pi-coding-agent/blob-broker/settings";

@@ -5,18 +5,24 @@
 use std::{
 	cmp::Ordering,
 	ffi::OsString,
+	future::Future,
 	io::{self, BufWriter, Seek as _, SeekFrom, Write as _},
 	path::PathBuf,
+	pin::Pin,
 	rc::Rc,
 	time::{SystemTime, UNIX_EPOCH},
 };
 
+mod calls;
+
+use calls::{Calls, Mark};
 use rand::{RngExt as _, SeedableRng as _, rngs::StdRng};
 use rustc_hash::FxHashMap;
 
 use super::{
 	ast::{
-		ArraySlot, BinOp, Expr, GetlineSrc, Param, Pattern, Program, Redirect, Slot, Special, Stmt, UnOp,
+		ArrayRef, ArraySlot, BinOp, Expr, GetlineSrc, Param, Pattern, Program, Redirect, ScalarRef, Slot, Special,
+		Stmt, UnOp,
 	},
 	format::{char_count, char_prefix, sprintf},
 	io::{RecordReader, RecordSep},
@@ -28,6 +34,31 @@ use crate::{
 	host::{Host, RunningCommand, ShellCommand, StreamWriter, strip_errno},
 	openfile::Fd,
 };
+
+/// Evaluate `expr` at a statement position: immediately when it is
+/// non-suspending ([`Interp::eval_fast`]), else through the asynchronous
+/// evaluator. A macro, not a helper, so the immediate case builds no future.
+macro_rules! eval_maybe {
+	($s:ident, $e:expr) => {
+		if let Some(value) = $s.eval_fast($e) { value } else { $s.eval($e).await }
+	};
+}
+
+/// Keep the immediate loop body out of the future altogether. The proof is
+/// made once, before the loop, not once per statement per iteration.
+macro_rules! loop_body {
+	($s:ident, $body:ident, $immediate:ident) => {{
+		$s.check_cancel()?;
+		if $immediate {
+			for stmt in $body {
+				let Stmt::Expr(expr) = stmt else { unreachable!("checked loop body") };
+				$s.eval_fast_ok(expr)?;
+			}
+		} else if let Some(flow) = $s.loop_body($body).await? {
+			return Ok(flow);
+		}
+	}};
+}
 
 /// Why evaluation stopped early.
 pub(super) enum Stop {
@@ -69,10 +100,8 @@ pub(super) type Array = FxHashMap<Bytes, Value>;
 
 /// One user-function activation.
 struct Frame {
-	/// Start of this frame's scalars in `Interp::locals`.
-	scalars: usize,
-	/// Indexes into `Interp::arrays` of this frame's array parameters.
-	arrays:  Vec<usize>,
+	mark: Mark,
+	resume: usize,
 }
 
 /// An assignable location, with any subscript or field index evaluated.
@@ -107,6 +136,14 @@ struct Input {
 const MAX_FIELD: f64 = 10_000_000.0;
 /// Deepest user-function call nesting.
 const MAX_DEPTH: usize = 50_000;
+/// How many interpreter reentries through delegated AST operations run as
+/// native polls before one hands its body to [`crate::deep::run`]'s heap queue.
+/// Debug builds descend at every call: their unoptimized frames are large
+/// enough to matter well before the release interval does.
+#[cfg(debug_assertions)]
+const DESCEND_EVERY: usize = 1;
+#[cfg(not(debug_assertions))]
+const DESCEND_EVERY: usize = 4;
 /// Dynamic regexes cached per run.
 const MAX_CACHED_REGEXES: usize = 128;
 
@@ -127,8 +164,13 @@ pub(super) struct Interp<'a> {
 	empty:        Bytes,
 	globals:      Vec<Value>,
 	arrays:       Vec<Array>,
+	/// Current scalar parameters and pending operands, in evaluation order.
 	locals:       Vec<Value>,
 	frames:       Vec<Frame>,
+	/// Array parameter slots are aliases into `arrays`, not copied maps.
+	bindings:     Vec<usize>,
+	calls:        Calls<'a>,
+	poll_depth:   usize,
 
 	record:       Vec<u8>,
 	scratch:      Vec<u8>,
@@ -286,6 +328,67 @@ fn char_offset(s: &[u8], index: usize) -> usize {
 	char_prefix(s, index)
 }
 
+/// One boxed future around a statement's cycle edge: a recursive `async fn`
+/// reaches its caller only through it, so its own future stays finite-sized.
+fn boxed_flow<'s>(future: impl Future<Output = R<Flow>> + 's) -> Pin<Box<dyn Future<Output = R<Flow>> + 's>> {
+	Box::pin(future)
+}
+
+/// Depth budget for the immediate evaluator: a non-suspending subtree deeper
+/// than this falls back to the asynchronous path, so native recursion in the
+/// fast path stays small.
+const FAST_DEPTH: u8 = 8;
+
+/// Prove that evaluation will finish without suspending, before performing
+/// any effects. A function plan may inline only a bounded leaf; the plan's
+/// own immediate expressions are checked with `calls = None` (no user calls).
+fn fast_ok(expr: &Expr, depth: u8, calls: Option<&Calls<'_>>) -> bool {
+	if depth == 0 {
+		return false;
+	}
+	let d = depth - 1;
+	match expr {
+		Expr::Num(_)
+		| Expr::Str(_)
+		| Expr::RegexMatch(_)
+		| Expr::RegexArg(..)
+		| Expr::Var(_)
+		| Expr::LengthArray(_)
+		| Expr::ArrayArg(_) => true,
+		Expr::Group(inner) => fast_ok(inner, d, calls),
+		Expr::Field(index) => fast_ok(index, d, calls),
+		Expr::Unary(_, operand) => fast_ok(operand, d, calls),
+		Expr::Incr { target, .. } => fast_lvalue_ok(target, d, calls),
+		Expr::In(index, _) => index.iter().all(|expr| fast_ok(expr, d, calls)),
+		Expr::Index(_, index) => index.iter().all(|expr| fast_ok(expr, d, calls)),
+		Expr::Binary(a, _, b) | Expr::And(a, b) | Expr::Or(a, b) => fast_ok(a, d, calls) && fast_ok(b, d, calls),
+		Expr::Cond(a, b, c) => fast_ok(a, d, calls) && fast_ok(b, d, calls) && fast_ok(c, d, calls),
+		Expr::Assign(target, value) | Expr::AugAssign(target, _, value) => {
+			fast_lvalue_ok(target, d, calls) && fast_ok(value, d, calls)
+		},
+		// A literal regex has already been compiled; a dynamic one needs
+		// `Interp::compile`, which stays on the asynchronous path.
+		Expr::Match(left, _, right) => fast_ok(left, d, calls) && matches!(&**right, Expr::RegexArg(..)),
+		Expr::UserCall { func, args, .. } => calls.is_some_and(|c| c.can_inline(*func)) && args.iter().all(|e| fast_ok(e, d, calls)),
+		_ => false,
+	}
+}
+
+/// Whether `expr` resolves to an assignable place without recursing.
+fn fast_lvalue_ok(expr: &Expr, depth: u8, calls: Option<&Calls<'_>>) -> bool {
+	if depth == 0 {
+		return false;
+	}
+	let d = depth - 1;
+	match expr {
+		Expr::Var(_) => true,
+		Expr::Field(index) => fast_ok(index, d, calls),
+		Expr::Index(_, index) => index.iter().all(|expr| fast_ok(expr, d, calls)),
+		Expr::Group(inner) => fast_lvalue_ok(inner, d, calls),
+		_ => false,
+	}
+}
+
 impl<'a> Interp<'a> {
 	pub fn new(prog: &'a Program, host: &'a mut Host, setup: Setup) -> R<Self> {
 		let empty: Bytes = Rc::from(&b""[..]);
@@ -297,6 +400,9 @@ impl<'a> Interp<'a> {
 			arrays: (0..prog.arrays.len()).map(|_| Array::default()).collect(),
 			locals: Vec::new(),
 			frames: Vec::new(),
+			bindings: Vec::new(),
+			calls: Calls::new(prog),
+			poll_depth: 0,
 			record: Vec::new(),
 			scratch: Vec::new(),
 			record_str: false,
@@ -393,10 +499,17 @@ impl<'a> Interp<'a> {
 
 	/// Runs `BEGIN`, the main loop and `END`.
 	pub fn execute(&mut self) -> R<()> {
+		// SAFETY: interpreter recursion awaits one child directly to completion; it never selects, cancels, or polls those futures independently.
+		unsafe { crate::deep::run(self.run_program()) }
+	}
+
+	/// The body of [`execute`] on [`crate::deep::run`]'s heap queue: user
+	/// function recursion descends there instead of growing the native stack.
+	async fn run_program(&mut self) -> R<()> {
 		let prog = self.prog;
 		let mut exited = false;
 		for block in &prog.begin {
-			match self.exec_block(block) {
+			match self.exec_block(block).await {
 				Ok(_) => {},
 				Err(Stop::Exit) => {
 					exited = true;
@@ -410,13 +523,13 @@ impl<'a> Interp<'a> {
 			return Ok(());
 		}
 		if !exited {
-			match self.main_loop() {
+			match self.main_loop().await {
 				Ok(()) | Err(Stop::Exit) => {},
 				Err(stop) => return Err(stop),
 			}
 		}
 		for block in &prog.end {
-			match self.exec_block(block) {
+			match self.exec_block(block).await {
 				Ok(_) => {},
 				Err(Stop::Exit) => break,
 				Err(Stop::Next | Stop::NextFile) => return error("next used in BEGIN or END action"),
@@ -426,11 +539,11 @@ impl<'a> Interp<'a> {
 		Ok(())
 	}
 
-	fn main_loop(&mut self) -> R<()> {
+	async fn main_loop(&mut self) -> R<()> {
 		let prog = self.prog;
 		'records: while self.next_record()? {
 			for (index, action) in prog.actions.iter().enumerate() {
-				match self.run_action(index, &action.pattern, action.body.as_deref()) {
+				match self.run_action(index, &action.pattern, action.body.as_deref()).await {
 					Ok(()) => {},
 					Err(Stop::Next) => continue 'records,
 					Err(Stop::NextFile) => {
@@ -444,17 +557,17 @@ impl<'a> Interp<'a> {
 		Ok(())
 	}
 
-	fn run_action(&mut self, index: usize, pattern: &Pattern, body: Option<&[Stmt]>) -> R<()> {
+	async fn run_action(&mut self, index: usize, pattern: &Pattern, body: Option<&[Stmt]>) -> R<()> {
 		let matched = match pattern {
 			Pattern::All => true,
-			Pattern::Expr(expr) => self.eval(expr)?.truthy(),
+			Pattern::Expr(expr) => eval_maybe!(self, expr)?.truthy(),
 			Pattern::Range(start, stop) => {
 				if !self.range_active[index] {
-					self.range_active[index] = self.eval(start)?.truthy();
+					self.range_active[index] = eval_maybe!(self, start)?.truthy();
 				}
 				let matched = self.range_active[index];
 				if matched {
-					self.range_active[index] = !self.eval(stop)?.truthy();
+					self.range_active[index] = !eval_maybe!(self, stop)?.truthy();
 				}
 				matched
 			},
@@ -472,7 +585,7 @@ impl<'a> Interp<'a> {
 				self.print_buf = line;
 				result
 			},
-			Some(body) => self.exec_block(body).map(|_| ()),
+			Some(body) => self.exec_block(body).await.map(|_| ()),
 		}
 	}
 
@@ -503,9 +616,9 @@ impl<'a> Interp<'a> {
 
 	// ── Statements ──────────────────────────────────────────────────────
 
-	fn exec_block(&mut self, stmts: &[Stmt]) -> R<Flow> {
+	async fn exec_block(&mut self, stmts: &[Stmt]) -> R<Flow> {
 		for stmt in stmts {
-			match self.exec(stmt)? {
+			match self.exec(stmt).await? {
 				Flow::Normal => {},
 				flow => return Ok(flow),
 			}
@@ -513,69 +626,123 @@ impl<'a> Interp<'a> {
 		Ok(Flow::Normal)
 	}
 
+	/// [`exec_block`] behind one boxed future, the cycle edge a recursive
+	/// `async fn` needs: `exec`'s nested branches use this so their futures
+	/// stay finite-sized. The box is one allocation at the branch, not one per
+	/// statement.
+	fn exec_block_boxed<'s>(&'s mut self, stmts: &'s [Stmt]) -> Pin<Box<dyn Future<Output = R<Flow>> + 's>> {
+		Box::pin(self.exec_block(stmts))
+	}
+
+	/// `for (pre; cond; post) body`: the boxed edge is the whole loop, so its
+	/// iterations run without allocating again.
+	async fn exec_for(
+		&mut self,
+		pre: Option<&Stmt>,
+		cond: Option<&Expr>,
+		post: Option<&Stmt>,
+		body: &[Stmt],
+	) -> R<Flow> {
+		if let Some(pre) = pre {
+			self.exec_simple(pre).await?;
+		}
+		let immediate_body = self.immediate_block(body);
+		let immediate_cond = cond.is_some_and(|e| self.immediate(e));
+		let immediate_post = post.and_then(|s| self.immediate_stmt(s));
+		loop {
+			if let Some(cond) = cond
+				&& !(if immediate_cond { self.eval_fast_ok(cond) } else { self.eval(cond).await })?.truthy()
+			{
+				break;
+			}
+			loop_body!(self, body, immediate_body);
+			if let Some(e) = immediate_post {
+				self.eval_fast_ok(e)?;
+			} else if let Some(post) = post {
+				self.exec_simple(post).await?;
+			}
+		}
+		Ok(Flow::Normal)
+	}
+
+	/// `for (var in array) body`.
+	async fn exec_for_in(&mut self, var: &ScalarRef, array: &ArrayRef, body: &[Stmt]) -> R<Flow> {
+		let index = self.array_index(array.slot)?;
+		let keys: Vec<Bytes> = self.arrays[index].keys().cloned().collect();
+		let immediate_body = self.immediate_block(body);
+		for key in keys {
+			self.set_scalar(var.slot, Value::Str(key))?;
+			loop_body!(self, body, immediate_body);
+		}
+		Ok(Flow::Normal)
+	}
+
+	/// `while (cond) body`.
+	async fn exec_while(&mut self, cond: &Expr, body: &[Stmt]) -> R<Flow> {
+		let immediate_body = self.immediate_block(body);
+		let immediate_cond = self.immediate(cond);
+		while (if immediate_cond { self.eval_fast_ok(cond) } else { self.eval(cond).await })?.truthy() {
+			loop_body!(self, body, immediate_body);
+		}
+		Ok(Flow::Normal)
+	}
+
+	/// `do body while (cond)`.
+	async fn exec_do_while(&mut self, body: &[Stmt], cond: &Expr) -> R<Flow> {
+		let immediate_body = self.immediate_block(body);
+		let immediate_cond = self.immediate(cond);
+		loop {
+			loop_body!(self, body, immediate_body);
+			if !(if immediate_cond { self.eval_fast_ok(cond) } else { self.eval(cond).await })?.truthy() {
+				break;
+			}
+		}
+		Ok(Flow::Normal)
+	}
+
+	fn immediate_stmt<'s>(&self, stmt: &'s Stmt) -> Option<&'s Expr> {
+		if let Stmt::Expr(expr) = stmt && self.immediate(expr) { Some(expr) } else { None }
+	}
+
+	fn immediate_block(&self, body: &[Stmt]) -> bool {
+		body.iter().all(|s| self.immediate_stmt(s).is_some())
+	}
+
 	/// Runs a loop body; `Some` is a flow that ends the loop.
-	fn loop_body(&mut self, body: &[Stmt]) -> R<Option<Flow>> {
-		self.check_cancel()?;
-		Ok(match self.exec_block(body)? {
+	async fn loop_body(&mut self, body: &[Stmt]) -> R<Option<Flow>> {
+		Ok(match self.exec_block(body).await? {
 			Flow::Normal | Flow::Continue => None,
 			Flow::Break => Some(Flow::Normal),
 			flow @ Flow::Return(_) => Some(flow),
 		})
 	}
 
-	fn exec(&mut self, stmt: &Stmt) -> R<Flow> {
+	async fn exec(&mut self, stmt: &Stmt) -> R<Flow> {
 		match stmt {
-			Stmt::Print { args, redirect } => self.print(args, redirect.as_ref())?,
-			Stmt::Printf { args, redirect } => self.printf(args, redirect.as_ref())?,
+			Stmt::Print { args, redirect } => self.print(args, redirect.as_ref()).await?,
+			Stmt::Printf { args, redirect } => self.printf(args, redirect.as_ref()).await?,
 			Stmt::Expr(expr) => {
-				self.eval(expr)?;
+				eval_maybe!(self, expr)?;
 			},
 			Stmt::If { cond, body, els } => {
-				let branch = if self.eval(cond)?.truthy() { body } else { els };
-				return self.exec_block(branch);
+				let branch = if eval_maybe!(self, cond)?.truthy() { body } else { els };
+				return self.exec_block_boxed(branch).await;
 			},
 			Stmt::For { pre, cond, post, body } => {
-				if let Some(pre) = pre {
-					self.exec(pre)?;
-				}
-				loop {
-					if let Some(cond) = cond
-						&& !self.eval(cond)?.truthy()
-					{
-						break;
-					}
-					if let Some(flow) = self.loop_body(body)? {
-						return Ok(flow);
-					}
-					if let Some(post) = post {
-						self.exec(post)?;
-					}
-				}
+				let loop_future = self.exec_for(pre.as_deref(), cond.as_ref(), post.as_deref(), body);
+				return boxed_flow(loop_future).await;
 			},
 			Stmt::ForIn { var, array, body } => {
-				let index = self.array_index(array.slot)?;
-				let keys: Vec<Bytes> = self.arrays[index].keys().cloned().collect();
-				for key in keys {
-					self.set_scalar(var.slot, Value::Str(key))?;
-					if let Some(flow) = self.loop_body(body)? {
-						return Ok(flow);
-					}
-				}
+				let loop_future = self.exec_for_in(var, array, body);
+				return boxed_flow(loop_future).await;
 			},
 			Stmt::While { cond, body } => {
-				while self.eval(cond)?.truthy() {
-					if let Some(flow) = self.loop_body(body)? {
-						return Ok(flow);
-					}
-				}
+				let loop_future = self.exec_while(cond, body);
+				return boxed_flow(loop_future).await;
 			},
-			Stmt::DoWhile { body, cond } => loop {
-				if let Some(flow) = self.loop_body(body)? {
-					return Ok(flow);
-				}
-				if !self.eval(cond)?.truthy() {
-					break;
-				}
+			Stmt::DoWhile { body, cond } => {
+				let loop_future = self.exec_do_while(body, cond);
+				return boxed_flow(loop_future).await;
 			},
 			Stmt::Break => return Ok(Flow::Break),
 			Stmt::Continue => return Ok(Flow::Continue),
@@ -583,14 +750,14 @@ impl<'a> Interp<'a> {
 			Stmt::NextFile => return Err(Stop::NextFile),
 			Stmt::Exit(status) => {
 				if let Some(status) = status {
-					let n = self.eval(status)?.num();
+					let n = eval_maybe!(self, status)?.num();
 					self.exit_status = if n.is_finite() { n as i64 as i32 } else { 0 };
 				}
 				return Err(Stop::Exit);
 			},
 			Stmt::Return(value) => {
 				let value = match value {
-					Some(value) => self.eval(value)?,
+					Some(value) => eval_maybe!(self, value)?,
 					None => Value::Null,
 				};
 				return Ok(Flow::Return(value));
@@ -599,18 +766,40 @@ impl<'a> Interp<'a> {
 				let slot = self.array_index(array.slot)?;
 				match index {
 					Some(index) => {
-						let key = self.subscript(index)?;
+						let key = self.subscript(index).await?;
 						self.arrays[slot].remove(&key[..]);
 					},
 					None => self.arrays[slot].clear(),
 				}
 			},
-			Stmt::Block(body) => return self.exec_block(body),
+			Stmt::Block(body) => return self.exec_block_boxed(body).await,
 		}
 		Ok(Flow::Normal)
 	}
 
-	fn print(&mut self, args: &[Expr], redirect: Option<&(Redirect, Expr)>) -> R<()> {
+	/// A `for` initializer or update: `simple_stmt`, which cannot be a nested
+	/// block, so it evaluates without `exec`'s boxing edge.
+	async fn exec_simple(&mut self, stmt: &Stmt) -> R<()> {
+		match stmt {
+			Stmt::Print { args, redirect } => self.print(args, redirect.as_ref()).await,
+			Stmt::Printf { args, redirect } => self.printf(args, redirect.as_ref()).await,
+			Stmt::Expr(expr) => eval_maybe!(self, expr).map(|_| ()),
+			Stmt::Delete { array, index } => {
+				let slot = self.array_index(array.slot)?;
+				match index {
+					Some(index) => {
+						let key = self.subscript(index).await?;
+						self.arrays[slot].remove(&key[..]);
+					},
+					None => self.arrays[slot].clear(),
+				}
+				Ok(())
+			},
+			_ => Ok(()),
+		}
+	}
+
+	async fn print(&mut self, args: &[Expr], redirect: Option<&(Redirect, Expr)>) -> R<()> {
 		let mut line = std::mem::take(&mut self.print_buf);
 		line.clear();
 		if args.is_empty() {
@@ -620,7 +809,7 @@ impl<'a> Interp<'a> {
 			if index > 0 {
 				line.extend_from_slice(&self.ofs);
 			}
-			let value = self.eval(arg)?;
+			let value = eval_maybe!(self, arg)?;
 			match &value {
 				Value::Null => {},
 				Value::Num(n) => push_number(&mut line, *n, &self.ofmt),
@@ -628,25 +817,25 @@ impl<'a> Interp<'a> {
 			}
 		}
 		line.extend_from_slice(&self.ors);
-		let result = self.emit(redirect, &line);
+		let result = self.emit(redirect, &line).await;
 		self.print_buf = line;
 		result
 	}
 
-	fn printf(&mut self, args: &[Expr], redirect: Option<&(Redirect, Expr)>) -> R<()> {
-		let text = self.sprintf_args(args)?;
-		self.emit(redirect, &text)
+	async fn printf(&mut self, args: &[Expr], redirect: Option<&(Redirect, Expr)>) -> R<()> {
+		let text = self.sprintf_args(args).await?;
+		self.emit(redirect, &text).await
 	}
 
-	fn sprintf_args(&mut self, args: &[Expr]) -> R<Vec<u8>> {
+	async fn sprintf_args(&mut self, args: &[Expr]) -> R<Vec<u8>> {
 		let Some((format, rest)) = args.split_first() else {
 			return Ok(Vec::new());
 		};
-		let format = self.eval(format)?;
+		let format = self.eval_child(format).await?;
 		let format = self.to_str(&format);
 		let mut values = Vec::with_capacity(rest.len());
 		for arg in rest {
-			values.push(self.eval(arg)?);
+			values.push(self.eval_child(arg).await?);
 		}
 		let mut out = Vec::new();
 		sprintf(&mut out, &format, &values, &self.convfmt).map_err(Stop::Error)?;
@@ -654,11 +843,11 @@ impl<'a> Interp<'a> {
 	}
 
 	/// Writes `data` to stdout or to a redirection target.
-	fn emit(&mut self, redirect: Option<&(Redirect, Expr)>, data: &[u8]) -> R<()> {
+	async fn emit(&mut self, redirect: Option<&(Redirect, Expr)>, data: &[u8]) -> R<()> {
 		let Some((kind, dest)) = redirect else {
 			return self.stdout.write_all(data).map_err(|err| self.write_error(&err));
 		};
-		let dest = self.eval(dest)?;
+		let dest = eval_maybe!(self, dest)?;
 		let name = self.to_str(&dest);
 		if !self.outputs.contains_key(&name[..]) {
 			self.open_output(*kind, &name)?;
@@ -770,7 +959,7 @@ impl<'a> Interp<'a> {
 
 	// ── Expressions ─────────────────────────────────────────────────────
 
-	fn eval(&mut self, expr: &Expr) -> R<Value> {
+	async fn eval(&mut self, expr: &Expr) -> R<Value> {
 		Ok(match expr {
 			Expr::Num(n) => Value::Num(*n),
 			Expr::Str(s) => Value::Str(Rc::clone(s)),
@@ -783,50 +972,54 @@ impl<'a> Interp<'a> {
 			},
 			Expr::ArrayArg(array) => return error(format!("can't use array {:?} in scalar context", array.name)),
 			Expr::Index(array, index) => {
-				let key = self.subscript(index)?;
+				let key = self.subscript(index).await?;
 				let slot = self.array_index(array.slot)?;
 				self.arrays[slot].entry(key).or_insert(Value::Null).clone()
 			},
 			Expr::Field(index) => {
-				let index = self.field_index(index)?;
+				let index = self.field_index(index).await?;
 				self.get_field(index)
 			},
 			Expr::Assign(target, value) => {
-				let place = self.place(target)?;
-				let value = self.eval(value)?;
+				let place = self.place(target).await?;
+				let value = self.eval_child(value).await?;
 				self.set_place(place, value.clone())?;
 				value
 			},
 			Expr::AugAssign(target, op, value) => {
-				let place = self.place(target)?;
-				let current = self.get_place(&place)?.num();
-				let right = self.eval(value)?.num();
+				let place = self.place(target).await?;
+				let current = self.place_num(&place)?;
+				let right = self.eval_child(value).await?.num();
 				let result = Value::Num(arith(*op, current, right)?);
 				self.set_place(place, result.clone())?;
 				result
 			},
 			Expr::Cond(cond, yes, no) => {
-				if self.eval(cond)?.truthy() {
-					self.eval(yes)?
+				if self.eval_child(cond).await?.truthy() {
+					self.eval_child(yes).await?
 				} else {
-					self.eval(no)?
+					self.eval_child(no).await?
 				}
 			},
 			Expr::Binary(left, op, right) => {
-				let left = self.eval(left)?;
-				let right = self.eval(right)?;
+				let left = self.eval_child(left).await?;
+				let right = self.eval_child(right).await?;
 				self.binary(*op, &left, &right)?
 			},
-			Expr::And(left, right) => Value::boolean(self.eval(left)?.truthy() && self.eval(right)?.truthy()),
-			Expr::Or(left, right) => Value::boolean(self.eval(left)?.truthy() || self.eval(right)?.truthy()),
+			Expr::And(left, right) => {
+				Value::boolean(self.eval_child(left).await?.truthy() && self.eval_child(right).await?.truthy())
+			},
+			Expr::Or(left, right) => {
+				Value::boolean(self.eval_child(left).await?.truthy() || self.eval_child(right).await?.truthy())
+			},
 			Expr::Match(left, negate, right) => {
-				let left = self.eval(left)?;
+				let left = self.eval_child(left).await?;
 				let text = self.to_str(&left);
-				let regex = self.regex_of(right)?;
+				let regex = self.regex_of(right).await?;
 				Value::boolean(regex.is_match(&text) != *negate)
 			},
 			Expr::Unary(op, operand) => {
-				let value = self.eval(operand)?;
+				let value = self.eval_child(operand).await?;
 				match op {
 					UnOp::Not => Value::boolean(!value.truthy()),
 					UnOp::Neg => Value::Num(-value.num()),
@@ -834,24 +1027,201 @@ impl<'a> Interp<'a> {
 				}
 			},
 			Expr::Incr { target, decr, pre } => {
-				let place = self.place(target)?;
-				let old = self.get_place(&place)?.num();
+				let place = self.place(target).await?;
+				let old = self.place_num(&place)?;
 				let new = if *decr { old - 1.0 } else { old + 1.0 };
 				self.set_place(place, Value::Num(new))?;
 				Value::Num(if *pre { new } else { old })
 			},
 			Expr::In(index, array) => {
-				let key = self.subscript(index)?;
+				let key = self.subscript(index).await?;
 				let slot = self.array_index(array.slot)?;
 				Value::boolean(self.arrays[slot].contains_key(&key[..]))
 			},
-			Expr::Call(func, args) => self.call_builtin(*func, args)?,
-			Expr::Split(s, array, sep) => self.split(s, array.slot, sep.as_deref())?,
-			Expr::UserCall { func, args, .. } => self.call_user(*func, args)?,
-			Expr::Getline { src, target, from } => self.getline(*src, target.as_deref(), from.as_deref())?,
-			Expr::Group(inner) => self.eval(inner)?,
+			Expr::Call(func, args) => self.call_builtin(*func, args).await?,
+			Expr::Split(s, array, sep) => self.split(s, array.slot, sep.as_deref()).await?,
+			Expr::UserCall { func, args, .. } => self.call_user(*func, args).await?,
+			Expr::Getline { src, target, from } => self.getline(*src, target.as_deref(), from.as_deref()).await?,
+			Expr::Group(inner) => self.eval_child(inner).await?,
 			Expr::Multi(..) => return error("unexpected comma-separated expression"),
 		})
+	}
+
+	fn immediate(&self, expr: &Expr) -> bool {
+		fast_ok(expr, FAST_DEPTH, Some(&self.calls))
+	}
+
+	/// `None` delegates the entire expression without replaying any effects.
+	fn eval_fast(&mut self, expr: &Expr) -> Option<R<Value>> {
+		if self.immediate(expr) { Some(self.eval_fast_ok(expr)) } else { None }
+	}
+
+	/// The immediate evaluator body; only reached through [`fast_ok`], which
+	/// has already established that every node here is supported.
+	fn eval_fast_ok(&mut self, expr: &Expr) -> R<Value> {
+		Ok(match expr {
+			Expr::Num(n) => Value::Num(*n),
+			Expr::Str(s) => Value::Str(Rc::clone(s)),
+			Expr::RegexMatch(regex) => Value::boolean(regex.is_match(&self.record)),
+			Expr::RegexArg(_, src) => Value::Str(Rc::clone(src)),
+			Expr::Var(var) => self.get_scalar(var.slot)?,
+			Expr::LengthArray(array) => {
+				let index = self.array_index(array.slot)?;
+				Value::Num(self.arrays[index].len() as f64)
+			},
+			Expr::ArrayArg(array) => return error(format!("can't use array {:?} in scalar context", array.name)),
+			Expr::Group(inner) => self.eval_fast_ok(inner)?,
+			Expr::Unary(op, operand) => {
+				let value = self.eval_fast_ok(operand)?;
+				match op {
+					UnOp::Not => Value::boolean(!value.truthy()),
+					UnOp::Neg => Value::Num(-value.num()),
+					UnOp::Plus => Value::Num(value.num()),
+				}
+			},
+			Expr::Field(index) => {
+				let n = self.fast_num(index)?;
+				if n < 0.0 || n.is_nan() {
+					return error(format!("trying to access out of range field {}", n as i64));
+				}
+				if n > MAX_FIELD {
+					return error(format!("field index too large: {n}"));
+				}
+				self.get_field(n as usize)
+			},
+			Expr::Index(array, index) => {
+				let key = self.fast_subscript(index)?;
+				let slot = self.array_index(array.slot)?;
+				self.arrays[slot].entry(key).or_insert(Value::Null).clone()
+			},
+			Expr::In(index, array) => {
+				let key = self.fast_subscript(index)?;
+				let slot = self.array_index(array.slot)?;
+				Value::boolean(self.arrays[slot].contains_key(&key[..]))
+			},
+			Expr::Binary(left, op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow), right) => {
+				Value::Num(arith(*op, self.fast_num(left)?, self.fast_num(right)?)?)
+			},
+			Expr::Binary(left, op, right) => {
+				let left = self.eval_fast_ok(left)?;
+				let right = self.eval_fast_ok(right)?;
+				self.binary(*op, &left, &right)?
+			},
+			Expr::And(left, right) => {
+				Value::boolean(self.eval_fast_ok(left)?.truthy() && self.eval_fast_ok(right)?.truthy())
+			},
+			Expr::Or(left, right) => {
+				Value::boolean(self.eval_fast_ok(left)?.truthy() || self.eval_fast_ok(right)?.truthy())
+			},
+			Expr::Cond(cond, yes, no) => {
+				if self.eval_fast_ok(cond)?.truthy() {
+					self.eval_fast_ok(yes)?
+				} else {
+					self.eval_fast_ok(no)?
+				}
+			},
+			Expr::Match(left, negate, right) => {
+				let Expr::RegexArg(regex, _) = &**right else { unreachable!("fast_ok gates the regex") };
+				let value = self.eval_fast_ok(left)?;
+				let text = self.to_str(&value);
+				Value::boolean(regex.is_match(&text) != *negate)
+			},
+			Expr::Incr { target, decr, pre } => {
+				let place = self.place_fast(target)?;
+				let old = self.place_num(&place)?;
+				let new = if *decr { old - 1.0 } else { old + 1.0 };
+				self.set_place(place, Value::Num(new))?;
+				Value::Num(if *pre { new } else { old })
+			},
+			Expr::Assign(target, value) => {
+				let place = self.place_fast(target)?;
+				let value = self.eval_fast_ok(value)?;
+				self.set_place(place, value.clone())?;
+				value
+			},
+			Expr::AugAssign(target, op, value) => {
+				let place = self.place_fast(target)?;
+				let current = self.place_num(&place)?;
+				let right = self.fast_num(value)?;
+				let result = Value::Num(arith(*op, current, right)?);
+				self.set_place(place, result.clone())?;
+				result
+			},
+			Expr::UserCall { func, args, .. } => self.call_inline(*func, args)?,
+			_ => unreachable!("fast_ok gates the rest"),
+		})
+	}
+
+	/// Numeric operands need neither an owned scalar nor an Rc increment.
+	fn fast_num(&mut self, expr: &Expr) -> R<f64> {
+		Ok(match expr {
+			Expr::Num(n) => *n,
+			Expr::Var(var) => match var.slot {
+				Slot::Global(i) => self.globals[i].num(),
+				Slot::Local(i) => self.locals[self.frame_base() + i].num(),
+				_ => self.get_scalar(var.slot)?.num(),
+			},
+			_ => self.eval_fast_ok(expr)?.num(),
+		})
+	}
+
+	/// An assignable location in a prechecked immediate expression.
+	fn place_fast(&mut self, expr: &Expr) -> R<Place> {
+		Ok(match expr {
+			Expr::Var(var) => match var.slot {
+				Slot::Global(index) => Place::Global(index),
+				Slot::Local(index) => Place::Local(self.frame_base() + index),
+				Slot::Special(special) => Place::Special(special),
+				Slot::Unresolved => return error(format!("internal error: unresolved {:?}", var.name)),
+			},
+			Expr::Field(index) => {
+				let n = self.eval_fast_ok(index)?.num();
+				if n < 0.0 || n.is_nan() {
+					return error(format!("trying to access out of range field {}", n as i64));
+				}
+				if n > MAX_FIELD {
+					return error(format!("field index too large: {n}"));
+				}
+				Place::Field(n as usize)
+			},
+			Expr::Index(array, index) => Place::Elem(self.array_index(array.slot)?, self.fast_subscript(index)?),
+			Expr::Group(inner) => return self.place_fast(inner),
+			_ => return error("assignment to non-lvalue"),
+		})
+	}
+
+	/// An array subscript built from immediate operands.
+	fn fast_subscript(&mut self, index: &[Expr]) -> R<Bytes> {
+		if let [single] = index {
+			let value = self.eval_fast_ok(single)?;
+			return Ok(self.to_str(&value));
+		}
+		let mut key = Vec::new();
+		for (i, expr) in index.iter().enumerate() {
+			if i > 0 {
+				key.extend_from_slice(&self.subsep);
+			}
+			let value = self.eval_fast_ok(expr)?;
+			self.push_str(&value, &mut key);
+		}
+		Ok(Rc::from(key))
+	}
+
+	/// Direct calls already have their own bounded continuation. Other
+	/// suspending operands need a box to break the recursive future type.
+	async fn eval_child(&mut self, expr: &Expr) -> R<Value> {
+		match self.eval_fast(expr) {
+			Some(value) => value,
+			None => match expr {
+				Expr::UserCall { func, args, .. } => self.call_user(*func, args).await,
+				_ => self.eval_boxed(expr).await,
+			},
+		}
+	}
+
+
+	fn eval_boxed<'s>(&'s mut self, expr: &'s Expr) -> Pin<Box<dyn Future<Output = R<Value>> + 's>> {
+		Box::pin(self.eval(expr))
 	}
 
 	fn binary(&self, op: BinOp, left: &Value, right: &Value) -> R<Value> {
@@ -904,9 +1274,9 @@ impl<'a> Interp<'a> {
 	}
 
 	/// An array subscript: one value, or several joined with `SUBSEP`.
-	fn subscript(&mut self, index: &[Expr]) -> R<Bytes> {
+	async fn subscript(&mut self, index: &[Expr]) -> R<Bytes> {
 		if let [single] = index {
-			let value = self.eval(single)?;
+			let value = self.eval_child(single).await?;
 			return Ok(self.to_str(&value));
 		}
 		let mut key = Vec::new();
@@ -914,7 +1284,7 @@ impl<'a> Interp<'a> {
 			if i > 0 {
 				key.extend_from_slice(&self.subsep);
 			}
-			let value = self.eval(expr)?;
+			let value = self.eval_child(expr).await?;
 			self.push_str(&value, &mut key);
 		}
 		Ok(Rc::from(key))
@@ -922,11 +1292,11 @@ impl<'a> Interp<'a> {
 
 	/// The regex for a regex-argument position: a literal, or a dynamic
 	/// regex from the value's string (cached).
-	fn regex_of(&mut self, expr: &Expr) -> R<Rc<AwkRegex>> {
+	async fn regex_of(&mut self, expr: &Expr) -> R<Rc<AwkRegex>> {
 		if let Expr::RegexArg(regex, _) = expr {
 			return Ok(Rc::clone(regex));
 		}
-		let value = self.eval(expr)?;
+		let value = self.eval_child(expr).await?;
 		let src = self.to_str(&value);
 		self.compile(&src)
 	}
@@ -955,13 +1325,13 @@ impl<'a> Interp<'a> {
 	// ── Variables and places ────────────────────────────────────────────
 
 	fn frame_base(&self) -> usize {
-		self.frames.last().map_or(0, |frame| frame.scalars)
+		self.frames.last().map_or(0, |frame| frame.mark.scalars)
 	}
 
 	fn array_index(&self, slot: ArraySlot) -> R<usize> {
 		match slot {
 			ArraySlot::Global(index) => Ok(index),
-			ArraySlot::Local(index) => match self.frames.last().and_then(|frame| frame.arrays.get(index)) {
+			ArraySlot::Local(index) => match self.frames.last().and_then(|frame| self.bindings.get(frame.mark.bindings + index)) {
 				Some(&index) => Ok(index),
 				None => error("internal error: bad local array"),
 			},
@@ -991,7 +1361,13 @@ impl<'a> Interp<'a> {
 		Ok(())
 	}
 
-	fn place(&mut self, expr: &Expr) -> R<Place> {
+	async fn place(&mut self, expr: &Expr) -> R<Place> {
+		// Parentheses add no place of their own; unwrap them here so the
+		// method never recurses into itself.
+		let mut expr = expr;
+		while let Expr::Group(inner) = expr {
+			expr = inner;
+		}
 		Ok(match expr {
 			Expr::Var(var) => match var.slot {
 				Slot::Global(index) => Place::Global(index),
@@ -1000,12 +1376,19 @@ impl<'a> Interp<'a> {
 				Slot::Unresolved => return error(format!("internal error: unresolved {:?}", var.name)),
 			},
 			Expr::Index(array, index) => {
-				let key = self.subscript(index)?;
+				let key = self.subscript(index).await?;
 				Place::Elem(self.array_index(array.slot)?, key)
 			},
-			Expr::Field(index) => Place::Field(self.field_index(index)?),
-			Expr::Group(inner) => self.place(inner)?,
+			Expr::Field(index) => Place::Field(self.field_index(index).await?),
 			_ => return error("assignment to non-lvalue"),
+		})
+	}
+
+	fn place_num(&mut self, place: &Place) -> R<f64> {
+		Ok(match place {
+			Place::Global(i) => self.globals[*i].num(),
+			Place::Local(i) => self.locals[*i].num(),
+			_ => self.get_place(place)?.num(),
 		})
 	}
 
@@ -1125,8 +1508,8 @@ impl<'a> Interp<'a> {
 		self.fields.get_or_insert_with(|| spans.iter().map(|&(s, e)| Value::strnum(&record[s..e])).collect())
 	}
 
-	fn field_index(&mut self, expr: &Expr) -> R<usize> {
-		let n = self.eval(expr)?.num();
+	async fn field_index(&mut self, expr: &Expr) -> R<usize> {
+		let n = self.eval_child(expr).await?.num();
 		if n < 0.0 || n.is_nan() {
 			return error(format!("trying to access out of range field {}", n as i64));
 		}
@@ -1236,7 +1619,8 @@ impl<'a> Interp<'a> {
 
 	fn stdin_reader(&self) -> R<RecordReader> {
 		let stdin = self.host.stdin.try_clone().map_err(|err| Stop::Error(format!("stdin: {}", strip_errno(&err))))?;
-		Ok(RecordReader::new(Box::new(stdin)))
+		let file = stdin.file().try_clone().map_err(|err| Stop::Error(format!("stdin: {}", strip_errno(&err))))?;
+		Ok(RecordReader::rewinding(Box::new(stdin), file))
 	}
 
 	/// Opens the next input from `ARGV`, applying `var=value` operands on
@@ -1289,7 +1673,7 @@ impl<'a> Interp<'a> {
 		}
 	}
 
-	fn getline(&mut self, src: GetlineSrc, target: Option<&Expr>, from: Option<&Expr>) -> R<Value> {
+	async fn getline(&mut self, src: GetlineSrc, target: Option<&Expr>, from: Option<&Expr>) -> R<Value> {
 		let mut line = Vec::new();
 		let status = match src {
 			GetlineSrc::Main => match self.read_main(&mut line) {
@@ -1304,7 +1688,7 @@ impl<'a> Interp<'a> {
 				let Some(from) = from else {
 					return Ok(Value::Num(-1.0));
 				};
-				let name = self.eval(from)?;
+				let name = self.eval_child(from).await?;
 				let name = self.to_str(&name);
 				if !self.inputs.contains_key(&name[..]) {
 					let opened = if src == GetlineSrc::File {
@@ -1341,7 +1725,7 @@ impl<'a> Interp<'a> {
 		}
 		match target {
 			Some(target) => {
-				let place = self.place(target)?;
+				let place = self.place(target).await?;
 				self.set_place(place, Value::strnum(&line))?;
 			},
 			None => self.set_record(&line, false),
@@ -1401,90 +1785,48 @@ impl<'a> Interp<'a> {
 
 	// ── Functions ───────────────────────────────────────────────────────
 
-	fn call_user(&mut self, index: usize, args: &[Expr]) -> R<Value> {
-		let prog = self.prog;
-		let Some(function) = prog.functions.get(index) else {
-			return error("call to undefined function");
-		};
-		if self.frames.len() >= MAX_DEPTH {
-			return error(format!("function call nesting too deep in {:?}", function.name));
+	/// A builtin's numeric argument, defaulting to 0 when absent.
+	async fn arg_num(&mut self, args: &[Expr], i: usize) -> R<f64> {
+		match args.get(i) {
+			Some(arg) => Ok(self.eval_child(arg).await?.num()),
+			None => Ok(0.0),
 		}
-		let mut scalars = Vec::with_capacity(function.kinds.len());
-		let mut arrays = Vec::new();
-		for (i, kind) in function.kinds.iter().enumerate() {
-			match kind {
-				Param::Scalar(_) => scalars.push(match args.get(i) {
-					Some(arg) => self.eval(arg)?,
-					None => Value::Null,
-				}),
-				Param::Array(_) => arrays.push(match args.get(i) {
-					Some(Expr::ArrayArg(array)) => Some(self.array_index(array.slot)?),
-					Some(_) => return error(format!("can't pass scalar as array param of {:?}", function.name)),
-					None => None,
-				}),
-			}
-		}
-		let mark = self.arrays.len();
-		let arrays: Vec<usize> = arrays
-			.into_iter()
-			.map(|array| {
-				array.unwrap_or_else(|| {
-					self.arrays.push(Array::default());
-					self.arrays.len() - 1
-				})
-			})
-			.collect();
-		let base = self.locals.len();
-		self.locals.extend(scalars);
-		self.frames.push(Frame { scalars: base, arrays });
-		let result = stacker::maybe_grow(256 * 1024, 4 * 1024 * 1024, || self.exec_block(&function.body));
-		self.frames.pop();
-		self.locals.truncate(base);
-		self.arrays.truncate(mark);
-		Ok(match result? {
-			Flow::Return(value) => value,
-			_ => Value::Null,
-		})
 	}
 
-	fn call_builtin(&mut self, func: Func, args: &[Expr]) -> R<Value> {
-		let num = |this: &mut Self, i: usize| -> R<f64> {
-			match args.get(i) {
-				Some(arg) => Ok(this.eval(arg)?.num()),
-				None => Ok(0.0),
-			}
-		};
-		let string = |this: &mut Self, i: usize| -> R<Bytes> {
-			match args.get(i) {
-				Some(arg) => {
-					let value = this.eval(arg)?;
-					Ok(this.to_str(&value))
-				},
-				None => Ok(Rc::clone(&this.empty)),
-			}
-		};
+	/// A builtin's string argument, defaulting to `""` when absent.
+	async fn arg_string(&mut self, args: &[Expr], i: usize) -> R<Bytes> {
+		match args.get(i) {
+			Some(arg) => {
+				let value = self.eval_child(arg).await?;
+				Ok(self.to_str(&value))
+			},
+			None => Ok(Rc::clone(&self.empty)),
+		}
+	}
+
+	async fn call_builtin(&mut self, func: Func, args: &[Expr]) -> R<Value> {
 		Ok(match func {
 			Func::Length => {
 				if args.is_empty() {
 					Value::Num(char_count(&self.record) as f64)
 				} else {
-					Value::Num(char_count(&string(self, 0)?) as f64)
+					Value::Num(char_count(&self.arg_string(args, 0).await?) as f64)
 				}
 			},
 			Func::Substr => {
-				let s = string(self, 0)?;
-				let m = num(self, 1)?;
-				let n = if args.len() > 2 { Some(num(self, 2)?) } else { None };
+				let s = self.arg_string(args, 0).await?;
+				let m = self.arg_num(args, 1).await?;
+				let n = if args.len() > 2 { Some(self.arg_num(args, 2).await?) } else { None };
 				Value::string(substr(&s, m, n))
 			},
 			Func::Index => {
-				let s = string(self, 0)?;
-				let t = string(self, 1)?;
+				let s = self.arg_string(args, 0).await?;
+				let t = self.arg_string(args, 1).await?;
 				Value::Num(memchr::memmem::find(&s, &t).map_or(0.0, |at| (char_count(&s[..at]) + 1) as f64))
 			},
 			Func::Match => {
-				let s = string(self, 0)?;
-				let regex = self.regex_of(&args[1])?;
+				let s = self.arg_string(args, 0).await?;
+				let regex = self.regex_of(&args[1]).await?;
 				match regex.find_at(&s, 0) {
 					Some((start, end)) => {
 						self.rstart = Value::Num((char_count(&s[..start]) + 1) as f64);
@@ -1498,10 +1840,10 @@ impl<'a> Interp<'a> {
 				self.rstart.clone()
 			},
 			Func::Sub | Func::Gsub => {
-				let regex = self.regex_of(&args[0])?;
-				let repl = string(self, 1)?;
+				let regex = self.regex_of(&args[0]).await?;
+				let repl = self.arg_string(args, 1).await?;
 				let place = match args.get(2) {
-					Some(target) => self.place(target)?,
+					Some(target) => self.place(target).await?,
 					None => Place::Field(0),
 				};
 				let current = self.get_place(&place)?;
@@ -1512,9 +1854,9 @@ impl<'a> Interp<'a> {
 				}
 				Value::Num(count as f64)
 			},
-			Func::Sprintf => Value::string(self.sprintf_args(args)?),
+			Func::Sprintf => Value::string(self.sprintf_args(args).await?),
 			Func::Tolower | Func::Toupper => {
-				let s = string(self, 0)?;
+				let s = self.arg_string(args, 0).await?;
 				let lower = func == Func::Tolower;
 				Value::string(match std::str::from_utf8(&s) {
 					Ok(text) => (if lower { text.to_lowercase() } else { text.to_uppercase() }).into_bytes(),
@@ -1527,26 +1869,26 @@ impl<'a> Interp<'a> {
 					},
 				})
 			},
-			Func::Int => Value::Num(num(self, 0)?.trunc()),
-			Func::Sqrt => Value::Num(num(self, 0)?.sqrt()),
-			Func::Exp => Value::Num(num(self, 0)?.exp()),
-			Func::Log => Value::Num(num(self, 0)?.ln()),
-			Func::Sin => Value::Num(num(self, 0)?.sin()),
-			Func::Cos => Value::Num(num(self, 0)?.cos()),
+			Func::Int => Value::Num(self.arg_num(args, 0).await?.trunc()),
+			Func::Sqrt => Value::Num(self.arg_num(args, 0).await?.sqrt()),
+			Func::Exp => Value::Num(self.arg_num(args, 0).await?.exp()),
+			Func::Log => Value::Num(self.arg_num(args, 0).await?.ln()),
+			Func::Sin => Value::Num(self.arg_num(args, 0).await?.sin()),
+			Func::Cos => Value::Num(self.arg_num(args, 0).await?.cos()),
 			Func::Atan2 => {
-				let y = num(self, 0)?;
-				let x = num(self, 1)?;
+				let y = self.arg_num(args, 0).await?;
+				let x = self.arg_num(args, 1).await?;
 				Value::Num(y.atan2(x))
 			},
 			Func::Rand => Value::Num(self.rng.random::<f64>()),
 			Func::Srand => {
 				let previous = self.seed;
-				self.seed = if args.is_empty() { now_seconds() } else { num(self, 0)? };
+				self.seed = if args.is_empty() { now_seconds() } else { self.arg_num(args, 0).await? };
 				self.rng = StdRng::seed_from_u64(self.seed.to_bits());
 				Value::Num(previous)
 			},
 			Func::System => {
-				let command = string(self, 0)?;
+				let command = self.arg_string(args, 0).await?;
 				self.flush_all()?;
 				let mut shell_command = shell(&command);
 				if let Ok(stdin) = self.host.stdin.file().to_fd() {
@@ -1555,11 +1897,11 @@ impl<'a> Interp<'a> {
 				Value::Num(f64::from(self.run_shell(shell_command)?))
 			},
 			Func::Close => {
-				let name = string(self, 0)?;
+				let name = self.arg_string(args, 0).await?;
 				Value::Num(f64::from(self.close(&name)?))
 			},
 			Func::Fflush => {
-				let name = if args.is_empty() { None } else { Some(string(self, 0)?) };
+				let name = if args.is_empty() { None } else { Some(self.arg_string(args, 0).await?) };
 				Value::Num(f64::from(self.fflush(name.as_deref())?))
 			},
 			Func::Systime => Value::Num(now_seconds().trunc()),
@@ -1567,10 +1909,10 @@ impl<'a> Interp<'a> {
 				let format = if args.is_empty() {
 					Rc::from(&b"%a %b %e %H:%M:%S %Z %Y"[..])
 				} else {
-					string(self, 0)?
+					self.arg_string(args, 0).await?
 				};
-				let seconds = if args.len() > 1 { num(self, 1)? } else { now_seconds() };
-				let utc = if args.len() > 2 { self.eval(&args[2])?.truthy() } else { false };
+				let seconds = if args.len() > 1 { self.arg_num(args, 1).await? } else { now_seconds() };
+				let utc = if args.len() > 2 { self.eval_child(&args[2]).await?.truthy() } else { false };
 				Value::string(self.strftime(&format, seconds, utc))
 			},
 			Func::Split => return error("internal error: split"),
@@ -1587,14 +1929,14 @@ impl<'a> Interp<'a> {
 		jiff::fmt::strtime::format(format, &zoned).map(String::into_bytes).unwrap_or_default()
 	}
 
-	fn split(&mut self, s: &Expr, array: ArraySlot, sep: Option<&Expr>) -> R<Value> {
-		let text = self.eval(s)?;
+	async fn split(&mut self, s: &Expr, array: ArraySlot, sep: Option<&Expr>) -> R<Value> {
+		let text = self.eval_child(s).await?;
 		let text = self.to_str(&text);
 		let sep = match sep {
 			None => self.fs_sep.clone(),
 			Some(Expr::RegexArg(regex, _)) => FieldSep::Regex(Rc::clone(regex)),
 			Some(expr) => {
-				let value = self.eval(expr)?;
+				let value = self.eval_child(expr).await?;
 				let sep = self.to_str(&value);
 				self.field_sep(&sep)?
 			},

@@ -1,6 +1,5 @@
 import type { OAuthRefreshReason } from "../../auth/types";
 import type { FetchImpl } from "../../types";
-import type { OAuthProviderUnion } from "../registry";
 import type { DpopPrivateJwk } from "./dpop";
 
 export type OAuthCredentials = {
@@ -12,6 +11,12 @@ export type OAuthCredentials = {
 	email?: string;
 	accountId?: string;
 	apiEndpoint?: string;
+	/**
+	 * GitHub Copilot: the account meters usage in AI credits
+	 * (`token_based_billing`), so requests record no premium-request estimate.
+	 * Read at login and from each Copilot quota fetch; absent when unknown.
+	 */
+	tokenBasedBilling?: boolean;
 	/**
 	 * Organization/workspace the token is scoped to (e.g. an Anthropic org
 	 * UUID or canonical Factory org ID). Lets one account email hold
@@ -72,9 +77,8 @@ export type OAuthCredentials = {
 	scope?: string;
 };
 
-export type OAuthProvider = OAuthProviderUnion;
-
-export type OAuthProviderId = OAuthProvider | (string & {});
+/** Id of a provider whose auth policy declares a `login` flow, or of a `registerOAuthProvider` custom provider. */
+export type OAuthProviderId = string;
 
 export type OAuthPrompt = {
 	message: string;

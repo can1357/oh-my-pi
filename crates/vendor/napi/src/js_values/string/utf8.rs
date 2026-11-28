@@ -1,23 +1,26 @@
 use std::convert::TryFrom;
-use std::str;
 
-use crate::{bindgen_prelude::ToNapiValue, sys, Error, JsString, Result, Status};
+use crate::{bindgen_prelude::ToNapiValue, sys, Error, JsString, Result};
 
 pub struct JsStringUtf8<'env> {
   pub(crate) inner: JsString<'env>,
-  pub(crate) buf: Vec<u8>,
+  pub(crate) buf: String,
 }
 
 impl<'env> JsStringUtf8<'env> {
+  /// Returns the string as a `&str`.
+  ///
+  /// This never fails. It returns `Result` only to keep the signature backwards compatible.
   pub fn as_str(&self) -> Result<&str> {
-    str::from_utf8(self.buf.as_slice())
-      .map_err(|err| Error::new(Status::InvalidArg, err.to_string()))
+    Ok(self.buf.as_str())
   }
 
+  /// Returns the string's UTF-8 bytes, without a NUL terminator.
   pub fn as_slice(&self) -> &[u8] {
-    self.buf.as_slice()
+    self.buf.as_bytes()
   }
 
+  /// Returns the length of the string in UTF-8 bytes (not chars or UTF-16 code units).
   pub fn len(&self) -> usize {
     self.buf.len()
   }
@@ -27,11 +30,11 @@ impl<'env> JsStringUtf8<'env> {
   }
 
   pub fn into_owned(self) -> Result<String> {
-    Ok(unsafe { String::from_utf8_unchecked(self.buf.to_vec()) })
+    Ok(self.buf)
   }
 
   pub fn take(self) -> Vec<u8> {
-    self.buf.to_vec()
+    self.buf.into_bytes()
   }
 
   pub fn into_value(self) -> JsString<'env> {
