@@ -29,6 +29,60 @@ pub(crate) enum StackedRepeats {
 	Refused,
 }
 
+/// What the engine searches, which decides how glibc's start and end of the
+/// text, `` \` `` and `\'`, are written for it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code, reason = "each variant is used by a different utility feature")]
+pub(crate) enum Haystack {
+	/// One line at a time (`nl`), `grep`'s records, which `grep-regex`
+	/// matches one at a time, or `fswatch`'s path: the anchors are `^` and
+	/// `$`. A `\{` that opens no interval right after either, at the start of
+	/// a branch, is text, as GNU grep and nl read it.
+	Lines,
+	/// `sed`'s pattern space, where the `M` flag makes `^` and `$` match at
+	/// each line: the anchors are `\A` and `\z`. GNU sed refuses a `\{` that
+	/// opens no interval right after either.
+	Text,
+}
+
+impl Haystack {
+	/// glibc's start (`` \` ``) or end (`\'`) of the text, for the engine.
+	fn text_anchor(self, end: bool) -> &'static str {
+		match (self, end) {
+			(Self::Lines, false) => "^",
+			(Self::Lines, true) => "$",
+			(Self::Text, false) => r"\A",
+			(Self::Text, true) => r"\z",
+		}
+	}
+
+	/// `` \` `` or `\'` right before a repetition operator, written as this
+	/// module wrote them before it read them as anchors: an escaped backtick
+	/// or quote, which the engines read as that character, and to `sed` the
+	/// `\A` and `\z` it wrote for them before this module read them. GNU's
+	/// answer there depends on which of its matchers decides: its dfa repeats
+	/// the anchor after an atom, glibc's regex reads the operator as text,
+	/// and the dfa leaves some patterns to glibc. No one reading gives GNU's
+	/// answers, so the earlier one stands.
+	fn anchor_before_repetition(self, end: bool) -> &'static str {
+		match (self, end) {
+			(Self::Lines, false) => r"\`",
+			(Self::Lines, true) => r"\'",
+			(Self::Text, false) => r"\A",
+			(Self::Text, true) => r"\z",
+		}
+	}
+}
+
+/// Whether glibc reads `\c` as `c` itself, as it reads `\d` as `d` and `\x`
+/// as `x`, where the engines read a digit class and a hex escape. GNU's own
+/// escapes (`\w`, `\s`, `\b` and their capitals) and back-references (`\1`
+/// to `\9`) keep their meaning, and so does a backslash before punctuation,
+/// which the engines read as glibc does.
+fn is_ordinary_escape(c: char) -> bool {
+	!c.is_ascii() || (c.is_ascii_alphanumeric() && !matches!(c, 'w' | 'W' | 's' | 'S' | 'b' | 'B' | '1'..='9'))
+}
+
 /// A pattern the BRE dialect cannot express.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[cfg_attr(
@@ -105,6 +159,9 @@ impl BreError {
 /// - Puts single-digit back-references in non-capturing groups.
 /// - Escapes ERE-only metacharacters: `+ ? { } | ( )`.
 /// - Translates POSIX bracket expressions.
+/// - Reads a backslash before an ordinary character as that character, and
+///   `` \` `` and `\'` as the start and the end of the text `haystack` names,
+///   except right before a repetition operator.
 ///
 /// A repetition character with **no preceding atom** is emitted as a literal,
 /// per POSIX: "an asterisk that is the first character of an RE ... shall lose
@@ -116,7 +173,12 @@ impl BreError {
 /// Malformed patterns are refused with glibc's error, as GNU grep and sed do:
 /// unbalanced `\(`/`\)`, an unclosed or malformed `\{…\}`, a back-reference
 /// to a group not yet closed, a trailing `\`, and bad bracket expressions.
-pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs, stacked: StackedRepeats) -> Result<String, BreError> {
+pub(crate) fn bre_to_ere(
+	pattern: &str,
+	backrefs: Backrefs,
+	stacked: StackedRepeats,
+	haystack: Haystack,
+) -> Result<String, BreError> {
 	let mut result = String::with_capacity(pattern.len());
 	let mut chars = pattern.chars().peekable();
 	// Numbers of the groups still open, how many were opened, and a bit per
@@ -142,11 +204,14 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs, stacked: StackedRepe
 	let mut anchored = false;
 	// Whether the previous token was a repetition operator, for `stacked`.
 	let mut after_repeat = false;
+	// Whether the previous token was `` \` `` or `\'` read as an anchor.
+	let mut buffer_anchor = false;
 	while let Some(c) = chars.next() {
 		let token_start = result.len();
 		let was_repeat = after_repeat;
 		let stacking = was_repeat && stacked == StackedRepeats::Refused;
 		after_repeat = false;
+		let after_buffer_anchor = std::mem::take(&mut buffer_anchor);
 		// Set by tokens that are not atoms of their own: anchors, and a group
 		// end, whose piece starts at its `(`.
 		let mut not_atom = false;
@@ -214,12 +279,19 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs, stacked: StackedRepe
 					// selects every line with a success exit status. That is
 					// the same fail-open this module exists to close, and it
 					// has to be refused here because no later layer sees it.
-					if !has_atom || stacking {
+					//
+					// Right after `` \` `` or `\'` at the start of a branch, a
+					// `\{` that opens no interval is text to grep, nl and fswatch.
+					if !has_atom && after_buffer_anchor && haystack == Haystack::Lines {
+						result.push_str(r"\{");
+						has_atom = true;
+					} else if !has_atom || stacking {
 						return Err(BreError::RepetitionOperandMissing);
+					} else {
+						group_stacked(&mut result, piece_start, was_repeat);
+						push_bre_interval(&mut result, &mut chars)?;
+						after_repeat = true;
 					}
-					group_stacked(&mut result, piece_start, was_repeat);
-					push_bre_interval(&mut result, &mut chars)?;
-					after_repeat = true;
 				},
 				Some('}') => {
 					// Closes no interval: an ordinary brace.
@@ -227,7 +299,7 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs, stacked: StackedRepe
 					result.push_str(r"\}");
 					has_atom = true;
 				},
-				Some(v) if v.is_ascii_digit() => {
+				Some(v) if matches!(v, '1'..='9') => {
 					// Back-reference.  In sed BREs these are single-digit
 					// (\1-\9) whereas fancy_regex supports multi-digit
 					// back-references. Put them in a non-capturing group
@@ -248,6 +320,39 @@ pub(crate) fn bre_to_ere(pattern: &str, backrefs: Backrefs, stacked: StackedRepe
 							result.push(v);
 						},
 					}
+					has_atom = true;
+				},
+				// glibc's start and end of the text: a line to grep and nl,
+				// the pattern space to sed. A caret after either is text, as a
+				// BRE caret anchors only at the start of a branch. Right
+				// before a repetition operator either keeps its earlier text,
+				// which the operator repeats; a `\{` is one only when it opens
+				// an interval.
+				Some(&anchor @ ('`' | '\'')) => {
+					chars.next();
+					let mut ahead = chars.clone();
+					let repeated = match ahead.next() {
+						Some('*') => true,
+						Some('\\') => match ahead.next() {
+							Some('?' | '+') => true,
+							Some('{') => opens_interval(ahead, true, has_atom),
+							_ => false,
+						},
+						_ => false,
+					};
+					if repeated {
+						result.push_str(haystack.anchor_before_repetition(anchor == '\''));
+						has_atom = true;
+					} else {
+						result.push_str(haystack.text_anchor(anchor == '\''));
+						anchored = true;
+						buffer_anchor = true;
+						not_atom = true;
+					}
+				},
+				Some(&next) if is_ordinary_escape(next) => {
+					chars.next();
+					result.push(next);
 					has_atom = true;
 				},
 				Some(&next) => {
@@ -347,6 +452,36 @@ fn group_stacked(result: &mut String, start: usize, stacked: bool) {
 		result.insert_str(start, "(?:");
 		result.push(')');
 	}
+}
+
+/// Whether an interval follows a `{` (`\{` in a BRE) that comes right after
+/// `` \` `` or `\'`: `{m}`, `{m,}` or `{m,n}` with m <= n (`\,` for the comma
+/// in a BRE), closed by `}` (`\}` in a BRE), and `{,n}` or `{,}` too in an
+/// ERE, or in a BRE when an atom comes before the anchor (`after_atom`). At
+/// the start of a branch any other brace after either is text: measured,
+/// `` grep -n '\`\{,2\}' `` prints only a line that starts `{,2}`, and
+/// `` grep -nE '\`{,2}' `` every line.
+fn opens_interval(mut rest: Peekable<Chars<'_>>, bre: bool, after_atom: bool) -> bool {
+	fn count(rest: &mut Peekable<Chars<'_>>) -> Option<u32> {
+		let mut value = None;
+		while let Some(digit) = rest.next_if(char::is_ascii_digit) {
+			let digit = digit.to_digit(10).expect("an ASCII digit");
+			value = Some(value.unwrap_or(0u32).saturating_mul(10).saturating_add(digit));
+		}
+		value
+	}
+	let least = count(&mut rest);
+	let comma = rest.next_if_eq(&',').is_some()
+		|| (bre && rest.clone().take(2).eq(['\\', ',']) && rest.nth(1).is_some());
+	let most = if comma { count(&mut rest) } else { least };
+	let closed = if bre {
+		rest.next() == Some('\\') && rest.next() == Some('}')
+	} else {
+		rest.next() == Some('}')
+	};
+	closed
+		&& (least.is_some() || (comma && (after_atom || !bre)))
+		&& !matches!((least, most), (Some(l), Some(m)) if l > m)
 }
 
 /// Append a BRE interval as an ERE `{min,max}`; the `\{` is already consumed.
@@ -530,6 +665,7 @@ fn push_class_literal(result: &mut String, c: char) {
 /// where sed rejects it.
 #[cfg(any(feature = "util.grep", feature = "util.sed"))]
 pub(crate) fn ere_to_rust(pattern: &str, grep: bool) -> Result<Cow<'_, str>, BreError> {
+	let haystack = if grep { Haystack::Lines } else { Haystack::Text };
 	let mut result = String::with_capacity(pattern.len());
 	let mut chars = pattern.chars().peekable();
 	let mut has_atom = false;
@@ -548,15 +684,35 @@ pub(crate) fn ere_to_rust(pattern: &str, grep: bool) -> Result<Cow<'_, str>, Bre
 		let token_start = result.len();
 		let was_repeat = std::mem::take(&mut after_repeat);
 		match c {
+			// A backslash before an ordinary character, a backtick or a quote
+			// reads as in a BRE: `` \` `` and `\'` are a record's start and
+			// end to grep, the pattern space's to sed, and keep their earlier
+			// text right before a repetition operator. A `{` is one only when
+			// it opens an interval; at the start of a branch any other brace
+			// stays text after either.
 			'\\' => {
-				result.push(c);
 				match chars.next() {
+					Some(anchor @ ('`' | '\'')) => {
+						let mut ahead = chars.clone();
+						let repeated = match ahead.next() {
+							Some('*' | '+' | '?') => true,
+							Some('{') => opens_interval(ahead, false, has_atom),
+							_ => false,
+						};
+						if !repeated {
+							result.push_str(haystack.text_anchor(anchor == '\''));
+							continue;
+						}
+						result.push_str(haystack.anchor_before_repetition(anchor == '\''));
+					},
+					Some(next) if is_ordinary_escape(next) => result.push(next),
 					Some(next) => {
 						if let Some(group @ 1..=9) = next.to_digit(10)
 							&& closed_groups & (1 << group) == 0
 						{
 							return Err(BreError::InvalidBackReference);
 						}
+						result.push(c);
 						result.push(next);
 					},
 					None => return Err(BreError::TrailingBackslash),
@@ -694,12 +850,13 @@ fn classify_brace(mut chars: Peekable<Chars<'_>>) -> Brace {
 mod tests {
 	use super::*;
 
+	/// The BRE with stacked repeats allowed, for one text, as `sed` reads it.
 	fn ere(pattern: &str) -> String {
-		bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Allowed).expect("translatable")
+		bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Allowed, Haystack::Text).expect("translatable")
 	}
 
 	fn ere_err(pattern: &str) -> Option<BreError> {
-		bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Allowed).err()
+		bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Allowed, Haystack::Text).err()
 	}
 
 	// Relocated from `sed`, which owned this translation before `grep` shared it.
@@ -772,7 +929,7 @@ mod tests {
 		assert_eq!(ere(r"x\(ab\)*\+"), "x(?:(ab)*)+");
 		assert_eq!(ere(r"[ab]\{2\}*\?"), "(?:(?:[ab]{2})*)?");
 		assert_eq!(ere(r"^**"), r"^\**");
-		let sed = |pattern| bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Refused);
+		let sed = |pattern| bre_to_ere(pattern, Backrefs::Supported, StackedRepeats::Refused, Haystack::Text);
 		assert_eq!(sed(r"a**"), Err(BreError::RepetitionOperandMissing));
 		assert_eq!(sed(r"a\?\{2\}"), Err(BreError::RepetitionOperandMissing));
 		assert_eq!(sed(r"a*\+").as_deref(), Ok("(?:a*)+"));
@@ -818,7 +975,8 @@ mod tests {
 		// happened before this module existed. The behaviour is unchanged by
 		// the refactor; it is not an endorsement of matching `\1` literally.
 		assert_eq!(
-			bre_to_ere(r"\(a\)\1", Backrefs::Unsupported, StackedRepeats::Allowed).expect("translatable"),
+			bre_to_ere(r"\(a\)\1", Backrefs::Unsupported, StackedRepeats::Allowed, Haystack::Lines)
+				.expect("translatable"),
 			r"(a)\1"
 		);
 		// The grouping exists only for engines that support them, where a
@@ -973,6 +1131,98 @@ mod tests {
 	fn ere_rejects_only_intervals_that_really_open() {
 		for pattern in ["{1}", "^{2}", "{3,}", "{4,5}", "(|{6})", "{,5}"] {
 			assert_eq!(ere_to_rust(pattern, true), Err(BreError::RepetitionOperandMissing), "{pattern}");
+		}
+	}
+
+	/// A backslash before a character with no meaning of its own is that
+	/// character, and `` \` `` and `\'` are the start and the end of the
+	/// text, as glibc reads them for GNU grep, nl and sed. Regressed: `\d`
+	/// was a digit, `\x` and `\0` an error, `` \` `` a backtick to grep, and
+	/// `\A` and `\z` the start and the end of the pattern space to sed.
+	#[cfg(all(feature = "util.grep", feature = "util.nl", feature = "util.sed"))]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_backslash_before_an_ordinary_character_is_that_character() {
+		use crate::{
+			grep::Grep,
+			host::{run_async_util, run_util},
+			nl::Nl,
+			sed::Sed,
+		};
+
+		for (args, stdin, expected) in [
+			(&["-o", r"\d"][..], "d1\n", (0, "d\n")),
+			(&["-oE", r"\d"], "d1\n", (0, "d\n")),
+			(&["-c", r"\x"], "x\n", (0, "1\n")),
+			(&["-c", r"\0"], "0\n", (0, "1\n")),
+			(&["-c", "\\\u{e9}"], "\u{e9}\n", (0, "1\n")),
+			(&["-c", r"\`a"], "ab\n", (0, "1\n")),
+			(&["-c", r"b\'"], "ab\n", (0, "1\n")),
+			// After `` \` `` a BRE caret is text, as it anchors only at the
+			// start of a branch; an ERE caret anchors anywhere.
+			(&["-n", r"\`^a"], "a\n^a\n", (0, "2:^a\n")),
+			(&["-cE", r"\`^a"], "ab\n^ab\n", (0, "1\n")),
+			// The same after `\<`, which was already GNU's answer.
+			(&["-n", r"\<^a"], "a\n^a\n", (1, "")),
+			// Right before a repetition operator either keeps its earlier
+			// reading, a backtick or a quote, which the operator repeats. GNU's
+			// answer there depends on which of its matchers decides: its dfa
+			// repeats the anchor after an atom, glibc's regex reads the
+			// operator as text, and the dfa leaves `-w` and some other
+			// patterns to glibc in a UTF-8 locale. GNU's answer in the C
+			// locale, which these rows run in, is in each row's comment.
+			(&["-c", r"\`\{1\}"], "{1}\na{1}\n", (1, "0\n")), // GNU: 1
+			(&["-c", r"\`*"], "*a\na*\n", (0, "2\n")), // GNU: 1
+			(&["-c", r"x\`*"], "xa\nb\n", (0, "1\n")), // GNU: 1
+			(&["-c", r"x\`\{0,1\}"], "xa\nb\n", (0, "1\n")), // GNU: 1
+			(&["-c", r"x\`\{,2\}y"], "x`y\nxy\n", (0, "2\n")), // GNU: 1
+			(&["-cw", r"b\'\+"], "b\n", (1, "0\n")), // GNU: 1, and 0 in a UTF-8 locale
+			(&["-cE", r"\`*"], "a\nb\n", (0, "2\n")), // GNU: 2
+			(&["-cE", r"\'?"], "a\nb\n", (0, "2\n")), // GNU: 2
+			// A brace that opens no interval is no operator, and stays text
+			// after either anchor, as GNU reads it.
+			(&["-nE", r"\`{a"], "{a\n`{a\n", (0, "1:{a\n")),
+			(&["-nE", r"\`{1,2,3}"], "{1,2,3}\n", (0, "1:{1,2,3}\n")),
+			(&["-cE", r"x\'{a"], "x'{a\nx\n", (1, "0\n")),
+			(&["-n", r"\`\{a"], "{a\n`{a\n", (0, "1:{a\n")),
+			// A BRE brace with no least count opens no interval there either;
+			// an ERE one does, and repeats the earlier reading.
+			(&["-n", r"\`\{,2\}"], "{,2}\n`{,2}\n", (0, "1:{,2}\n")),
+			(&["-nE", r"\`{,2}"], "{,2}\n`{,2}\n", (0, "1:{,2}\n2:`{,2}\n")), // GNU: the same
+			// After an atom GNU reads a BRE `\{` as an interval, and refuses
+			// this one.
+			(&["-c", r"x\`\{a"], "x{a\nx\n", (2, "")),
+		] {
+			let (code, capture) = run_async_util::<Grep>(args, stdin, "/").await;
+			assert_eq!((code, capture.out().as_str()), expected, "grep {args:?}: {}", capture.err());
+		}
+
+		// nl and sed read the anchors the same way, and keep the earlier
+		// reading right before a repetition operator, as grep does.
+		for (args, stdin, expected) in [
+			(&[r"-bp\`^a"][..], "a\n^a\n", "       a\n     1\t^a\n"),
+			// GNU numbers no line.
+			(&[r"-bpx\`*"], "xa\nb\n", "     1\txa\n       b\n"),
+			(&[r"-bp\`\{a"], "{a\n`{a\n", "     1\t{a\n       `{a\n"),
+			(&[r"-bp\`\{,2\}"], "{,2}\n`{,2}\n", "     1\t{,2}\n       `{,2}\n"),
+		] {
+			let (code, capture) = run_util::<Nl>(args, stdin, "/");
+			assert_eq!((code, capture.out().as_str()), (0, expected), "nl {args:?}: {}", capture.err());
+		}
+		for (args, stdin, expected) in [
+			(&[r"s/\A/Y/"][..], "xA\n", (0, "xY\n")),
+			(&["-E", r"s/\A/Y/"], "xA\n", (0, "xY\n")),
+			(&[r"s/\z/Y/"], "xz\n", (0, "xY\n")),
+			// The earlier reading of `\A` and `\z` before an operator. GNU's
+			// answer is in each row's comment.
+			(&[r"s/\`\{1\}/Y/"], "{1}\n", (0, "Y{1}\n")), // GNU: refused, exit 1
+			(&["-n", r"/x\`\{0,1\}/Mp"], "xa\nb\n", (0, "xa\n")), // GNU: refused, exit 1
+			(&[r"s/x\`*/Y/"], "xa\nb\n", (0, "Ya\nb\n")), // GNU: `xa\nb\n`
+			(&["-n", r"/x\`*/Mp"], "xa\nb\n", (0, "xa\n")), // GNU: `xa\n`
+			(&[r"s/a*\`\+b/X/"], "+b\n", (0, "+b\n")), // GNU: `+b\n`
+			(&["-n", r"s/x\`*/Y/M2;//p"], "xa\n", (0, "xa\n")), // GNU: `xa\n`
+		] {
+			let (code, capture) = run_util::<Sed>(args, stdin, "/");
+			assert_eq!((code, capture.out().as_str()), expected, "sed {args:?}: {}", capture.err());
 		}
 	}
 }

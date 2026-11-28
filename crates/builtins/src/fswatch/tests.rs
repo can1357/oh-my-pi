@@ -272,6 +272,16 @@ fn filters_select_by_event_type_and_path() {
 	let plus = [("/w/aa", 0, CREATED_FILE), ("/w/a+", 0, CREATED_FILE)];
 	assert_eq!(render(&["-e", "a+"], &plus), "/w/aa\n");
 	assert_eq!(render(&["-E", "-e", "a+"], &plus), "");
+	// After `` \` `` at the start, a `\{` that opens no interval is text, as
+	// grep reads it: these exclude only the paths that start with the brace.
+	let braces = [
+		("{,2}/a", 0, CREATED_FILE),
+		("/w/{,2}", 0, CREATED_FILE),
+		("{,}/b", 0, CREATED_FILE),
+		("/w/{,}", 0, CREATED_FILE),
+	];
+	assert_eq!(render(&["-e", r"\`\{,2\}"], &braces), "/w/{,2}\n{,}/b\n/w/{,}\n");
+	assert_eq!(render(&["-e", r"\`\{,\}"], &braces), "{,2}/a\n/w/{,2}\n/w/{,}\n");
 }
 
 /// Failure mode: `-b` prints one record per system event instead of one per

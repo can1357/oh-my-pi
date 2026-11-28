@@ -31,6 +31,7 @@
 - Fixed `Shell.abort()` sometimes doing nothing to a `Shell.run` that was queued behind another run on the same shell, leaving the command and its child processes running ([#17105](https://github.com/can1357/oh-my-pi/issues/17105))
 - Fixed the bash tool's built-in `rsync --timeout=N` skipping a keepalive while its sender waited on a quiet peer on a busy machine, which could end a healthy transfer with `rsync: [sender] io timeout after N seconds -- exiting` (code 30) ([#20763](https://github.com/can1357/oh-my-pi/pull/20763) by [@sjawhar](https://github.com/sjawhar))
 - Fixed Mermaid flowcharts drawing edges into a top-rank node, such as two back edges into it, as a straight line through other nodes' boxes and labels with no arrowhead; those edges now route around the nodes ([#20781](https://github.com/can1357/oh-my-pi/pull/20781) by [@loishi](https://github.com/loishi))
+- Fixed the builtin `grep`, `sed` and `nl` reading a backslash before an ordinary character as an engine escape: `\d` and `\x` now match `d` and `x` in `grep`, `\A` and `\z` match `A` and `z` in `sed`, and `` \` `` and `\'` with no repetition operator after them anchor at the start and the end in `grep` and `nl`, as in GNU grep and sed
 
 ## [19.2.1] - 2026-11-25
 

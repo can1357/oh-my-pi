@@ -1187,7 +1187,13 @@ fn compile_regex(
 	let translated = if context.regex_extended {
 		crate::bre::ere_to_rust(pattern, false)
 	} else {
-		crate::bre::bre_to_ere(pattern, crate::bre::Backrefs::Supported, crate::bre::StackedRepeats::Refused).map(std::borrow::Cow::Owned)
+		crate::bre::bre_to_ere(
+			pattern,
+			crate::bre::Backrefs::Supported,
+			crate::bre::StackedRepeats::Refused,
+			crate::bre::Haystack::Text,
+		)
+		.map(std::borrow::Cow::Owned)
 	}
 	.map_err(|e| e.gnu_message().to_string())?;
 	let multiline_classes;
@@ -3973,17 +3979,6 @@ pub fn parse_regex(
 					// In a regex `\b` is a word boundary, never a backspace; GNU sed
 					// omits the backspace escape for exactly this conflict.
 					result.push_str("\\b");
-					line.advance();
-					continue;
-				}
-				// GNU's buffer anchors, which match only at the very start and end
-				// of the pattern space, even in multiline mode.
-				if let Some(anchor) = match line.current() {
-					'`' => Some("\\A"),
-					'\'' => Some("\\z"),
-					_ => None,
-				} {
-					result.push_str(anchor);
 					line.advance();
 					continue;
 				}
