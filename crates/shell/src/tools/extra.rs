@@ -583,30 +583,52 @@ enum Candidate {
 }
 
 /// What `path` names as a command, as `execve` would take it: `None` for
-/// nothing, or for a script whose `#!` interpreter is missing (`ENOENT`);
-/// [`Candidate::Denied`] for a directory, a file without an execute bit, or a
-/// script whose interpreter cannot be executed (`EACCES`). A relative
+/// nothing; [`Candidate::Denied`] for a directory or a file without an execute
+/// bit (`EACCES`). Only on Linux is a script also refused for its `#!`
+/// interpreter ([`interpreted`]); elsewhere the run reports it.
+#[cfg(unix)]
+fn executable(path: PathBuf) -> Option<Candidate> {
+	if !runs(&std::fs::metadata(&path).ok()?) {
+		return Some(Candidate::Denied);
+	}
+	if cfg!(target_os = "linux") {
+		interpreted(path)
+	} else {
+		Some(Candidate::Runs(path))
+	}
+}
+
+/// Whether `meta` is a file with an execute bit.
+#[cfg(unix)]
+fn runs(meta: &std::fs::Metadata) -> bool {
+	use std::os::unix::fs::PermissionsExt as _;
+	meta.is_file() && meta.permissions().mode() & 0o111 != 0
+}
+
+/// The executable file `path` as Linux's `execve` takes its `#!`
+/// interpreter: `None` where the interpreter is missing (`ENOENT`),
+/// [`Candidate::Denied`] where it cannot be executed (`EACCES`). The
+/// interpreter is read as the kernel reads it, with a carriage return that
+/// ends the `#!` line ([`crate::sys::shebang::exec_interpreter`]). A relative
 /// interpreter, one the kernel takes as cut short (the kernel refuses it with
 /// `ENOEXEC`, and `execvp` runs it with `/bin/sh`), and any other failure are
 /// left to the run.
 #[cfg(unix)]
-fn executable(path: PathBuf) -> Option<Candidate> {
-	use std::os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _};
+fn interpreted(path: PathBuf) -> Option<Candidate> {
+	use std::os::unix::ffi::OsStrExt as _;
 
 	use crate::sys::shebang;
-	let runs = |meta: &std::fs::Metadata| meta.is_file() && meta.permissions().mode() & 0o111 != 0;
-	if !runs(&std::fs::metadata(&path).ok()?) {
-		return Some(Candidate::Denied);
-	}
 	let mut head = [0; shebang::HEAD_LEN];
 	let Ok(len) = shebang::read_head(&path, &mut head) else {
 		return Some(Candidate::Runs(path));
 	};
 	let head = &head[..len];
-	let Some(line) = shebang::parse(head).filter(|_| !shebang::interpreter_cut(head)) else {
+	let Some(interpreter) =
+		shebang::exec_interpreter(head).filter(|_| !shebang::interpreter_cut(head))
+	else {
 		return Some(Candidate::Runs(path));
 	};
-	let interpreter = std::path::Path::new(OsStr::from_bytes(line.interpreter));
+	let interpreter = std::path::Path::new(OsStr::from_bytes(interpreter));
 	if !interpreter.is_absolute() {
 		return Some(Candidate::Runs(path));
 	}
@@ -653,9 +675,9 @@ mod tests {
 	}
 
 	/// The lookup refuses a command as `execve` refuses it, before it runs: a
-	/// directory or a file without an execute bit cannot be executed, and a
-	/// script cannot run when its `#!` interpreter is missing or cannot be
-	/// executed itself.
+	/// directory or a file without an execute bit cannot be executed, and, on
+	/// Linux, a script cannot run when its `#!` interpreter is missing or cannot
+	/// be executed itself.
 	#[cfg(unix)]
 	#[test]
 	fn a_command_lookup_fails_as_execve_fails() {
@@ -674,6 +696,14 @@ mod tests {
 			// kernel takes the path as cut short and refuses the file with
 			// `ENOEXEC`, and `execvp` runs it with `/bin/sh`.
 			("long", format!("#!/{}\necho ran \"$@\"\n", "0".repeat(300))),
+			// The kernel splits the `#!` line on blanks only, so a carriage
+			// return that ends it is part of the interpreter's name: `crlf`
+			// names `/bin/sh\r`, which is missing, and `crlfi` names `i\r`,
+			// which runs. After a blank, the carriage return is the argument.
+			("crlf", "#!/bin/sh\r\necho hi\n".to_owned()),
+			("i\r", "#!/bin/sh\necho hi\n".to_owned()),
+			("crlfi", format!("#!{}\r\necho hi\n", root.join("i").display())),
+			("crlfsp", "#!/bin/sh \r\necho hi\n".to_owned()),
 		] {
 			let path = root.join(name);
 			std::fs::write(&path, text).unwrap();
@@ -684,18 +714,27 @@ mod tests {
 			cwd:    root.to_path_buf(),
 			config: ToolConfig::default(),
 		};
-		for (name, expected) in [
+		let mut rows = vec![
 			("./runs", Ok(())),
 			("./d", Err(ErrorKind::PermissionDenied)),
 			("./noexec", Err(ErrorKind::PermissionDenied)),
-			("./badint", Err(ErrorKind::NotFound)),
-			("./badint2", Err(ErrorKind::PermissionDenied)),
-			("./dirint", Err(ErrorKind::PermissionDenied)),
-			("./long", Ok(())),
 			// Searched on `PATH` as `execvp` searches it.
 			("d", Err(ErrorKind::PermissionDenied)),
-			("badint", Err(ErrorKind::NotFound)),
-		] {
+		];
+		// Only on Linux does the lookup read a script's `#!` interpreter.
+		if cfg!(target_os = "linux") {
+			rows.extend([
+				("./badint", Err(ErrorKind::NotFound)),
+				("./badint2", Err(ErrorKind::PermissionDenied)),
+				("./dirint", Err(ErrorKind::PermissionDenied)),
+				("./long", Ok(())),
+				("./crlf", Err(ErrorKind::NotFound)),
+				("./crlfi", Ok(())),
+				("./crlfsp", Ok(())),
+				("badint", Err(ErrorKind::NotFound)),
+			]);
+		}
+		for (name, expected) in rows {
 			let outcome = lookup
 				.program(&ShellCommand::new(vec![name.into()]))
 				.map(drop)

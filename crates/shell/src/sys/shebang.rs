@@ -62,22 +62,41 @@ pub enum Launch<'a> {
 
 /// Parse the `#!` line at the start of `head` (the first bytes of a file;
 /// only [`HEAD_LEN`] of them count). `None` without `#!` or interpreter.
+///
+/// A carriage return that ends the line is dropped; [`exec_interpreter`]
+/// keeps it, as the kernel does.
 pub fn parse(head: &[u8]) -> Option<Shebang<'_>> {
-	let head = &head[..head.len().min(HEAD_LEN)];
-	let line = head.strip_prefix(b"#!")?;
-	let line = line.find_byte(b'\n').map_or(line, |n| &line[..n]);
-	let line = line.strip_suffix(b"\r").unwrap_or(line);
-	let line = line.trim_start_with(|c| c == ' ' || c == '\t');
-	let end = line.find_byteset(b" \t").unwrap_or(line.len());
-	let (interp, rest) = line.split_at(end);
-	if interp.is_empty() {
-		return None;
-	}
+	let line = line(head)?;
+	let (interp, rest) = split(line.strip_suffix(b"\r").unwrap_or(line))?;
 	let rest = rest.trim_with(|c| c == ' ' || c == '\t');
 	Some(Shebang {
 		interpreter: interp.as_bstr(),
 		arg:         (!rest.is_empty()).then(|| rest.as_bstr()),
 	})
+}
+
+/// The `#!` interpreter `execve` looks up for a file starting with `head`.
+///
+/// Linux splits the `#!` line on blanks only, so unlike [`parse`] this keeps
+/// a carriage return that ends the line right after the interpreter:
+/// `#!/bin/sh\r` names `/bin/sh\r`. `None` without `#!` or interpreter.
+pub fn exec_interpreter(head: &[u8]) -> Option<&BStr> {
+	split(line(head)?).map(|(interp, _)| interp.as_bstr())
+}
+
+/// The `#!` line at the start of `head`, after `#!` and up to the newline;
+/// only [`HEAD_LEN`] bytes count.
+fn line(head: &[u8]) -> Option<&[u8]> {
+	let line = head[..head.len().min(HEAD_LEN)].strip_prefix(b"#!")?;
+	Some(line.find_byte(b'\n').map_or(line, |n| &line[..n]))
+}
+
+/// `line`'s first word (the blanks before it skipped) and the rest after it;
+/// `None` when the line has no word.
+fn split(line: &[u8]) -> Option<(&[u8], &[u8])> {
+	let line = line.trim_start_with(|c| c == ' ' || c == '\t');
+	let (word, rest) = line.split_at(line.find_byteset(b" \t").unwrap_or(line.len()));
+	(!word.is_empty()).then_some((word, rest))
 }
 
 /// Whether the Linux kernel takes the `#!` interpreter of a file starting
