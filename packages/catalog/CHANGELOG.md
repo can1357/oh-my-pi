@@ -15,7 +15,6 @@
 - Added `xai-oauth/grok-voice-transcribe-2.0` (SuperGrok speech-to-text on `api.x.ai/v1/stt`, through the new `xai-stt` runner API) ([#19184](https://github.com/can1357/oh-my-pi/pull/19184) by [@Xytronix](https://github.com/Xytronix))
 - Added Refuseless (`refuseless`) with abliterated and standard open-weight models, live model discovery from `https://api.refuseless.com/v1/models`, and `/login refuseless` (`REFUSELESS_API_KEY`)
 - Added `Model.voice` (default voice for speech models) and `Model.speechFormats` (the only audio containers a speech model returns), and moved `SPEECH_FORMATS`/`SpeechFormat` here from `@oh-my-pi/pi-ai` ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
-- Added the Straitly provider, including `/login straitly`, `STRAITLY_API_KEY` authentication, and live model discovery from `https://api.straitly.ai/v1/models`.
 - Added the Straitly provider, including `/login straitly`, `STRAITLY_API_KEY` authentication, and live model discovery from `https://api.straitly.ai/v1/models` ([#20777](https://github.com/can1357/oh-my-pi/pull/20777) by [@HashimSyedUBC](https://github.com/HashimSyedUBC)).
 - Added the ArkaneCloud provider, including `/login arkanecloud`, `ARKANECLOUD_API_KEY` authentication, and live model and pricing discovery per API key.
 - Added xAI SuperGrok speech-to-text support through `xai-oauth/grok-voice-transcribe-2.0`.
