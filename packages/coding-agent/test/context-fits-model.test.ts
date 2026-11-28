@@ -4,11 +4,15 @@
  * model that produced it, and only while its session replays native history,
  * so a different retry candidate is not charged the active model's replayed
  * reasoning, in the local floor or in the provider usage that carried it, while
- * the producing model still is.
+ * the producing model still is. Images likewise: a candidate whose requests
+ * carry text in place of each image is not charged the pixels the active
+ * model's request carried. The status count is the active model's figure, so
+ * it judges only the active model, and only when that model produced the usage
+ * it anchors on; any other candidate is judged by its own count.
  */
 import { describe, expect, it } from "bun:test";
-import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import { Agent, type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, ImageContent, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import { convertCodexResponsesMessages } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -53,9 +57,19 @@ function responsesTurn(producer: Model, text: string, timestamp: number): Assist
 const codexTurn = (text: string, timestamp: number) => responsesTurn(active, text, timestamp);
 
 /**
+ * A context window whose fit budget is at least `budgetTokens`: a window this
+ * size reserves 15% of itself, more than the configured 200 tokens.
+ */
+function windowFor(budgetTokens: number): number {
+	return Math.ceil(budgetTokens / 0.85);
+}
+
+/**
  * Maintenance over `messages`. Without `usageTokens` there is no provider usage,
  * so the local floor decides (rebuilt history); with it, provider usage anchored
  * to the active model's last request competes, as on the live retry path.
+ * `activeModel` defaults to the Codex model; `imagePlaceholder` is the agent's
+ * image policy (none: every request carries its images).
  */
 function maintenance(
 	messages: AgentMessage[],
@@ -63,19 +77,25 @@ function maintenance(
 		usageTokens?: number;
 		providerSessionState?: Map<string, ProviderSessionState>;
 		sessionManager?: SessionManager;
+		activeModel?: Model;
+		imagePlaceholder?: (model: Model) => string | undefined;
 	} = {},
 ): SessionMaintenance {
-	const agent = new Agent({ initialState: { model: active, systemPrompt: [], tools: [], messages } });
+	const activeModel = options.activeModel ?? active;
+	const agent = new Agent({
+		initialState: { model: activeModel, systemPrompt: [], tools: [], messages },
+		imagePlaceholder: options.imagePlaceholder,
+	});
 	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
 	const host = {
 		agent,
 		settings: Settings.isolated({ "compaction.reserveTokens": 200 }),
-		model: () => active,
+		model: () => activeModel,
 		messages: () => agent.state.messages,
 		nonMessageTokenSource: () => ({}),
 		providerSessionState: options.providerSessionState,
 		sessionManager,
-		buildDisplaySessionContext: (model: Model = active) => sessionManager.buildSessionContext({ model }),
+		buildDisplaySessionContext: (model: Model = activeModel) => sessionManager.buildSessionContext({ model }),
 		getContextUsage: ({ contextWindow }: { contextWindow: number }) =>
 			options.usageTokens === undefined
 				? undefined
@@ -95,7 +115,7 @@ describe("SessionMaintenance.contextFitsModel", () => {
 		expect(maintenance([turn]).contextFitsModel({ ...active, contextWindow: 2_000 })).toBe(false);
 	});
 
-	it("moves provider usage off the reasoning the active model's request replayed", () => {
+	it("judges a candidate by its own count, not the usage that carried the active model's replayed reasoning", () => {
 		const earlier = codexTurn("Important conclusion.", 1);
 		const retained: AgentMessage[] = [
 			{ role: "user", content: "Question?", timestamp: 0 },
@@ -109,7 +129,7 @@ describe("SessionMaintenance.contextFitsModel", () => {
 		expect(maintenance(retained, { usageTokens }).contextFitsModel({ ...active, contextWindow: 2_000 })).toBe(false);
 	});
 
-	it("moves provider usage off a replay with no reported reasoning tokens at its signature price", () => {
+	it("judges a candidate by its own count when the active model's replay reported no reasoning tokens", () => {
 		const unreported: AssistantMessage = {
 			...codexTurn("Important conclusion.", 1),
 			content: [
@@ -187,5 +207,146 @@ describe("SessionMaintenance.contextFitsModel", () => {
 		expect(maintenance(live, { sessionManager }).contextFitsModel(claude)).toBe(false);
 		// Leaving the failed turn out still counts the earlier reply Claude would be sent.
 		expect(maintenance(live, { sessionManager }).contextFitsModel(claude, failed)).toBe(false);
+	});
+
+	it("does not charge a text-only candidate the pixels the active model's usage paid for", () => {
+		const vision = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const notice = "[image omitted: the active model does not support image input]";
+		// The SDK's policy: a model that cannot read images gets a notice in place of each.
+		const imagePlaceholder = (model: Model) => (model.input.includes("image") ? undefined : notice);
+		// Unreadable dimensions: each is charged at the reader's full image rate.
+		const screenshot: ImageContent = { type: "image", data: "A".repeat(40_000), mimeType: "image/png" };
+		const answer: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "Two screenshots of the build log." }],
+			api: vision.api,
+			provider: vision.provider,
+			model: vision.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const retained: AgentMessage[] = [
+			{
+				role: "user",
+				content: [{ type: "text", text: "What do these show?" }, screenshot, screenshot],
+				timestamp: 0,
+			},
+			answer,
+			{ role: "user", content: "And then?", timestamp: 2 },
+		];
+		// The vision model's last prompt carried both screenshots' pixels.
+		const usageTokens = new Tokenizer(vision).countMessages(retained);
+		const options = { usageTokens, activeModel: vision, imagePlaceholder };
+		// A text-only fallback is another model than the active one.
+		const textOnly: Model = { ...vision, id: `${vision.id}-text-only`, input: ["text"], contextWindow: 2_000 };
+
+		expect(maintenance(retained, options).contextFitsModel(textOnly)).toBe(true);
+		// Control: a vision model with the same window is sent the pixels, which its 1,700-token budget cannot hold.
+		expect(maintenance(retained, options).contextFitsModel({ ...vision, contextWindow: 2_000 })).toBe(false);
+	});
+
+	// After a switch to a cheaper vision model with no reply since, the status
+	// count still anchored on the dearer model's usage. That figure is neither
+	// model's request: the model that produced the usage is no longer active,
+	// and the active one did not produce it, so each is judged by its own count.
+	it("judges each model by its own count after a switch away from the model that produced the usage", () => {
+		const opus = getBundledModel("anthropic", "claude-opus-4-8");
+		const sonnet = getBundledModel("anthropic", "claude-sonnet-4-5");
+		expect(new Tokenizer(opus).imageTokens(null)).toBeGreaterThan(new Tokenizer(sonnet).imageTokens(null));
+		const screenshot: ImageContent = { type: "image", data: "A".repeat(40_000), mimeType: "image/png" };
+		const retained: AgentMessage[] = [
+			{
+				role: "user",
+				content: [{ type: "text", text: "What do these show?" }, screenshot, screenshot],
+				timestamp: 0,
+			},
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "Two screenshots of the build log." }],
+				api: opus.api,
+				provider: opus.provider,
+				model: opus.id,
+				usage: {
+					input: 1_000,
+					output: 10,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 1_010,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: 1,
+			},
+			{ role: "user", content: "And then?", timestamp: 2 },
+		];
+		// Opus answered last, so the usage prices both screenshots at its rate; then Sonnet took over.
+		const opusTokens = new Tokenizer(opus).countMessages(retained);
+		const sonnetTokens = new Tokenizer(sonnet).countMessages(retained);
+		const options = { usageTokens: opusTokens, activeModel: sonnet };
+		const fits = (model: Model, budgetTokens: number) =>
+			maintenance(retained, options).contextFitsModel({ ...model, contextWindow: windowFor(budgetTokens) });
+
+		expect(fits(opus, opusTokens + 50)).toBe(true);
+		expect(fits(sonnet, sonnetTokens + 50)).toBe(true);
+		// Controls: 100 tokens short, each model's own count still rules it out.
+		expect(fits(opus, opusTokens - 100)).toBe(false);
+		expect(fits(sonnet, sonnetTokens - 100)).toBe(false);
+	});
+
+	// The status count prices everything after the usage it anchors on at the
+	// active model's rate. Opus failed and Sonnet answered; Opus took back over,
+	// was sent two screenshots and failed again. Anchored on Sonnet's reply, the
+	// figure priced the screenshots as Opus does and kept Sonnet out of a window
+	// its own count fits.
+	it("judges a candidate that is not the active model by its own count, even when it produced the usage", () => {
+		const opus = getBundledModel("anthropic", "claude-opus-4-8");
+		const sonnet = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const screenshot: ImageContent = { type: "image", data: "A".repeat(40_000), mimeType: "image/png" };
+		const question: AgentMessage = { role: "user", content: "Why does the build fail?", timestamp: 0 };
+		const sonnetReply: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "Send me the build log." }],
+			api: sonnet.api,
+			provider: sonnet.provider,
+			model: sonnet.id,
+			usage: {
+				input: 1_000,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_010,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		};
+		const screenshots: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: "Here is the log." }, screenshot, screenshot],
+			timestamp: 2,
+		};
+		const retained = [question, sonnetReply, screenshots];
+		// Sonnet's usage covers its own reply; the active model, Opus, counted the screenshots after it.
+		const usageTokens =
+			new Tokenizer(sonnet).countMessages([question, sonnetReply]) + new Tokenizer(opus).countMessage(screenshots);
+		const sonnetTokens = new Tokenizer(sonnet).countMessages(retained);
+		expect(usageTokens).toBeGreaterThan(sonnetTokens + 50);
+		const options = { usageTokens, activeModel: opus };
+
+		expect(
+			maintenance(retained, options).contextFitsModel({ ...sonnet, contextWindow: windowFor(sonnetTokens + 50) }),
+		).toBe(true);
+		// Control: 100 tokens short, Sonnet's own count rules it out.
+		expect(
+			maintenance(retained, options).contextFitsModel({ ...sonnet, contextWindow: windowFor(sonnetTokens - 100) }),
+		).toBe(false);
 	});
 });

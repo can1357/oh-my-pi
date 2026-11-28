@@ -5,7 +5,8 @@
  * a summary of the branch being left so context isn't lost.
  */
 
-import type { Api, ApiKey, AssistantMessage, Context, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import type { Api, ApiKey, AssistantMessage, Context, Message, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import { messageContentText } from "@oh-my-pi/pi-ai/dialect/rendering";
 import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -79,7 +80,11 @@ export interface GenerateBranchSummaryOptions {
 	reserveTokens?: number;
 	/** Optional metadata forwarded to the underlying API request (e.g. user_id for session attribution). */
 	metadata?: Record<string, unknown>;
-	/** Convert app-specific messages before serializing the branch summary prompt. */
+	/**
+	 * Convert app-specific messages before serializing the branch summary
+	 * prompt. The token budget counts each message as converted, so text put in
+	 * place of an image (an image description) is charged at its length.
+	 */
 	convertToLlm?: ConvertToLlm;
 	/**
 	 * Optional telemetry handle. When provided, the branch summary LLM call is
@@ -208,25 +213,46 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 }
 
 /**
- * Tokens `message` adds to the summarizer's input, which is the branch
- * serialized as plain text: tool results truncated as serialization truncates
- * them, assistants without their native replay items or opaque reasoning
- * payloads, which the text never carries.
+ * What the summarizer's transcript carries for an image block its converter
+ * keeps: the dialect renderers write each as an `[Image: <mime>]` marker,
+ * never its pixels.
  */
-function estimateBranchSummaryTokens(message: AgentMessage, tokenizer: Tokenizer): number {
-	if (message.role === "assistant") {
-		return tokenizer.countMessage({ ...message, providerPayload: undefined }, { excludeEncryptedReasoning: true });
+const TRANSCRIPT_IMAGE = messageContentText([{ type: "image", mimeType: "image/png" }]);
+
+/**
+ * Tokens the summarizer's input spends on `sent`, messages `convertToLlm`
+ * produced, which the request serializes as plain text: an image the
+ * converter replaced with text (a host's image description) counts that text,
+ * any other image `tokenizer`'s {@link Tokenizer.imagePlaceholder}; tool
+ * results truncated as serialization truncates them; assistants without their
+ * native replay items or opaque reasoning payloads, which the text never
+ * carries.
+ */
+function countSummaryInput(sent: readonly Message[], tokenizer: Tokenizer): number {
+	let tokens = 0;
+	for (const message of sent) {
+		if (message.role === "assistant") {
+			tokens += tokenizer.countMessage(
+				{ ...message, providerPayload: undefined },
+				{ excludeEncryptedReasoning: true },
+			);
+			continue;
+		}
+		if (message.role !== "toolResult") {
+			tokens += tokenizer.countMessage(message);
+			continue;
+		}
+		const text = message.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map(c => c.text)
+			.join("");
+		if (!text) continue;
+		tokens += tokenizer.countMessage({
+			...message,
+			content: [{ type: "text", text: truncateToolResultForSummary(text) }],
+		});
 	}
-	if (message.role !== "toolResult") return tokenizer.countMessage(message);
-	const text = message.content
-		.filter((c): c is { type: "text"; text: string } => c.type === "text")
-		.map(c => c.text)
-		.join("");
-	if (!text) return 0;
-	return tokenizer.countMessage({
-		...message,
-		content: [{ type: "text", text: truncateToolResultForSummary(text) }],
-	});
+	return tokens;
 }
 
 /**
@@ -240,14 +266,20 @@ function estimateBranchSummaryTokens(message: AgentMessage, tokenizer: Tokenizer
  * - Existing branch_summary entries' details (for cumulative tracking)
  *
  * @param entries - Entries in chronological order
+ * @param tokenizer - Counts what the summarizer reads: {@link generateBranchSummary}
+ *   builds one that counts each image left in the transcript as its {@link TRANSCRIPT_IMAGE} marker
  * @param tokenBudget - Maximum tokens to include (0 = no limit)
+ * @param convertToLlm - The conversion the summary request applies, so the branch is counted as sent
  */
 export function prepareBranchEntries(
 	entries: SessionEntry[],
 	tokenizer: Tokenizer,
 	tokenBudget: number = 0,
+	convertToLlm: ConvertToLlm = defaultConvertToLlm,
 ): BranchPreparation {
 	const messages: AgentMessage[] = [];
+	/** What each of `messages` costs converted alone. */
+	const messageTokens: number[] = [];
 	const fileOps = snapcompact.createFileOps();
 	let totalTokens = 0;
 
@@ -278,7 +310,7 @@ export function prepareBranchEntries(
 		// Extract file ops from assistant messages (tool calls)
 		extractFileOpsFromMessage(message, fileOps);
 
-		const tokens = estimateBranchSummaryTokens(message, tokenizer);
+		const tokens = countSummaryInput(convertToLlm([message]), tokenizer);
 
 		// Check budget before adding
 		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
@@ -286,6 +318,7 @@ export function prepareBranchEntries(
 			if (entry.type === "compaction" || entry.type === "branch_summary") {
 				if (totalTokens < tokenBudget * 0.9) {
 					messages.unshift(message);
+					messageTokens.unshift(tokens);
 					totalTokens += tokens;
 				}
 			}
@@ -294,7 +327,22 @@ export function prepareBranchEntries(
 		}
 
 		messages.unshift(message);
+		messageTokens.unshift(tokens);
 		totalTokens += tokens;
+	}
+
+	// The request converts the selected rows together, where a converter can emit text no row converts to
+	// alone (the coding-agent's saved `live-ended` notice, sent once the delegation it closes is selected
+	// too). Drop the oldest rows until the transcript as sent fits as well. The per-row total stays the
+	// allowance when it is larger, so a summary entry admitted past the budget above is not dropped for it.
+	if (tokenBudget > 0) {
+		while (
+			messages.length > 0 &&
+			countSummaryInput(convertToLlm(messages), tokenizer) > Math.max(tokenBudget, totalTokens)
+		) {
+			messages.shift();
+			totalTokens -= messageTokens.shift() ?? 0;
+		}
 	}
 
 	return { messages, fileOps, totalTokens };
@@ -319,13 +367,14 @@ export async function generateBranchSummary(
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
 	const { model, apiKey, signal, customInstructions, reserveTokens = 16384, metadata } = options;
+	const convertToLlm = options.convertToLlm ?? defaultConvertToLlm;
 
 	// Token budget = context window minus reserved space for prompt + response
 	const contextWindow = model.contextWindow || 128000;
 	const tokenBudget = contextWindow - reserveTokens;
-	const tokenizer = new Tokenizer(model);
+	const tokenizer = new Tokenizer(model, { imagePlaceholder: TRANSCRIPT_IMAGE });
 
-	const { messages: branchMessages, fileOps } = prepareBranchEntries(entries, tokenizer, tokenBudget);
+	const { messages: branchMessages, fileOps } = prepareBranchEntries(entries, tokenizer, tokenBudget, convertToLlm);
 
 	if (branchMessages.length === 0) {
 		return { summary: "No content to summarize" };
@@ -343,7 +392,7 @@ export async function generateBranchSummary(
 
 	// Transform to LLM-compatible messages, then serialize to text
 	// Serialization prevents the model from treating it as a conversation to continue
-	const llmMessages = (options.convertToLlm ?? defaultConvertToLlm)(messages);
+	const llmMessages = convertToLlm(messages);
 	const conversationText = serializeConversationForSummary(
 		llmMessages,
 		preferredDialect(model.id),

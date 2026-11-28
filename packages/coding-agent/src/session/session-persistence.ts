@@ -1,4 +1,5 @@
 import { isAnthropicServerToolHistoryBlock } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { isImageBlock } from "@oh-my-pi/pi-ai/types";
 import { countNewlines, isRecord, stringifyJson } from "@oh-my-pi/pi-utils";
 import { PRESERVE_KEY as SNAPCOMPACT_PRESERVE_KEY } from "@oh-my-pi/snapcompact";
 import {
@@ -37,17 +38,6 @@ function truncateString(value: string, maxLength: number): string {
 /** Detect strings damaged by an older persistence pass so loaders can migrate them safely. */
 export function isPersistenceTruncatedString(value: unknown): value is string {
 	return typeof value === "string" && value.endsWith(TRUNCATION_NOTICE);
-}
-
-export function isImageBlock(value: unknown): value is { type: "image"; data: string; mimeType?: string } {
-	return (
-		typeof value === "object" &&
-		value !== null &&
-		"type" in value &&
-		(value as { type?: string }).type === "image" &&
-		"data" in value &&
-		typeof (value as { data?: string }).data === "string"
-	);
 }
 
 function isImageMimeType(value: unknown): value is string {

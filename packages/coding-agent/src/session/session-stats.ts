@@ -40,6 +40,8 @@ interface PendingContextSnapshot {
 	 * compaction (older epoch) so the latter never out-ranks this snapshot.
 	 */
 	epoch: number;
+	/** The image policy (`Tokenizer.imagePlaceholder`) `promptTokens` was counted under. */
+	imagePlaceholder: string | undefined;
 }
 
 /** Capabilities the stats tracker borrows from its owning session. */
@@ -54,6 +56,24 @@ export interface SessionStatsTrackerHost {
 function correctedPromptTokens(assistant: AssistantMessage): number {
 	const providerPromptTokens = assistant.contextSnapshot?.promptTokens ?? calculatePromptTokens(assistant.usage);
 	return Math.max(0, providerPromptTokens - (assistant.contextSnapshot?.historyRewriteTokensRemoved ?? 0));
+}
+
+/**
+ * Key under which the host stamps an assistant reply with the image policy (`Tokenizer.imagePlaceholder`, or
+ * `null` for images sent) its request was converted under. The policy can change while the request is in
+ * flight, so the snapshot saved with the reply reads this instead of the live one.
+ */
+export const kRequestImagePlaceholder = Symbol("request-image-placeholder");
+
+/**
+ * Whether the provider prompt `assistant` reports charged each image as `tokenizer` counts it: as the same
+ * text in its place, or as pixels. Its usage cannot anchor a count under another image policy, such as after a
+ * switch to a model that cannot read images or a change to `images.blockImages`. A snapshot written before the
+ * policy was recorded is trusted.
+ */
+function sentImagesAsCounted(assistant: AssistantMessage, tokenizer: Tokenizer): boolean {
+	const recorded = assistant.contextSnapshot?.imagePlaceholder;
+	return recorded === undefined || (recorded ?? undefined) === tokenizer.imagePlaceholder;
 }
 
 function isUsageWindowBoundary(entry: SessionEntry): boolean {
@@ -319,6 +339,7 @@ export class SessionStatsTracker {
 		const useAnchor =
 			anchorAssistant !== undefined &&
 			anchorIndex !== -1 &&
+			sentImagesAsCounted(anchorAssistant, tokenizer) &&
 			(!pending || (anchorIndex >= pending.cutoffCount && anchorEpoch >= pending.epoch));
 		if (useAnchor && anchorAssistant) {
 			anchored = true;
@@ -331,7 +352,7 @@ export class SessionStatsTracker {
 				pendingTokens,
 				tokenizer,
 			);
-		} else if (pending) {
+		} else if (pending && pending.imagePlaceholder === tokenizer.imagePlaceholder) {
 			anchored = true;
 			usedTokens = this.#anchoredUsedTokens(
 				pending.promptTokens,
@@ -346,7 +367,7 @@ export class SessionStatsTracker {
 
 		if (!anchored && !pending && branchEntries.length === 0) {
 			const liveAnchor = findTranscriptUsageAnchor(activeMessages);
-			if (liveAnchor) {
+			if (liveAnchor && sentImagesAsCounted(liveAnchor.message, tokenizer)) {
 				usedTokens = this.#anchoredUsedTokens(
 					correctedPromptTokens(liveAnchor.message),
 					liveAnchor.message.contextSnapshot ?? current,
@@ -480,9 +501,16 @@ export class SessionStatsTracker {
 	}
 
 	/** Sets or clears the in-flight context snapshot. */
-	setPendingSnapshot(snapshot: Omit<PendingContextSnapshot, "epoch" | "toolSchemaTokens"> | undefined): void {
+	setPendingSnapshot(
+		snapshot: Omit<PendingContextSnapshot, "epoch" | "toolSchemaTokens" | "imagePlaceholder"> | undefined,
+	): void {
 		this.#pendingContextSnapshot = snapshot
-			? { ...snapshot, toolSchemaTokens: this.#currentToolSchemaTokens(), epoch: this.#compactionEpoch }
+			? {
+					...snapshot,
+					toolSchemaTokens: this.#currentToolSchemaTokens(),
+					epoch: this.#compactionEpoch,
+					imagePlaceholder: this.#tokenizer.imagePlaceholder,
+				}
 			: undefined;
 		this.#contextUsageRevision++;
 	}

@@ -127,6 +127,15 @@ export function renderHandoffSummaryContext(summary: string): string {
 	return prompt.render(HANDOFF_SUMMARY_TEMPLATE, { summary });
 }
 
+/**
+ * The text an `@file` mention sends for one file: its path and content in a
+ * `<file>` wrapper. A host's converter and `Tokenizer` both use it, so the
+ * count follows the wrapper the request carries.
+ */
+export function wrapFileMention(path: string, content: string): string {
+	return `<file path="${path}">${content ? `\n${content}\n` : "\n"}</file>`;
+}
+
 export function createBranchSummaryMessage(summary: string, fromId: string, timestamp: string): BranchSummaryMessage {
 	return {
 		role: "branchSummary",
