@@ -23,6 +23,7 @@ import {
 	replaceTabs,
 	sliceCells,
 	sliceColumns,
+	spaces,
 	truncate,
 	visibleWidth,
 	wrap,
@@ -35,6 +36,7 @@ import type { MediaState } from "../../forms/html-form/media";
 import { rasterLabel } from "../../transcript/figures/svg";
 import { type Active, type HtmlFormModel, isDropdown, OTHER_ROW } from "../../forms/html-form/model";
 import { foldPills } from "../../overlays/panels/ask-dialog";
+import type { LineState } from "../../overlays/settings/line-edit";
 import { defineAskCardLook } from "../panels/ask-dialog";
 import { bindingGlyph, boxRows } from "../panels/common";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
@@ -206,18 +208,16 @@ function paintEditorRow(theme: Theme, text: string, row: EditorRow, caret: numbe
 	);
 }
 
-/** Add an indented note, returning the row after its caret for viewport anchoring. */
-function appendNoteRows(
-	lines: string[],
-	theme: Theme,
-	{ text, cursor }: NonNullable<View["note"]>,
-	width: number,
-): number {
-	const rows = layoutText(text, textareaWrap(width));
+/** Add an editor, returning the row after its caret for viewport anchoring. */
+function appendWrappedEditorRows(lines: string[], theme: Theme, line: LineState, width: number): number {
+	const { text, cursor } = line;
+	const indent = Math.min(4, Math.max(0, width - 3));
+	const gutter = spaces(indent);
+	const rows = layoutText(text, editorWrapWidth(width, indent));
 	const caretRow = rowOf(rows, cursor);
 	const focusEnd = lines.length + caretRow + 1;
 	for (let i = 0; i < rows.length; i++) {
-		lines.push(`    ${paintEditorRow(theme, text, rows[i]!, i === caretRow ? cursor : undefined)}`);
+		lines.push(gutter + paintEditorRow(theme, text, rows[i]!, i === caretRow ? cursor : undefined));
 	}
 	return focusEnd;
 }
@@ -410,7 +410,7 @@ function optionRows(
 		if (view.note && view.note.field === index && view.note.option === row) {
 			const label = flattenLine(spansText(field.options[row]!.label));
 			lines.push(clip(`    ${theme.fg("muted", `Note for ${label} · ${noteEditHint(model)}`)}`, width));
-			column.focusEnd = appendNoteRows(lines, theme, view.note, width);
+			column.focusEnd = appendWrappedEditorRows(lines, theme, view.note, width);
 		}
 	}
 }
@@ -459,9 +459,9 @@ function dropdownRows(
 	return out;
 }
 
-/** Text columns past the textarea bar or note indent, leaving one cell for the caret at row end. */
-function textareaWrap(width: number): number {
-	return Math.max(1, width - 5);
+/** Text columns past the editor gutter, leaving one cell for the caret at row end. */
+function editorWrapWidth(width: number, indent = 4): number {
+	return Math.max(1, width - indent - 1);
 }
 
 /** One paint's textarea layouts by wrap width, then text: a paint builds the column several times. */
@@ -504,7 +504,7 @@ function openFieldLines(
 		if (view.note && view.note.field === index) {
 			const label = flattenLine(spansText(field.options[view.note.option]!.label));
 			const rows = [clip(`    ${theme.fg("muted", `Note for ${label} · ${noteEditHint(model)}`)}`, width)];
-			column.focusEnd = lines.length + appendNoteRows(rows, theme, view.note, width);
+			column.focusEnd = lines.length + appendWrappedEditorRows(rows, theme, view.note, width);
 			column.overlay = { at: lines.length, rows };
 		} else if (view.dropdown !== undefined) column.overlay = { at: lines.length, rows: [] };
 	} else {
@@ -515,7 +515,7 @@ function openFieldLines(
 			const text = answer.text.text;
 			const cursor = answer.text.cursor;
 			const room = Math.max(1, width - 4);
-			const rows = textareaRows(layouts, text, textareaWrap(width));
+			const rows = textareaRows(layouts, text, editorWrapWidth(width));
 			const caretRow = rowOf(rows, cursor);
 			const shown = Math.max(4, rows.length);
 			for (let r = 0; r < shown; r++) {
@@ -713,7 +713,7 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 		rows = Math.min(tallest(cx, look, inner - 1, view, layouts), limit) - skip.length;
 	}
 	// Up/Down in a textarea step through the rows drawn here.
-	model.wrapWidth = textareaWrap(overflow ? inner - 1 : inner);
+	model.wrapWidth = editorWrapWidth(overflow ? inner - 1 : inner);
 	const lines = column.lines;
 	// Only the picker waits for the viewport height; a note's rows were already written in buildColumn.
 	if (column.overlay && !view.note && view.dropdown !== undefined && typeof view.active === "number") {

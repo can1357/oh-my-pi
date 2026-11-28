@@ -246,6 +246,10 @@ test("wraps a long option note and keeps its caret on screen", () => {
 		expect(editing).toContain("Use the marked trail");
 		expect(editing).toContain("at sunrise.");
 		expect(model.note()?.line.text).toBe(LONG_NOTE);
+
+		term.press("end");
+		term.resize(10, 24);
+		expect(term.screen().some(row => row.includes(".▏"))).toBe(true);
 	} finally {
 		term.dispose();
 	}
