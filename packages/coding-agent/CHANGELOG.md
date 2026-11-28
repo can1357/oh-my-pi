@@ -44,7 +44,7 @@
 - Updated `/fast` to switch Devin models to their fast lanes; use `tier.devin: priority` to start sessions in fast mode.
 - Improved glob tool output with clearer search patterns and highlighted wildcards, character classes, and brace alternations.
 - Added `<mark>` highlighting and preserved rich text styling in terminal and Tern ask forms.
-- Learned (auto-learn managed) skills now record where they came from — the writing tool, created/updated dates, and the sessions and projects that taught them — in `x-omp-provenance` frontmatter; review them with `/skills learned` and delete one with `/skills forget <name>` ([#2189](https://github.com/can1357/oh-my-pi/issues/2189)) ([#20923](https://github.com/can1357/oh-my-pi/pull/20923) by [@Xytronix](https://github.com/Xytronix))
+- Learned (auto-learn managed) skills now record where they came from — the writing tool, created/updated dates, and the sessions and projects that taught them — in `x-omp-provenance` frontmatter; review them with `/skills learned` and delete one with `/skills forget <name>` ([#2189](https://github.com/can1357/oh-my-pi/issues/2189))
 - Added an opt-in GitLab integration (`gitlab.enabled`) for project, file, issue, merge request, discussion, search, worktree, and CI workflows, along with expanded `mr://` resources for merge request listings, cached overviews, and diff slices.
 - Included `tool_approvals` in `omp gc` session statistics and purge handling.
 - Added `local/parakeet-tdt-0.6b-v2`, the most accurate local English dictation model.
@@ -132,7 +132,7 @@
 ### Fixed
 
 - Fixed `manage_skill` (and `learn`'s skill payload) writing a skill with two frontmatter blocks when the body led with its own `---` block: a leading frontmatter block is stripped, the explicit `name`/`description` win, and the block's `description` is only a fallback ([#20923](https://github.com/can1357/oh-my-pi/pull/20923) by [@Xytronix](https://github.com/Xytronix))
-- `manage_skill` `update` now takes `description`, `body`, or both; an omitted field keeps its stored value, so a one-line change no longer resends the whole skill
+- `manage_skill` `update` now takes `description`, `body`, or both; an omitted field keeps its stored value, so a one-line change no longer resends the whole skill ([#20923](https://github.com/can1357/oh-my-pi/pull/20923) by [@Xytronix](https://github.com/Xytronix))
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer
 - Fixed stealth injection registry to preserve native function source strings across frames
 - In Tern, `/copy` and `/annotate session` share the same block picker on desktop and mobile. Clicking a side preview accepts the full item and closes the picker ([#20791](https://github.com/can1357/oh-my-pi/pull/20791) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
