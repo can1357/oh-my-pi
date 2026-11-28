@@ -230,6 +230,44 @@ describe("pruneSupersededToolResults: identical-result dedupe", () => {
 		for (const kept of [bigA, bigB, loopA, loopB, strB]) expect(text(kept[1])).toBe(STATUS_OUTPUT);
 	});
 
+	test("calls whose arguments JSON encodes lossily are never deduped, even when they spell alike", () => {
+		// Under JSON these collide in groups (`undefined` and symbol keys vanish,
+		// NaN and Infinity become null, -0 becomes 0, a hole becomes null), yet a
+		// tool receiving the raw values can tell every one apart.
+		const holey: number[] = [1];
+		holey[2] = 2;
+		const lossy: Record<string, unknown>[] = [
+			{ path: "src", flag: undefined },
+			{ path: "src", [Symbol("tag")]: 1 },
+			{ path: "src", limit: Number.NaN },
+			{ path: "src", limit: Number.POSITIVE_INFINITY },
+			{ path: "src", limit: null },
+			{ path: "src", limit: -0, list: holey },
+			{ path: "src", at: new Date(T0) },
+			{ path: "src", at: new Date(T0).toISOString() },
+		];
+		const entries: SessionEntry[] = [];
+		const lossyResults: SessionEntry[] = [];
+		let at = T0;
+		for (const args of lossy) {
+			const [call, res] = turn("lookup", args, STATUS_OUTPUT, (at += 1_000));
+			entries.push(call, res);
+			lossyResults.push(res);
+		}
+		// Plain JSON trees with the same spellings still dedupe.
+		const plainA = turn("lookup", { path: "src", limit: 0, list: [1, null, 2] }, STATUS_OUTPUT, (at += 1_000));
+		const plainB = turn("lookup", { list: [1, null, 2], limit: 0, path: "src" }, STATUS_OUTPUT, (at += 1_000));
+		// The distinct-input pair the lossy encoding would merge: own `undefined` vs absent.
+		const absent = turn("lookup", { path: "src" }, STATUS_OUTPUT, (at += 1_000));
+		const present = turn("lookup", { path: "src", flag: undefined }, STATUS_OUTPUT, (at += 1_000));
+
+		const pruned = dedupe([...entries, ...plainA, ...plainB, ...absent, ...present]);
+
+		expect(pruned.prunedCount).toBe(1);
+		expect(text(plainA[1])).toBe(dedupedNotice("lookup"));
+		for (const kept of [...lossyResults, plainB[1], absent[1], present[1]]) expect(text(kept)).toBe(STATUS_OUTPUT);
+	});
+
 	test("a schema replaced mid-session never strips `i` from calls its old schema owned", async () => {
 		// The MCP server first declares `i` (a page index); a `tools/list_changed`
 		// then replaces the same-named tool with a schema that does not.

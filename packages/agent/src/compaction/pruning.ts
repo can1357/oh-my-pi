@@ -486,7 +486,8 @@ export const MIN_DEDUPE_TOKENS = MIN_PRUNE_TOKENS;
  * may declare one) is a real input, and two calls that differ in it are
  * different calls. The live tools are never consulted, since an MCP
  * `tools/list_changed` can replace a schema after its calls ran. Nested `i`
- * keys are never harness intent.
+ * keys are never harness intent. A call whose arguments JSON cannot encode
+ * losslessly ({@link isLosslessJsonTree}) is never deduped.
  */
 function collectDuplicateResults(
 	entries: readonly SessionEntry[],
@@ -540,10 +541,17 @@ function collectDuplicateResults(
 				const { [INTENT_FIELD]: _intent, ...rest } = args;
 				args = rest;
 			}
-			// Arguments from extension hooks or host integrations need not be
-			// JSON-shaped (a bigint, a cycle). A result whose identity cannot be
-			// serialized is never deduped: skipping it cannot abort this
-			// per-turn pass, and no lossy encoding can merge two distinct calls.
+			// Arguments from extension hooks or host integrations reach the tool
+			// as raw JavaScript values, never through a JSON round-trip, so a tree
+			// JSON cannot spell losslessly (own `undefined`, NaN, a bigint, a
+			// cycle, a class instance) may mean something its JSON encoding does
+			// not: `{ v: undefined }` and `{}` stringify alike. Such a call is
+			// never deduped; skipping it cannot abort this per-turn pass and
+			// cannot merge two distinct calls.
+			if (!isLosslessJsonTree(args, [])) continue;
+			// Content blocks are what the model sees, so their JSON spelling is
+			// their identity; only an unserializable block (a stray bigint in an
+			// extra field) is skipped.
 			let identity: string;
 			try {
 				identity = stableStringifyJson([args, occurrence.message.content]);
@@ -586,6 +594,48 @@ function collectDuplicateResults(
 		}
 	}
 	return candidates.sort((a, b) => a.index - b.index);
+}
+
+/**
+ * Whether `JSON.stringify` encodes `value` without losing information a tool
+ * could observe: only strings, booleans, null, finite numbers other than -0,
+ * dense arrays without extra properties, and plain objects (prototype
+ * `Object.prototype` or null, no symbol keys) whose own values all qualify.
+ * Cycles are rejected via the `ancestors` stack; shared acyclic references are
+ * fine.
+ */
+function isLosslessJsonTree(value: unknown, ancestors: object[]): boolean {
+	if (value === null) return true;
+	switch (typeof value) {
+		case "string":
+		case "boolean":
+			return true;
+		case "number":
+			return Number.isFinite(value) && !Object.is(value, -0);
+		case "object":
+			break;
+		default:
+			return false;
+	}
+	const node = value as object;
+	if (ancestors.includes(node)) return false;
+	let children: unknown[];
+	if (Array.isArray(node)) {
+		// Holes and extra own keys both make the key count differ from length.
+		if (Object.keys(node).length !== node.length) return false;
+		children = node;
+	} else {
+		const proto = Object.getPrototypeOf(node);
+		if (proto !== Object.prototype && proto !== null) return false;
+		children = Object.values(node);
+	}
+	if (Object.getOwnPropertySymbols(node).length > 0) return false;
+	ancestors.push(node);
+	for (const child of children) {
+		if (!isLosslessJsonTree(child, ancestors)) return false;
+	}
+	ancestors.pop();
+	return true;
 }
 
 /**
