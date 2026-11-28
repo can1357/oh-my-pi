@@ -33,6 +33,7 @@
 - Added the `reports-aiu` catalog axis: hosts whose replies carry a server-reported AI-credit charge, so a reply without one counts as unknown spend; GitHub Copilot sets it for Messages and Responses ([#20667](https://github.com/can1357/oh-my-pi/issues/20667), [#20806](https://github.com/can1357/oh-my-pi/pull/20806) by [@wapenshaw](https://github.com/wapenshaw))
 - Added Factory Droid's Gemini 4 Neon (`gemini-4-neon`), listed once the account's `gemini_4_neon` feature flag enables it, with low, medium, high and xhigh thinking levels (default high), a 1,048,576-token context, Google's list price and Factory's 1.2× input credit rate ([#19841](https://github.com/can1357/oh-my-pi/issues/19841))
 - Added Factory Droid's Gemini 4 Hydrogen (`gemini-4-hydrogen`), listed once the account's `gemini_4_hydrogen` feature flag enables it, with low, medium, high and xhigh thinking levels (default high), a 1,000,000-token context, Google's list price and Factory's 0.6× input credit rate ([#19173](https://github.com/can1357/oh-my-pi/issues/19173))
+- Added `anthropic/claude-voice-stream` (`kind "stt"`, `anthropic-voice-stream` runner API): Claude subscription speech-to-text over Claude Code's `/voice` socket, OAuth only ([#19187](https://github.com/can1357/oh-my-pi/pull/19187) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 

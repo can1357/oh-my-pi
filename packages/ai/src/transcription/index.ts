@@ -1,15 +1,17 @@
 import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import * as AIError from "../error";
+import { transcribeAnthropicVoiceStream } from "./anthropic-voice-stream";
 import { transcribeOpenAI, type TranscriptionOptions } from "./openai-transcriptions";
 import type { TranscriptionRequest, TranscriptionResult } from "./types";
 import { transcribeXai } from "./xai-stt";
 
+export * from "./anthropic-voice-stream";
 export * from "./openai-transcriptions";
 export * from "./types";
 export * from "./xai-stt";
 
 /** Catalog APIs {@link transcribeAudio} serves; dictation and the gateway gate on these. */
-export const TRANSCRIPTION_APIS = ["openai-transcriptions", "xai-stt"] as const;
+export const TRANSCRIPTION_APIS = ["openai-transcriptions", "xai-stt", "anthropic-voice-stream"] as const;
 export type TranscriptionApi = (typeof TRANSCRIPTION_APIS)[number];
 
 /** Whether a catalog API transcribes audio through a cloud transport (local inference streams on-device). */
@@ -28,6 +30,8 @@ export function transcribeAudio(
 			return transcribeOpenAI(model, request, options);
 		case "xai-stt":
 			return transcribeXai(model, request, options);
+		case "anthropic-voice-stream":
+			return transcribeAnthropicVoiceStream(model, request, options);
 		default:
 			throw new AIError.ConfigurationError(`Unsupported transcription API: ${model.api}`);
 	}

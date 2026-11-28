@@ -76,6 +76,7 @@
 - Added the `agent_view_changed` extension event, fired when the TUI focuses a subagent or returns to the main session, so extensions can re-scope their status to the agent on screen ([#16546](https://github.com/can1357/oh-my-pi/issues/16546))
 - Added `model` and `fallback` attributes to `task` result envelopes so the parent sees which model served each subagent ([#16017](https://github.com/can1357/oh-my-pi/issues/16017))
 - Added a terminal notification when a plan is ready for approval, controlled by `completion.notify` ([#7724](https://github.com/can1357/oh-my-pi/issues/7724))
+- Dictation with a Claude subscription: set `modelRoles.dictation: anthropic/claude-voice-stream` to transcribe through the speech-to-text socket Claude Code's `/voice` uses, signed in with `/login anthropic`. Anthropic API keys cannot use it and fail with a message naming the required login ([#19187](https://github.com/can1357/oh-my-pi/pull/19187) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
