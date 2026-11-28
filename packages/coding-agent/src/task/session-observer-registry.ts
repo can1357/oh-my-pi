@@ -262,7 +262,8 @@ export class SessionObserverRegistry {
 						// heartbeat racing the terminal lifecycle frame) would otherwise leave a ghost row.
 						// Only a `started` lifecycle frame reopens a finished agent for its next turn; the
 						// settled snapshot itself still lands, since it carries the run's final totals.
-						const progressActive = progress.status === "pending" || progress.status === "running";
+						const status = progress.status;
+						const progressActive = status === "pending" || status === "running";
 						if (existing && existing.status !== "active" && progressActive) return;
 
 						const sortOrder = this.#ensureSortOrder(id);
@@ -287,7 +288,7 @@ export class SessionObserverRegistry {
 								label: progress.description ?? `Subagent #${payload.index}`,
 								agent: payload.agent,
 								description: progress.description,
-								status: progressActive ? "active" : (progress.status as ObservableSession["status"]),
+								status: progressActive ? "active" : status,
 								sessionFile: payload.sessionFile,
 								parentToolCallId: payload.parentToolCallId,
 								detached: payload.detached,

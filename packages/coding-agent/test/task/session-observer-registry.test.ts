@@ -5,7 +5,7 @@
  * flush can land after the terminal lifecycle frame), and none of those
  * orderings may leave a settled agent counted as active.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import {
 	type SubagentLifecyclePayload,
 	type SubagentProgressPayload,
@@ -55,6 +55,7 @@ describe("SessionObserverRegistry frame ordering", () => {
 	});
 
 	afterEach(() => {
+		setSystemTime();
 		registry.dispose();
 	});
 
@@ -77,15 +78,16 @@ describe("SessionObserverRegistry frame ordering", () => {
 		emitLifecycle("Straggler", "started");
 		emitProgress("Straggler", "running");
 		emitProgress("Straggler", "completed");
+		setSystemTime(1000);
 		emitLifecycle("Straggler", "completed");
-		const settledAt = registry.getSession("Straggler")?.lastUpdate;
 		// A running snapshot that lost the race to the terminal frame.
+		setSystemTime(2000);
 		emitProgress("Straggler", "running");
 
 		const session = registry.getSession("Straggler");
 		expect(session?.status).toBe("completed");
 		expect(session?.progress?.status).toBe("completed");
-		expect(session?.lastUpdate).toBe(settledAt);
+		expect(session?.lastUpdate).toBe(1000);
 		expect(registry.getActiveSubagentCount()).toBe(0);
 	});
 
