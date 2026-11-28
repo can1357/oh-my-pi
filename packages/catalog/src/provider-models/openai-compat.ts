@@ -1141,7 +1141,7 @@ export function openaiModelManagerOptions(config?: OpenAIModelManagerConfig): Mo
 	if (!fetchDiscovered) return options;
 	return {
 		...options,
-		fetchDynamicModels: async () => appendUnbundledSeedModels("openai", await fetchDiscovered()),
+		fetchDynamicModels: async signal => appendUnbundledSeedModels("openai", await fetchDiscovered(signal)),
 	};
 }
 
@@ -2185,8 +2185,8 @@ export function xaiOAuthModelManagerOptions(config?: XaiOAuthModelManagerConfig)
 	return {
 		...base,
 		staticModels,
-		fetchDynamicModels: async () => {
-			const dynamic = await inner();
+		fetchDynamicModels: async signal => {
+			const dynamic = await inner(signal);
 			return dynamic == null ? dynamic : applyXAIOAuthCuration(dynamic);
 		},
 	};

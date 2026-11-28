@@ -71,9 +71,10 @@ export function openaiCodexModelManagerOptions(
 		keepStaticNames: providerEntry("openai-codex")?.keepBundledNames === true,
 		...(resolveAccounts
 			? {
-					fetchDynamicModels: async () => {
+					fetchDynamicModels: async signal => {
+						if (signal?.aborted) return null;
 						const accounts = await resolveAccounts();
-						if (!accounts || accounts.length === 0) return null;
+						if (!accounts || accounts.length === 0 || signal?.aborted) return null;
 						const results = await Promise.all(
 							accounts.map(async account => ({
 								accountId: account.accountId,
@@ -82,6 +83,7 @@ export function openaiCodexModelManagerOptions(
 									accountId: account.accountId,
 									baseUrl,
 									clientVersion,
+									signal,
 									fetchFn: fetch,
 								}),
 							})),

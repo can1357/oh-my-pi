@@ -3986,8 +3986,8 @@ export class ModelRegistry {
 		const runtimeManager = startup ? this.#runtimeModelManagers.get(options.providerId)?.options : undefined;
 		let failure: string | undefined;
 		try {
-			const result = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
-				resolveProviderModels({ ...options, cacheDbPath: this.#cacheDbPath }, strategy, snapshots),
+			const result = await withModelDiscoveryTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, signal =>
+				resolveProviderModels({ ...options, cacheDbPath: this.#cacheDbPath }, strategy, snapshots, signal),
 			);
 			const models = result.models.map(model =>
 				model.provider === options.providerId ? model : { ...model, provider: options.providerId },

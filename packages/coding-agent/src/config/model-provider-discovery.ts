@@ -53,18 +53,27 @@ export function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiK
 }
 
 /**
- * Wraps a model-discovery operation with a hard timeout. Uses a cancellable
- * manual timer (not AbortSignal.timeout) so that a fast successful path does
- * not leave an armed timeout signal for concurrent GC. The inner operation
- * does not receive a signal because not every discovery contract accepts one.
+ * Wraps a model-discovery operation with a hard timeout and aborts an
+ * `AbortSignal` passed to `run` when the budget expires. Uses a cancellable
+ * manual timer (not `AbortSignal.timeout`) so that a fast successful path does
+ * not leave an armed timeout signal for concurrent GC.
  */
-export async function withModelDiscoveryTimeout<T>(timeoutMs: number, run: () => Promise<T>): Promise<T> {
+export async function withModelDiscoveryTimeout<T>(
+	timeoutMs: number,
+	run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+	const controller = new AbortController();
 	const { promise: timeoutPromise, reject: timeoutReject } = Promise.withResolvers<never>();
 	const timer = setTimeout(() => {
-		timeoutReject(new Error(`model discovery timed out after ${timeoutMs}ms`));
+		const error = new Error(`model discovery timed out after ${timeoutMs}ms`);
+		controller.abort(error);
+		timeoutReject(error);
 	}, timeoutMs);
 	try {
-		return await Promise.race([run(), timeoutPromise]);
+		const runPromise = Promise.resolve().then(() => run(controller.signal));
+		// Prevent an unhandled rejection if the aborted run settles after timeout.
+		runPromise.catch(() => {});
+		return await Promise.race([runPromise, timeoutPromise]);
 	} finally {
 		clearTimeout(timer);
 	}
