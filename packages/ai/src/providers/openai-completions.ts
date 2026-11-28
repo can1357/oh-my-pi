@@ -13,6 +13,7 @@ import {
 	parseStreamingJsonThrottled,
 	type ServerSentEvent,
 } from "@oh-my-pi/pi-utils";
+import { isUnresolvedBlobImage, UNRESOLVED_BLOB_IMAGE_PLACEHOLDER } from "../utils/blob-ref";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
@@ -2785,14 +2786,18 @@ export function convertMessages(
 							text,
 						} satisfies ChatCompletionContentPartText);
 					} else if (supportsImages) {
-						content.push({
-							type: "image_url",
-							image_url: {
-								url: item.url ?? `data:${item.mimeType};base64,${item.data}`,
-								// Chat Completions has no "original"; omit it (provider default).
-								...(item.detail && item.detail !== "original" ? { detail: item.detail } : {}),
-							},
-						} satisfies ChatCompletionContentPartImage);
+						if (isUnresolvedBlobImage(item.data) && !item.url) {
+							content.push({ type: "text", text: UNRESOLVED_BLOB_IMAGE_PLACEHOLDER });
+						} else {
+							content.push({
+								type: "image_url",
+								image_url: {
+									url: item.url ?? `data:${item.mimeType};base64,${item.data}`,
+									// Chat Completions has no "original"; omit it (provider default).
+									...(item.detail && item.detail !== "original" ? { detail: item.detail } : {}),
+								},
+							} satisfies ChatCompletionContentPartImage);
+						}
 					} else {
 						omittedImages = true;
 					}
@@ -3084,7 +3089,7 @@ export function convertMessages(
 			params.push(assistantMsg);
 		} else if (msg.role === "toolResult") {
 			// Batch consecutive tool results and collect all images
-			const imageBlocks: Array<{ type: "image_url"; image_url: { url: string } }> = [];
+			const imageBlocks: Array<ChatCompletionContentPartImage | ChatCompletionContentPartText> = [];
 			let j = i;
 
 			for (; j < transformedMessages.length && transformedMessages[j].role === "toolResult"; j++) {
@@ -3124,12 +3129,16 @@ export function convertMessages(
 				if (hasImages && supportsImages) {
 					for (const block of toolMsg.content) {
 						if (block.type === "image") {
-							imageBlocks.push({
-								type: "image_url",
-								image_url: {
-									url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
-								},
-							});
+							if (isUnresolvedBlobImage(block.data) && !block.url) {
+								imageBlocks.push({ type: "text", text: UNRESOLVED_BLOB_IMAGE_PLACEHOLDER });
+							} else {
+								imageBlocks.push({
+									type: "image_url",
+									image_url: {
+										url: block.url ?? `data:${block.mimeType};base64,${block.data}`,
+									},
+								});
+							}
 						}
 					}
 				}

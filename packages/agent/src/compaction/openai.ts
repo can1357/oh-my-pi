@@ -16,6 +16,7 @@
  */
 
 import { attach, create, Flag, ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { isUnresolvedBlobImage, UNRESOLVED_BLOB_IMAGE_PLACEHOLDER } from "@oh-my-pi/pi-ai/utils/blob-ref";
 import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { createOpenAICodexCompactionRequestContext } from "@oh-my-pi/pi-ai/providers/openai-codex-compaction";
 import {
@@ -660,6 +661,15 @@ export function buildOpenAiNativeHistory(
 						continue;
 					}
 					if (block.type === "image") {
+						// Unresolved `blob:sha256:` refs must not become poisoned data
+						// URLs (HTTP 400 on every later turn); degrade to a placeholder.
+						if (isUnresolvedBlobImage(block.data) && !block.url) {
+							contentBlocks.push({
+								type: "input_text",
+								text: UNRESOLVED_BLOB_IMAGE_PLACEHOLDER,
+							});
+							continue;
+						}
 						contentBlocks.push({
 							type: "input_image",
 							detail: "auto",

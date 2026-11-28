@@ -18,6 +18,7 @@ import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { resolveInlineImageByteBudget, resolveRequestBodyByteLimit } from "@oh-my-pi/pi-catalog/compat/request-size";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import { isUnresolvedBlobRef } from "@oh-my-pi/pi-ai/utils/blob-ref";
 import { capFrameDataBytes, frameDataBytesBudget, providerImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { declaredTools } from "../utils/tool-declarations";
@@ -462,6 +463,9 @@ async function unreadableImageReason(image: ImageContent): Promise<string | null
 	const key = `${image.mimeType}:${image.data.length}:${String(Bun.hash(image.data))}`;
 	const cached = imageDecodeFailures.get(key);
 	if (cached !== undefined) return cached;
+	// Fast-path unresolved blob references: decoding their text payload is
+	// meaningless, and the reason must say what the block actually is.
+	if (isUnresolvedBlobRef(image.data)) return "unresolved blob reference";
 	const reason = await imageDecodeFailureReason(image);
 	imageDecodeFailures.set(key, reason);
 	return reason;

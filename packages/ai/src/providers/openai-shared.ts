@@ -142,6 +142,7 @@ import {
 	setHeaderIfAbsent,
 } from "./inference-headers";
 import { isMalformedToolCallName, isValidToolCallId, transformMessages } from "./transform-messages";
+import { isUnresolvedBlobImage, UNRESOLVED_BLOB_IMAGE_PLACEHOLDER } from "../utils/blob-ref";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
 export interface OpenAIModelIdentity {
@@ -1973,10 +1974,16 @@ function clampResponsesImageDetail(
 	return resolved === "original" && !supportsImageDetailOriginal ? "auto" : resolved;
 }
 
-function convertResponsesInputImage(image: ImageContent, supportsImageDetailOriginal: boolean): ResponseInputImage {
+function convertResponsesInputImage(image: ImageContent, supportsImageDetailOriginal: boolean): ResponseInputContent {
 	const detail = clampResponsesImageDetail(image.detail, supportsImageDetailOriginal);
 	if (image.providerFile?.provider === "openai" && image.providerFile.id) {
 		return { type: "input_image", detail, file_id: image.providerFile.id };
+	}
+	// An unresolved `blob:sha256:` reference (bare or data-URL-wrapped) must
+	// never become a data URL: providers reject it with HTTP 400 and the ref
+	// persists in history, failing every later turn. Degrade to a placeholder.
+	if (isUnresolvedBlobImage(image.data)) {
+		return { type: "input_text", text: UNRESOLVED_BLOB_IMAGE_PLACEHOLDER };
 	}
 	return {
 		type: "input_image",
