@@ -788,10 +788,13 @@ describe("AgentSession handoff", () => {
 			details: {},
 		}));
 
+		// The provider's prompt, and the answer at the output it reported for it: the
+		// opaque reasoning payload is not charged at its byte size.
+		const anchoredTokens = 1_000 + seedAssistant.usage.output;
 		expect(session.getContextUsage({ contextWindow: 10_000 })).toMatchObject({
-			tokens: 1_000,
+			tokens: anchoredTokens,
 			contextWindow: 10_000,
-			percent: 10,
+			percent: (anchoredTokens / 10_000) * 100,
 		});
 
 		await session.prompt("small pending prompt");
@@ -873,9 +876,10 @@ describe("AgentSession handoff", () => {
 			details: {},
 		}));
 
-		// Display still shows the provider-anchored (deflated) usage — only the
-		// compaction decision takes the local floor.
-		expect(session.getContextUsage({ contextWindow: 10_000 })?.tokens).toBe(1_000);
+		// Display still shows the provider-anchored (deflated) usage, the answer
+		// counted at the output the provider reported for it — only the compaction
+		// decision takes the local floor.
+		expect(session.getContextUsage({ contextWindow: 10_000 })?.tokens).toBe(1_000 + seedAssistant.usage.output);
 
 		await session.prompt("small pending prompt");
 

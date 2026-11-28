@@ -129,9 +129,11 @@ describe("context snapshot capacity and savings", () => {
 		const data = buildSessionContextView(session);
 		const { breakdown } = data;
 		expect(totalTokens(data)).toBeGreaterThan(breakdown.contextWindow);
-		expect(breakdown.usedTokens).toBe(100);
+		// The provider's prompt, and the answer the next request carries on top of it.
+		const usedTokens = 100 + session.agent.tokenizer.countMessage(message);
+		expect(breakdown.usedTokens).toBe(usedTokens);
 		expect(breakdown.autoCompactBufferTokens).toBeGreaterThan(0);
-		expect(breakdown.freeTokens + breakdown.autoCompactBufferTokens).toBe(breakdown.contextWindow - 100);
+		expect(breakdown.freeTokens + breakdown.autoCompactBufferTokens).toBe(breakdown.contextWindow - usedTokens);
 	});
 });
 

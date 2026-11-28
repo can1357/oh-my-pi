@@ -315,15 +315,20 @@ export function calculateContextTokens(
 	return Math.max(0, raw - orchestrationTotal);
 }
 
+/**
+ * Whether {@link calculatePromptTokens} reads `usage`'s prompt buckets
+ * (`input`, `cacheRead`, `cacheWrite`), which leave out the turn's own output:
+ * it does unless the provider reported a context occupancy (`contextTokens`)
+ * or the buckets are empty, when it falls back to the turn's total.
+ */
+export function promptTokensOmitOutput(usage: Usage): boolean {
+	return usage.contextTokens === undefined && usage.input + usage.cacheRead + usage.cacheWrite > 0;
+}
+
 export function calculatePromptTokens(usage: Usage): number {
-	if (usage.contextTokens !== undefined) {
-		return Math.max(0, usage.contextTokens);
-	}
-	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-	if (promptTokens > 0) {
-		return promptTokens;
-	}
-	return calculateContextTokens(usage);
+	return promptTokensOmitOutput(usage)
+		? usage.input + usage.cacheRead + usage.cacheWrite
+		: calculateContextTokens(usage);
 }
 
 export function hasContextTokenUsage(usage: Usage): boolean {

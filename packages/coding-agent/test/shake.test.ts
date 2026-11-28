@@ -305,13 +305,16 @@ describe("AgentSession shake", () => {
 					.filter(entry => entry.type === "message")
 					.map(entry => entry.message as AgentMessage),
 			);
+			// The next request carries the anchor's answer too, counted at no more than
+			// the output the provider reported for it (here less than its text).
+			const anchorOutput = usage.output;
 			const before = session.getContextUsage()?.tokens;
-			expect(before).toBe(20_000);
+			expect(before).toBe(20_000 + anchorOutput);
 
 			const result = await session.shake("elide");
 
 			expect(result.tokensFreed).toBeGreaterThan(0);
-			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput - result.tokensFreed);
 			const anchor = sessionManager
 				.getBranch()
 				.findLast(
@@ -395,12 +398,14 @@ describe("AgentSession shake", () => {
 				timestamp: Date.now(),
 			});
 			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
-			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			// The anchor's answer counts at the output the provider reported for it, less than its text.
+			const anchorOutput = usage.output;
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput);
 
 			const result = await session.shake("elide");
 
 			expect(result.tokensFreed).toBeGreaterThan(0);
-			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput);
 			const anchor = sessionManager
 				.getBranch()
 				.findLast(entry => entry.type === "message" && entry.message.role === "assistant");
@@ -446,16 +451,19 @@ describe("AgentSession shake", () => {
 				timestamp: Date.now() - 1,
 			};
 			sessionManager.appendMessage(withImage);
-			sessionManager.appendMessage({
+			const latest: AssistantMessage = {
 				role: "assistant",
 				content: [{ type: "text", text: "latest answer" }],
 				...apiInfo,
 				stopReason: "stop",
 				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
 				timestamp: Date.now(),
-			});
+			};
+			sessionManager.appendMessage(latest);
 			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
-			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			// The next request carries the anchor's answer on top of its prompt.
+			const anchorOutput = session.agent.tokenizer.countMessage(latest);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput);
 
 			// What the image block alone costs: the same message with and without it.
 			const tokenizer = session.agent.tokenizer;
@@ -468,7 +476,7 @@ describe("AgentSession shake", () => {
 
 			expect(result.imagesDropped).toBe(1);
 			expect(result.tokensFreed).toBe(imageTokens);
-			expect(session.getContextUsage()?.tokens).toBe(20_000 - imageTokens);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput - imageTokens);
 		});
 
 		it("does not subtract post-anchor image tokens from the provider-anchored meter", async () => {
@@ -605,7 +613,7 @@ describe("AgentSession shake", () => {
 				noteId,
 			);
 			const keepId = sessionManager.appendCustomMessageEntry("project-fact", "keep this fact", false);
-			const anchorId = sessionManager.appendMessage({
+			const latest: AssistantMessage = {
 				role: "assistant",
 				content: [{ type: "text", text: "latest answer" }],
 				api: model.api,
@@ -614,8 +622,12 @@ describe("AgentSession shake", () => {
 				stopReason: "stop",
 				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
 				timestamp: Date.now(),
-			});
+			};
+			const anchorId = sessionManager.appendMessage(latest);
 			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			// The next request carries the anchor's answer on top of its prompt.
+			const anchorOutput = session.agent.tokenizer.countMessage(latest);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput);
 			expect(JSON.stringify(convertToLlm(session.agent.state.messages, model))).toContain(quote);
 			const rewrite = vi.spyOn(sessionManager, "rewriteEntries");
 
@@ -624,7 +636,7 @@ describe("AgentSession shake", () => {
 			expect(result.thinkingBlocksDropped).toBe(0);
 			expect(result.interruptedThinkingNotesDropped).toBe(1);
 			expect(result.tokensFreed).toBe(session.agent.tokenizer.countTokens(quote));
-			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput - result.tokensFreed);
 			expect(formatShakeSummary(result)).toContain("Dropped 1 interrupted-thinking note");
 			expect(JSON.stringify(session.agent.state.messages)).not.toContain(quote);
 			expect((await session.shake("thinking")).interruptedThinkingNotesDropped).toBe(0);
@@ -714,21 +726,24 @@ describe("AgentSession shake", () => {
 				timestamp: Date.now() - 1,
 			};
 			sessionManager.appendMessage(prior);
-			sessionManager.appendMessage({
+			const latest: AssistantMessage = {
 				role: "assistant",
 				content: [{ type: "text", text: "latest answer" }],
 				...apiInfo,
 				stopReason: "stop",
 				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
 				timestamp: Date.now(),
-			});
+			};
+			sessionManager.appendMessage(latest);
 			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
-			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			// The next request carries the anchor's answer on top of its prompt.
+			const anchorOutput = session.agent.tokenizer.countMessage(latest);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput);
 
 			const result = await session.shake("thinking");
 
 			expect(result.tokensFreed).toBeGreaterThan(0);
-			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput - result.tokensFreed);
 		});
 
 		it("does not credit thinking that the Responses request replays from native history", async () => {
@@ -763,7 +778,7 @@ describe("AgentSession shake", () => {
 				timestamp: Date.now() - 1,
 			};
 			sessionManager.appendMessage(prior);
-			sessionManager.appendMessage({
+			const latest: AssistantMessage = {
 				role: "assistant",
 				content: [{ type: "text", text: "latest answer" }],
 				api: model.api,
@@ -772,14 +787,17 @@ describe("AgentSession shake", () => {
 				stopReason: "stop",
 				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
 				timestamp: Date.now(),
-			});
+			};
+			sessionManager.appendMessage(latest);
 			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
-			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			// The next request carries the anchor's answer on top of its prompt.
+			const anchorOutput = session.agent.tokenizer.countMessage(latest);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput);
 
 			const result = await session.shake("thinking");
 
 			expect(result.tokensFreed).toBe(0);
-			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput);
 			expect(prior.content[0]?.type).toBe("thinking");
 			const wire = buildResponsesInput({
 				model,
@@ -855,7 +873,7 @@ describe("AgentSession shake", () => {
 				timestamp: Date.now() - 1,
 			});
 			sessionManager.appendMessage(replayed);
-			sessionManager.appendMessage({
+			const latest: AssistantMessage = {
 				role: "assistant",
 				content: [{ type: "text", text: "latest answer" }],
 				api: model.api,
@@ -864,9 +882,12 @@ describe("AgentSession shake", () => {
 				stopReason: "stop",
 				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
 				timestamp: Date.now(),
-			});
+			};
+			sessionManager.appendMessage(latest);
 			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
-			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			// The next request carries the anchor's answer on top of its prompt.
+			const anchorOutput = session.agent.tokenizer.countMessage(latest);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput);
 			const contentBefore = structuredClone(replayed.content);
 			const rewriteEntries = vi.spyOn(sessionManager, "rewriteEntries");
 			const replaceMessages = vi.spyOn(session.agent, "replaceMessages");
@@ -878,7 +899,7 @@ describe("AgentSession shake", () => {
 			expect(result.thinkingBlocksKept).toBe(1);
 			expect(result.tokensFreed).toBe(0);
 			expect(replayed.content).toEqual(contentBefore);
-			expect(session.getContextUsage()?.tokens).toBe(20_000);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 + anchorOutput);
 			// No rewrite at all: the transcript is what the wire already sends.
 			expect(rewriteEntries).not.toHaveBeenCalled();
 			expect(replaceMessages).not.toHaveBeenCalled();
@@ -1572,7 +1593,9 @@ describe("AgentSession shake", () => {
 			}));
 			vi.spyOn(session.agent, "prompt").mockImplementation(async () => {});
 
-			expect(session.getContextUsage({ contextWindow: 200_000 })?.tokens).toBe(1_000);
+			// The meter adds the anchor's answer at the output the provider reported
+			// for it, so it stays far below the stored conversation the floor counts.
+			expect(session.getContextUsage({ contextWindow: 200_000 })?.tokens).toBe(1_000 + seedAssistant.usage.output);
 
 			await session.prompt("small pending prompt", { skipCompactionCheck: true });
 
@@ -1617,10 +1640,14 @@ describe("AgentSession shake", () => {
 
 		const run = session.prompt("continue");
 		await toolEntered.promise;
-		expect(session.getContextUsage()?.tokens).toBe(50_000);
+		// The next request carries the tool call on top of its 50,000-token prompt.
+		const callTurn = session.agent.state.messages.findLast(message => message.role === "assistant");
+		if (!callTurn) throw new Error("Expected the tool-call turn");
+		const anchorOutput = session.agent.tokenizer.countMessage(callTurn);
+		expect(session.getContextUsage()?.tokens).toBe(50_000 + anchorOutput);
 		const result = await session.shake("elide");
 		expect(result.tokensFreed).toBeGreaterThan(0);
-		expect(session.getContextUsage()?.tokens).toBe(50_000 - result.tokensFreed);
+		expect(session.getContextUsage()?.tokens).toBe(50_000 + anchorOutput - result.tokensFreed);
 		releaseTool.resolve();
 		await run;
 
