@@ -8,6 +8,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { isCompiledBinary } from "@oh-my-pi/pi-utils/env";
+
+/** Source checkouts (including `bun link`) update through git, not the installer. */
+export function isSourceCheckout(): boolean {
+	return !isCompiledBinary() && !import.meta.dir.split(path.sep).includes("node_modules");
+}
 
 /**
  * Name of the app that manages the executable or engine directory at

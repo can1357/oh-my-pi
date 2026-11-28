@@ -65,7 +65,7 @@
 	"scripts": {
 		"setup": "bun scripts/setup.ts",
 		"dev": "bun --cwd=packages/coding-agent src/cli.ts",
-		"dev:timing": "PI_TIMING=x bun --cwd=packages/coding-agent --preload ../utils/src/module-timer.ts src/cli.ts",
+		"dev:timing": "PI_TIMING=x bun --cwd=packages/coding-agent src/cli.ts",
 		"stats": "bun --cwd=packages/coding-agent src/cli.ts stats",
 		"collab:web:dev": "bun --cwd=packages/collab-web run dev",
 		"collab:relay": "bun --cwd=packages/collab-web run relay",

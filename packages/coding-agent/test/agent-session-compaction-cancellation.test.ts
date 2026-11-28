@@ -230,12 +230,12 @@ describe.each([false, true])("AgentSession compaction cancellation source (exper
 			});
 			const originalWait = SessionMaintenance.prototype.waitForContextReplacement;
 			const flushStarted = Promise.withResolvers<void>();
-			vi.spyOn(SessionMaintenance.prototype, "waitForContextReplacement").mockImplementation(
-				function (this: SessionMaintenance) {
-					flushStarted.resolve();
-					return originalWait.call(this);
-				},
-			);
+			vi.spyOn(SessionMaintenance.prototype, "waitForContextReplacement").mockImplementation(function (
+				this: SessionMaintenance,
+			) {
+				flushStarted.resolve();
+				return originalWait.call(this);
+			});
 
 			const compaction = session.compact();
 			await entered.promise;

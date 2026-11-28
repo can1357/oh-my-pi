@@ -10,7 +10,11 @@ import {
 /** Fast-tier selection and effective computer-use settings shown by `/session info`. */
 export function sessionModeRows(session: AgentSession): [label: string, value: string][] {
 	const settings = session.settings;
-	const fast = session.isUltrafastModeEnabled() ? "Ultrafast" : session.isFastModeEnabled() ? "Fast (priority)" : "off";
+	const fast = session.isUltrafastModeEnabled()
+		? "Ultrafast"
+		: session.isFastModeEnabled()
+			? "Fast (priority)"
+			: "off";
 	const computerEnabled = cfgComputerEnabled.get(settings);
 	const computerActive = session.getEvalPreludes().some(definition => definition.name === "computer");
 	return [

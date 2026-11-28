@@ -1,5 +1,5 @@
 /** Per-user discovery for terminal clients; sidebar chats never publish an endpoint. */
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getBrowserRelayInstallRegistryFile } from "@oh-my-pi/pi-utils/dirs";
 import { getWslNetworkingMode } from "./wsl-networking";
@@ -12,14 +12,14 @@ function discoveryDir(): string {
 export async function publishRelayEndpoint(port: number): Promise<() => Promise<void>> {
 	const file = path.join(discoveryDir(), `${process.pid}-${port}`);
 	await Bun.write(file, "", { mode: 0o600 });
-	return () => fs.promises.unlink(file).catch(() => {});
+	return () => fs.unlink(file).catch(() => {});
 }
 
 // Mirrored loopback can reach Windows too. A live Linux PID is not proof that a
 // record belongs to a Linux relay: both namespaces can assign the same PID.
-function wslLoopbackListeners(): Map<number, string> {
+async function wslLoopbackListeners(): Promise<Map<number, string>> {
 	const listeners = new Map<number, string>();
-	for (const row of fs.readFileSync("/proc/net/tcp", "utf8").split("\n")) {
+	for (const row of (await fs.readFile("/proc/net/tcp", "utf8")).split("\n")) {
 		const [, address, , state, , , , , , inode] = row.trim().split(/\s+/, 10);
 		if (state === "0A" && address?.startsWith("0100007F:") && inode) {
 			listeners.set(Number.parseInt(address.slice(9), 16), `socket:[${inode}]`);
@@ -28,52 +28,52 @@ function wslLoopbackListeners(): Map<number, string> {
 	return listeners;
 }
 
-function ownsListener(pid: number, socket: string): boolean {
+async function ownsListener(pid: number, socket: string): Promise<boolean> {
 	const dir = `/proc/${pid}/fd`;
-	return fs.readdirSync(dir).some(fd => {
+	for (const fd of await fs.readdir(dir)) {
 		try {
-			return fs.readlinkSync(path.join(dir, fd)) === socket;
+			if ((await fs.readlink(path.join(dir, fd))) === socket) return true;
 		} catch {
-			return false;
+			// A descriptor can close between readdir and readlink.
 		}
-	});
+	}
+	return false;
 }
 
 /** Discover live local relay hosts, preferring the most recently started. */
-export function discoverRelayEndpoints(): string[] {
+export async function discoverRelayEndpoints(): Promise<string[]> {
 	const dir = discoveryDir();
 	let names: string[];
 	let listeners: Map<number, string> | undefined;
 	try {
-		names = fs.readdirSync(dir);
+		names = await fs.readdir(dir);
 		if (names.length) {
 			const mode = getWslNetworkingMode();
 			if (mode !== undefined && !/^(?:wsl1|nat|bridged|none|virtioproxy|consomme)$/.test(mode)) {
-				listeners = wslLoopbackListeners();
+				listeners = await wslLoopbackListeners();
 			}
 		}
 	} catch {
 		return [];
 	}
-	return names
-		.flatMap(name => {
-			const match = /^(\d+)-(\d+)$/.exec(name);
-			if (!match) return [];
-			const pid = Number(match[1]);
-			const port = Number(match[2]);
-			if (pid < 1 || port < 1 || port > 65535) return [];
-			try {
-				if (listeners) {
-					const socket = listeners.get(port);
-					if (!socket || !ownsListener(pid, socket)) return [];
-				} else {
-					process.kill(pid, 0);
-				}
-				return [{ port, started: fs.statSync(path.join(dir, name)).mtimeMs }];
-			} catch {
-				return [];
+	const live: { port: number; started: number }[] = [];
+	for (const name of names) {
+		const match = /^(\d+)-(\d+)$/.exec(name);
+		if (!match) continue;
+		const pid = Number(match[1]);
+		const port = Number(match[2]);
+		if (pid < 1 || port < 1 || port > 65535) continue;
+		try {
+			if (listeners) {
+				const socket = listeners.get(port);
+				if (!socket || !(await ownsListener(pid, socket))) continue;
+			} else {
+				process.kill(pid, 0);
 			}
-		})
-		.sort((a, b) => b.started - a.started)
-		.map(({ port }) => `http://127.0.0.1:${port}`);
+			live.push({ port, started: (await fs.stat(path.join(dir, name))).mtimeMs });
+		} catch {
+			// The host may have exited or retired its record.
+		}
+	}
+	return live.sort((a, b) => b.started - a.started).map(({ port }) => `http://127.0.0.1:${port}`);
 }

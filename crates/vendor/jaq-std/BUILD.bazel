@@ -24,6 +24,6 @@ rust_library(
         "noclippy",
         "norustfmt",
     ],
-    version = "3.0.3",
+    version = "3.0.4",
     deps = all_crate_deps(normal = True) + ["//crates/vendor/jaq-core"],
 )

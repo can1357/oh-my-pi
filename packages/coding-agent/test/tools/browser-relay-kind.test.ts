@@ -8,47 +8,47 @@ import { DISCARDED_TABS_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/tools
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 
 describe("resolveRelayKind", () => {
-	it("is disabled by default", () => {
-		expect(resolveRelayKind(null, {})).toBeNull();
-		expect(resolveRelayKind({}, {})).toBeNull();
+	it("is disabled by default", async () => {
+		expect(await resolveRelayKind(null, {})).toBeNull();
+		expect(await resolveRelayKind({}, {})).toBeNull();
 	});
 
-	it("resolves the default endpoint when the setting enables it", () => {
-		expect(resolveRelayKind({ settingEnabled: true }, {})).toEqual({
+	it("resolves the default endpoint when the setting enables it", async () => {
+		expect(await resolveRelayKind({ settingEnabled: true }, {})).toEqual({
 			kind: "relay",
-			cdpUrl: discoverRelayEndpoints()[0] ?? "",
+			cdpUrl: (await discoverRelayEndpoints())[0] ?? "",
 		});
 	});
 
-	it("uses the configured URL and trims trailing slashes", () => {
-		expect(resolveRelayKind({ settingEnabled: true, url: "http://127.0.0.1:9333///" }, {})).toEqual({
+	it("uses the configured URL and trims trailing slashes", async () => {
+		expect(await resolveRelayKind({ settingEnabled: true, url: "http://127.0.0.1:9333///" }, {})).toEqual({
 			kind: "relay",
 			cdpUrl: "http://127.0.0.1:9333",
 		});
 	});
 
-	it("falls back to the default endpoint for a blank URL", () => {
-		expect(resolveRelayKind({ settingEnabled: true, url: "   " }, {})).toEqual({
+	it("falls back to the default endpoint for a blank URL", async () => {
+		expect(await resolveRelayKind({ settingEnabled: true, url: "   " }, {})).toEqual({
 			kind: "relay",
-			cdpUrl: discoverRelayEndpoints()[0] ?? "",
+			cdpUrl: (await discoverRelayEndpoints())[0] ?? "",
 		});
 	});
 
-	it("PI_BROWSER_RELAY=0 disables the relay even when the setting enables it", () => {
-		expect(resolveRelayKind({ settingEnabled: true }, { PI_BROWSER_RELAY: "0" })).toBeNull();
+	it("PI_BROWSER_RELAY=0 disables the relay even when the setting enables it", async () => {
+		expect(await resolveRelayKind({ settingEnabled: true }, { PI_BROWSER_RELAY: "0" })).toBeNull();
 	});
 
-	it("PI_BROWSER_RELAY=only enables the relay when the setting is off", () => {
-		expect(resolveRelayKind({ settingEnabled: false }, { PI_BROWSER_RELAY: "only" })).toEqual({
+	it("PI_BROWSER_RELAY=only enables the relay when the setting is off", async () => {
+		expect(await resolveRelayKind({ settingEnabled: false }, { PI_BROWSER_RELAY: "only" })).toEqual({
 			kind: "relay",
-			cdpUrl: discoverRelayEndpoints()[0] ?? "",
+			cdpUrl: (await discoverRelayEndpoints())[0] ?? "",
 		});
 	});
 
-	it("PI_BROWSER_RELAY=1 enables the relay when the setting is off", () => {
-		expect(resolveRelayKind({ settingEnabled: false }, { PI_BROWSER_RELAY: "1" })).toEqual({
+	it("PI_BROWSER_RELAY=1 enables the relay when the setting is off", async () => {
+		expect(await resolveRelayKind({ settingEnabled: false }, { PI_BROWSER_RELAY: "1" })).toEqual({
 			kind: "relay",
-			cdpUrl: discoverRelayEndpoints()[0] ?? "",
+			cdpUrl: (await discoverRelayEndpoints())[0] ?? "",
 		});
 	});
 });
@@ -149,7 +149,7 @@ describe("browser prelude relay guidance", () => {
 			settings: Settings.isolated(settings),
 		}) as ToolSession;
 
-	it("tells the model an open without app drives the user's Chrome only while that is what it does", () => {
+	it("tells the model an open without app drives the user's Chrome only while that is what it does", async () => {
 		for (const [settings, env] of [
 			[{ "browser.relay": true }, undefined],
 			[{ "browser.relay": false }, undefined],
@@ -159,13 +159,13 @@ describe("browser prelude relay guidance", () => {
 			if (env === undefined) delete process.env.PI_BROWSER_RELAY;
 			else process.env.PI_BROWSER_RELAY = env;
 			const session = sessionWith(settings);
-			const onRelay = resolveBrowserKind({ action: "open" }, session).kind === "relay";
+			const onRelay = (await resolveBrowserKind({ action: "open" }, session)).kind === "relay";
 			const guidance = createBrowserPrelude(session).guidance;
 			expect(guidance?.includes('`app: "auto"` for a throwaway managed browser') ?? false).toBe(onRelay);
 		}
 	});
 
-	it('names the browser app: "auto" falls through to', () => {
+	it('names the browser app: "auto" falls through to', async () => {
 		const cases: {
 			settings: Record<string, unknown>;
 			env: Record<string, string>;
@@ -196,7 +196,7 @@ describe("browser prelude relay guidance", () => {
 			for (const key of ENV_KEYS) delete process.env[key];
 			Object.assign(process.env, env);
 			const session = sessionWith({ "browser.relay": true, ...settings });
-			expect(resolveBrowserKind({ action: "open", app: "auto" }, session).kind).toBe(kind);
+			expect((await resolveBrowserKind({ action: "open", app: "auto" }, session)).kind).toBe(kind);
 			const guidance = createBrowserPrelude(session).guidance;
 			expect(guidance).toContain(says);
 			expect(guidance).not.toContain("throwaway");
@@ -221,43 +221,43 @@ describe("resolveBrowserKind in a subagent", () => {
 		PI_BROWSER_WEBKIT: "0",
 	};
 
-	it("skips the relay, Tern and cmux the parent would use for an open without app", () => {
-		expect(resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }), pane).kind).toBe("headless");
-		expect(resolveBrowserKind({ action: "open" }, subagent({}), { ...pane, PI_BROWSER_RELAY: "1" }).kind).toBe(
+	it("skips the relay, Tern and cmux the parent would use for an open without app", async () => {
+		expect((await resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }), pane)).kind).toBe("headless");
+		expect((await resolveBrowserKind({ action: "open" }, subagent({}), { ...pane, PI_BROWSER_RELAY: "1" })).kind).toBe(
 			"headless",
 		);
 		expect(
-			resolveBrowserKind(
+			(await resolveBrowserKind(
 				{ action: "open" },
 				subagent({ "browser.relay": true, "browser.cdpUrl": "http://127.0.0.1:9222" }),
 				pane,
-			).kind,
+			)).kind,
 		).toBe("connected");
 	});
 
-	it("skips Tern and cmux even when PI_BROWSER_TERN=1 or PI_BROWSER_CMUX=1 forces them for the parent", () => {
+	it("skips Tern and cmux even when PI_BROWSER_TERN=1 or PI_BROWSER_CMUX=1 forces them for the parent", async () => {
 		const forced = { ...pane, PI_BROWSER_TERN: "1", PI_BROWSER_CMUX: "1" };
-		expect(resolveBrowserKind({ action: "open" }, subagent({}), forced).kind).toBe("headless");
+		expect((await resolveBrowserKind({ action: "open" }, subagent({}), forced)).kind).toBe("headless");
 		expect(
-			resolveBrowserKind({ action: "open" }, subagent({}), {
+			(await resolveBrowserKind({ action: "open" }, subagent({}), {
 				CMUX_SOCKET_PATH: "/tmp/cmux.sock",
 				PI_BROWSER_CMUX: "1",
 				PI_BROWSER_WEBKIT: "0",
-			}).kind,
+			})).kind,
 		).toBe("headless");
 	});
 
-	it("leaves a /tan clone (task depth 0) on its parent's defaults, which its copied prompt describes", () => {
-		expect(resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }, 0), pane).kind).toBe("relay");
+	it("leaves a /tan clone (task depth 0) on its parent's defaults, which its copied prompt describes", async () => {
+		expect((await resolveBrowserKind({ action: "open" }, subagent({ "browser.relay": true }, 0), pane)).kind).toBe("relay");
 	});
 
-	it("still opens the user's Chrome or Tern when the open asks", () => {
+	it("still opens the user's Chrome or Tern when the open asks", async () => {
 		const session = subagent({ "browser.relay": true });
-		expect(resolveBrowserKind({ action: "open", app: "relay" }, session, pane).kind).toBe("relay");
-		expect(resolveBrowserKind({ action: "open", app: "tern" }, session, pane).kind).toBe("tern");
-		expect(resolveBrowserKind({ action: "open", target: "docs" }, session, pane).kind).toBe("tern");
+		expect((await resolveBrowserKind({ action: "open", app: "relay" }, session, pane)).kind).toBe("relay");
+		expect((await resolveBrowserKind({ action: "open", app: "tern" }, session, pane)).kind).toBe("tern");
+		expect((await resolveBrowserKind({ action: "open", target: "docs" }, session, pane)).kind).toBe("tern");
 		expect(
-			resolveBrowserKind({ action: "open", app: "relay" }, session, { ...pane, PI_BROWSER_RELAY: "0" }).kind,
+			(await resolveBrowserKind({ action: "open", app: "relay" }, session, { ...pane, PI_BROWSER_RELAY: "0" })).kind,
 		).toBe("headless");
 	});
 
@@ -285,15 +285,15 @@ describe("relay-only sessions (PI_BROWSER_RELAY=only)", () => {
 			settings: Settings.isolated({}),
 		}) as ToolSession;
 
-	it("sends every open to the relay, a subagent's included", () => {
-		expect(resolveBrowserKind({ action: "open" }, sessionAt(0), only).kind).toBe("relay");
-		expect(resolveBrowserKind({ action: "open" }, sessionAt(1), only).kind).toBe("relay");
-		expect(resolveBrowserKind({ action: "open", app: "relay" }, sessionAt(1), only).kind).toBe("relay");
+	it("sends every open to the relay, a subagent's included", async () => {
+		expect((await resolveBrowserKind({ action: "open" }, sessionAt(0), only)).kind).toBe("relay");
+		expect((await resolveBrowserKind({ action: "open" }, sessionAt(1), only)).kind).toBe("relay");
+		expect((await resolveBrowserKind({ action: "open", app: "relay" }, sessionAt(1), only)).kind).toBe("relay");
 	});
 
-	it("refuses any other app", () => {
+	it("refuses any other app", async () => {
 		for (const app of ["auto", "own", "http://127.0.0.1:9222"]) {
-			expect(() => resolveBrowserKind({ action: "open", app }, sessionAt(0), only)).toThrow(
+			await expect(resolveBrowserKind({ action: "open", app }, sessionAt(0), only)).rejects.toThrow(
 				"This session drives the user's Chrome through the omp extension and has no other browser",
 			);
 		}

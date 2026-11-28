@@ -1,0 +1,63 @@
+// Spoof AudioContext latency values to look like real hardware.
+const audioLatencyAccessors = {
+  get baseLatency() {
+    return 0.005;
+  },
+  get outputLatency() {
+    return 0.01;
+  },
+  get sampleRate() {
+    return 48000;
+  },
+};
+
+const defineAudioGetter = (proto, name) => {
+  const descriptor = Object_getOwnPropertyDescriptor(audioLatencyAccessors, name);
+  if (!descriptor || !descriptor.get) return;
+  patchToString(descriptor.get, "get " + name);
+  Object_defineProperty(proto, name, {
+    get: descriptor.get,
+    configurable: true,
+    enumerable: true,
+  });
+};
+
+const spoofLatency = (proto) => {
+  defineAudioGetter(proto, "baseLatency");
+  defineAudioGetter(proto, "outputLatency");
+};
+
+if (window.AudioContext) {
+  spoofLatency(AudioContext.prototype);
+}
+
+if (window.OfflineAudioContext) {
+  const OriginalOfflineAudioContext = window.OfflineAudioContext;
+  const PatchedOfflineAudioContext = class OfflineAudioContext extends OriginalOfflineAudioContext {
+    constructor(numberOfChannels, length, sampleRate) {
+      super(numberOfChannels, length, sampleRate);
+
+      const originalStartRendering = this.startRendering.bind(this);
+      const patchedStartRendering = async function startRendering() {
+        const buffer = await originalStartRendering();
+        for (let c = 0; c < buffer.numberOfChannels; c++) {
+          const channel = buffer.getChannelData(c);
+          for (let i = 0; i < channel.length; i++) {
+            if (Math_random() < 0.001) {
+              channel[i] += (Math_random() - 0.5) * 1e-8;
+            }
+          }
+        }
+        return buffer;
+      };
+      patchToString(patchedStartRendering, "startRendering");
+      this.startRendering = patchedStartRendering;
+    }
+  };
+  patchToString(PatchedOfflineAudioContext, "OfflineAudioContext");
+  window.OfflineAudioContext = PatchedOfflineAudioContext;
+}
+
+if (window.AudioContext) {
+  defineAudioGetter(AudioContext.prototype, "sampleRate");
+}

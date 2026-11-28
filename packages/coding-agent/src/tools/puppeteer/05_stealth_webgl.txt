@@ -112,7 +112,10 @@ const webglGetContextProfile = (target, thisArg) => {
 const webglGetParameterHandler = {
 	apply(target, thisArg, args) {
 		const nativeValue = Reflect_apply(target, thisArg, args);
-		const param = args[0];
+		// WebGL's IDL coerces the enum, so `getParameter("37446")` is the same query: coerce before
+		// matching or a string argument returns the unmasked renderer.
+		const raw = args[0];
+		const param = typeof raw === "number" ? raw : Number(raw);
 		if (param === 0x1f00 && typeof nativeValue === "string") return "WebKit";
 		if (param === 0x1f01 && typeof nativeValue === "string") return "WebKit WebGL";
 		if ((param === 0x9245 || param === 0x9246) && typeof nativeValue === "string") {

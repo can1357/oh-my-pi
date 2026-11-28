@@ -78,7 +78,7 @@ impl Interp<'_> {
 	fn c3(&self, class: Rc<str>, active: &mut FxHashSet<Rc<str>>, done: &mut FxHashMap<Rc<str>, Vec<Rc<str>>>) -> Result<Vec<Rc<str>>, String> {
 		if let Some(path) = done.get(&class) { return Ok(path.clone()); }
 		if active.len() >= 512 || !active.insert(class.clone()) { return Err(format!("Recursive inheritance detected in package '{class}'")); }
-		let result = stacker::maybe_grow(128 * 1024, 2 * 1024 * 1024, || {
+		let result = crate::stack::guard(128 * 1024, || {
 			let parents = self.parents(&class);
 			let mut lines = Vec::with_capacity(parents.len() + 1);
 			for parent in &parents { lines.push((self.c3(parent.clone(), active, done)?, 0)); }
@@ -111,7 +111,7 @@ impl Interp<'_> {
 
 	fn next_method(&mut self, invocant: Sv, class: &str, op: &str, mut args: Vec<Sv>, cx: Cx) -> PResult<Ret> {
 		let called_from = self.frames.iter().rev().find_map(|frame| {
-			let name = frame.info.sub.as_deref()?;
+			let name = frame.name();
 			let (package, sub) = name.rsplit_once("::")?;
 			(sub != "__ANON__").then(|| (Rc::<str>::from(package), Rc::<str>::from(sub)))
 		});

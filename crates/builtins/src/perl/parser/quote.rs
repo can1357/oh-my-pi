@@ -17,9 +17,9 @@ impl Mode {
 
 impl<'s, 'h> Parser<'s, 'h> {
 	/// Build a compilation unit for raw runtime pattern bytes, retaining any Perl code groups.
-	pub(super) fn regex_eval_program(&mut self, src: &PStr, extended: bool) -> ResultOf<Program> {
+	pub(super) async fn regex_eval_program(&mut self, src: &PStr, extended: bool) -> ResultOf<Program> {
 		let location = self.lex.location();
-		let pattern = self.interpolate(&src.bytes, location.clone(), Mode::Pattern { extended, interpolate: false })?;
+		let pattern = self.interpolate(&src.bytes, location.clone(), Mode::Pattern { extended, interpolate: false }).await?;
 		let expr = Expr {
 			location: location.clone(),
 			cache: NodeCache::default(),
@@ -30,19 +30,19 @@ impl<'s, 'h> Parser<'s, 'h> {
 	}
 
 	/// Parse unprefixed strings, backticks or slash-delimited matches.
-	pub(super) fn symbolic_quote(&mut self, token: Token, symbol: u8) -> ResultOf<Expr> {
+	pub(super) async fn symbolic_quote(&mut self, token: Token, symbol: u8) -> ResultOf<Expr> {
 		self.bump();
 		self.lex.rewind(&token);
 		let location = token.location;
 		match symbol {
-			b'/' => self.regex(Builtin::Match, location),
+			b'/' => self.regex(Builtin::Match, location).await,
 			b'\'' => {
 				let quoted = self.scan(QuoteScan::Single, None)?;
 				Ok(self.simple_quote_value(quoted))
 			}
 			b'"' | b'`' => {
 				let quoted = self.scan(QuoteScan::Double, None)?;
-				let parts = self.interpolate(&quoted.bytes, quoted.location, Mode::String)?;
+				let parts = self.interpolate(&quoted.bytes, quoted.location, Mode::String).await?;
 				Ok(if symbol == b'`' { self.command_value(location, parts) } else { quote_value(location, QuoteKind::String, parts) })
 			}
 			_ => Err(self.diagnostic(location, "Search pattern not terminated".into())),
@@ -50,7 +50,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 	}
 
 	/// Parse a keyword-led quote-like term.
-	pub(super) fn word_quote(&mut self, op: Builtin, location: Location) -> ResultOf<Expr> {
+	pub(super) async fn word_quote(&mut self, op: Builtin, location: Location) -> ResultOf<Expr> {
 		self.lex.quote_gap(true);
 		match op {
 			Builtin::Q => {
@@ -86,10 +86,10 @@ impl<'s, 'h> Parser<'s, 'h> {
 				let literal = op == Builtin::Qx && self.lex.source.get(self.lex.pos) == Some(&b'\'');
 				let quoted = self.scan(if literal { QuoteScan::Single } else { QuoteScan::Double }, None)?;
 				let parts = if literal { vec![QuotePart::Literal(self.pstr(&quoted.bytes))] }
-				else { self.interpolate(&quoted.bytes, quoted.location, Mode::String)? };
+				else { self.interpolate(&quoted.bytes, quoted.location, Mode::String).await? };
 				Ok(if op == Builtin::Qx { self.command_value(location, parts) } else { quote_value(location, QuoteKind::String, parts) })
 			}
-			_ => self.regex(op, location),
+			_ => self.regex(op, location).await,
 		}
 	}
 
@@ -100,7 +100,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 	}
 
 	/// Parse angle-bracket reads and filename globs.
-	pub(super) fn angle(&mut self, token: Token) -> ResultOf<Expr> {
+	pub(super) async fn angle(&mut self, token: Token) -> ResultOf<Expr> {
 		self.bump();
 		self.lex.rewind(&token);
 		let quote = self.scan(QuoteScan::Double, None)?;
@@ -114,12 +114,12 @@ impl<'s, 'h> Parser<'s, 'h> {
 			let var = Expr { location: quote.location, cache: NodeCache::default(), kind: ExprKind::Variable(Sigil::Scalar, self.name(tail)) };
 			return Ok(Expr { location, cache: NodeCache::default(), kind: ExprKind::Readline(Readline::Scalar(Box::new(var))) });
 		}
-		let parts = self.interpolate(&quote.bytes, quote.location, Mode::String)?;
+		let parts = self.interpolate(&quote.bytes, quote.location, Mode::String).await?;
 		Ok(quote_value(location, QuoteKind::Glob, parts))
 	}
 
 	/// Parse a heredoc or the safe `<<>>` input operator.
-	pub(super) fn here(&mut self, token: Token) -> ResultOf<Expr> {
+	pub(super) async fn here(&mut self, token: Token) -> ResultOf<Expr> {
 		self.bump();
 		self.lex.rewind(&token);
 		self.lex.advance(token.start + 2);
@@ -134,7 +134,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		if here.kind == HereKind::Literal {
 			return Ok(Expr { location, cache: NodeCache::default(), kind: ExprKind::String(self.pstr(&here.bytes)) });
 		}
-		let parts = self.interpolate(&here.bytes, here.location, Mode::String)?;
+		let parts = self.interpolate(&here.bytes, here.location, Mode::String).await?;
 		Ok(if here.kind == HereKind::Command { self.command_value(location, parts) } else { quote_value(location, QuoteKind::String, parts) })
 	}
 
@@ -164,7 +164,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 		quote_value(location, QuoteKind::Command, parts)
 	}
 
-	fn regex(&mut self, builtin: Builtin, location: Location) -> ResultOf<Expr> {
+	async fn regex(&mut self, builtin: Builtin, location: Location) -> ResultOf<Expr> {
 		let tr = matches!(builtin, Builtin::Tr | Builtin::Y);
 		let sub = builtin == Builtin::Substitute;
 		let first = self.scan(if tr { QuoteScan::Transliterate } else { QuoteScan::Pattern }, None).map_err(|mut error| {
@@ -185,7 +185,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 			self.interpolate(&first.bytes, first.location.clone(), Mode::Pattern {
 				extended: modifiers.contains(&b'x'),
 				interpolate: first.delimiter != u32::from(b'\''),
-			})?
+			}).await?
 		};
 		let kind = if let Some(second) = second {
 			let first_literal = first.delimiter == u32::from(b'\'');
@@ -196,12 +196,12 @@ impl<'s, 'h> Parser<'s, 'h> {
 					literal_search: first_literal, literal_replacement: second_literal,
 				})
 			} else if let count @ 1.. = modifiers.iter().filter(|&&b| b == b'e').count() {
-				let block = self.replacement_block(&second.bytes, second.location)?;
+				let block = self.replacement_block(&second.bytes, second.location).await?;
 				RegexKind::SubstituteEval(block, count)
 			} else {
 				let replacement = if second_literal {
 					vec![QuotePart::Literal(self.pstr(&collapse_backslashes(&second.bytes)))]
-				} else { self.interpolate(&second.bytes, second.location, Mode::Replacement)? };
+				} else { self.interpolate(&second.bytes, second.location, Mode::Replacement).await? };
 				RegexKind::Substitute(replacement)
 			}
 		} else if builtin == Builtin::Qr { RegexKind::Compile }
@@ -231,25 +231,24 @@ impl<'s, 'h> Parser<'s, 'h> {
 		Ok(modifiers)
 	}
 
-	fn replacement_block(&mut self, src: &[u8], location: Location) -> ResultOf<Block> {
-		self.with_inner(src, &location, |inner| inner.scope(|inner| {
-			let stmts = inner.statements(false)?;
-			if inner.peek().kind != Kind::Eof { return Err(inner.error()); }
-			Ok(Block { location: location.clone(), stmts })
-		}))
-	}
-
-	fn with_inner<T>(&mut self, source: &[u8], location: &Location, f: impl FnOnce(&mut Parser<'_, '_>) -> ResultOf<T>) -> ResultOf<T> {
+	async fn replacement_block(&mut self, src: &[u8], location: Location) -> ResultOf<Block> {
 		let tail = self.lex.heredoc_tail();
 		let symbols = std::mem::take(&mut self.symbols);
-		let mut child = Parser::new(source, location.file.clone(), location.line, self.pkg.clone(), self.features, self.hooks);
+		let mut child = Parser::new(src, location.file.clone(), location.line, self.pkg.clone(), self.features, self.hooks);
 		child.lex.set_heredoc_tail(tail);
 		child.file = self.file.clone();
 		child.symbols = symbols;
 		child.string_eval = self.string_eval;
 		child.depth = self.depth;
 		child.tree_depth = self.depth;
-		let result = f(&mut child);
+		let loc = location.clone();
+		let result = async {
+			child.scope(|inner| Box::pin(async move {
+				let stmts = inner.statements(false).await?;
+				if inner.peek().kind != Kind::Eof { return Err(inner.error()); }
+				Ok(Block { location: loc, stmts })
+			})).await
+		}.await;
 		if let (Some(before), Some(after)) = (tail, child.lex.take_heredoc_tail())
 			&& Lexer::heredoc_tail_changed(before, after) {
 			self.lex.inherit_heredoc_tail(after);
@@ -260,11 +259,21 @@ impl<'s, 'h> Parser<'s, 'h> {
 		result
 	}
 
-	fn interpolate(&mut self, bytes: &[u8], location: Location, mode: Mode) -> ResultOf<Vec<QuotePart>> {
-		self.nested(|parser| parser.interpolate_inner(bytes, location, mode))
+	async fn interpolate(&mut self, bytes: &[u8], location: Location, mode: Mode) -> ResultOf<Vec<QuotePart>> {
+		if self.depth >= MAX_DEPTH { return Err(self.depth_error()); }
+		self.depth += 1;
+		let previous_tree_depth = std::mem::replace(&mut self.tree_depth, self.depth);
+		let at = self.depth;
+		let result = {
+			let child = Box::pin(self.interpolate_inner(bytes, location, mode));
+			if at.is_multiple_of(PARSE_DESCEND_EVERY) { crate::deep::descend(child).await } else { child.await }
+		};
+		self.depth -= 1;
+		self.tree_depth = self.tree_depth.max(previous_tree_depth);
+		result
 	}
 
-	fn interpolate_inner(&mut self, bytes: &[u8], mut location: Location, mode: Mode) -> ResultOf<Vec<QuotePart>> {
+	async fn interpolate_inner(&mut self, bytes: &[u8], mut location: Location, mode: Mode) -> ResultOf<Vec<QuotePart>> {
 		let start_line = location.line;
 		let utf8 = self.lex.utf8;
 		let mut parts = Vec::new();
@@ -309,12 +318,29 @@ impl<'s, 'h> Parser<'s, 'h> {
 					let open = at + if dynamic { 3 } else { 2 };
 					// The code starts mid-line: diagnostics quote and count columns from the line start.
 					let line_start = bytes[..open].iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-					let (block, end) = self.with_inner(&bytes[line_start..], &location, |inner| {
-						inner.lex.advance(open - line_start);
-						let block = inner.block()?;
-						inner.expect(b")")?;
-						Ok((block, inner.lex.pos))
-					})?;
+					let tail = self.lex.heredoc_tail();
+					let symbols = std::mem::take(&mut self.symbols);
+					let mut child = Parser::new(&bytes[line_start..], location.file.clone(), location.line, self.pkg.clone(), self.features, self.hooks);
+					child.lex.set_heredoc_tail(tail);
+					child.file = self.file.clone();
+					child.symbols = symbols;
+					child.string_eval = self.string_eval;
+					child.depth = self.depth;
+					child.tree_depth = self.depth;
+					let result = async {
+						child.lex.advance(open - line_start);
+						let block = child.block().await?;
+						child.expect(b")")?;
+						Ok((block, child.lex.pos))
+					}.await;
+					if let (Some(before), Some(after)) = (tail, child.lex.take_heredoc_tail())
+						&& Lexer::heredoc_tail_changed(before, after) {
+						self.lex.inherit_heredoc_tail(after);
+					}
+					self.tree_depth = self.tree_depth.max(child.tree_depth);
+					self.symbols = child.symbols;
+					self.queued.append(&mut child.queued);
+					let (block, end) = result?;
 					flush(&mut parts, &mut lit);
 					let end = line_start + end;
 					parts.push(QuotePart::RegexCode(Rc::new(block), dynamic, self.pstr(&bytes[at..end])));
@@ -379,12 +405,29 @@ impl<'s, 'h> Parser<'s, 'h> {
 				continue;
 			}
 			if mode.interpolates() && matches!(b, b'$' | b'@') && interpolation_start(bytes, at, utf8, mode.pattern()) {
-				let ((expression, join, end), pending, line) = self.with_inner(&bytes[at..], &location, |inner| {
-					let interpolant = inner.interpolant(pattern.as_mut(), at)?;
+				let tail = self.lex.heredoc_tail();
+				let symbols = std::mem::take(&mut self.symbols);
+				let mut child = Parser::new(&bytes[at..], location.file.clone(), location.line, self.pkg.clone(), self.features, self.hooks);
+				child.lex.set_heredoc_tail(tail);
+				child.file = self.file.clone();
+				child.symbols = symbols;
+				child.string_eval = self.string_eval;
+				child.depth = self.depth;
+				child.tree_depth = self.depth;
+				let result = async {
+					let interpolant = child.interpolant(pattern.as_mut(), at).await?;
 					// The code's own line count, which a `#line` directive inside it may reset.
-					let line = inner.look.is_none().then(|| inner.lex.location().line);
-					Ok((interpolant, inner.lex.pending_heredoc_bodies(), line))
-				})?;
+					let line = child.look.is_none().then(|| child.lex.location().line);
+					Ok((interpolant, child.lex.pending_heredoc_bodies(), line))
+				}.await;
+				if let (Some(before), Some(after)) = (tail, child.lex.take_heredoc_tail())
+					&& Lexer::heredoc_tail_changed(before, after) {
+					self.lex.inherit_heredoc_tail(after);
+				}
+				self.tree_depth = self.tree_depth.max(child.tree_depth);
+				self.symbols = child.symbols;
+				self.queued.append(&mut child.queued);
+				let ((expression, join, end), pending, line) = result?;
 				if let Some((from, to)) = pending { bodies = Some((at + from, at + to)); }
 				flush(&mut parts, &mut lit);
 				parts.push(QuotePart::Expr(expression, join));
@@ -421,12 +464,12 @@ impl<'s, 'h> Parser<'s, 'h> {
 		Ok(parts)
 	}
 
-	fn interpolant(&mut self, mut pattern: Option<&mut PatternContext<'_>>, offset: usize) -> ResultOf<(Expr, bool, usize)> {
+	async fn interpolant(&mut self, mut pattern: Option<&mut PatternContext<'_>>, offset: usize) -> ResultOf<(Expr, bool, usize)> {
 		let source = self.lex.source;
 		let mut join = source.first() == Some(&b'@');
 		let name_at = if source.starts_with(b"$#") { 2 } else { 1 };
 		let braced = source.get(after_space(source, name_at)) == Some(&b'{');
-		let mut expr = self.variable(false)?;
+		let mut expr = self.variable(false).await?;
 		let utf8 = self.lex.utf8;
 		// `${name}` ends the interpolation before a subscript. Only the first subscript of a plain
 		// variable is put to the pattern vote: after a block dereference (`${ EXPR }`, `@{[ ... ]}`),
@@ -443,7 +486,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				if !matches!(rest.first(), Some(b'[' | b'{')) && slot.is_none() { break; }
 				self.wrap_tree()?;
 				let location = self.bump().location;
-				expr = self.arrow(expr, location)?;
+				expr = self.arrow(expr, location).await?;
 				if let Some(sigil) = slot { join = sigil == Sigil::Array; }
 				selected = matches!(&expr.kind, ExprKind::Select(..));
 				braced_name = false;
@@ -453,7 +496,7 @@ impl<'s, 'h> Parser<'s, 'h> {
 				vote = false;
 				self.wrap_tree()?;
 				let select = expr::select_kind(if selected { Sigil::Scalar } else { slot }, &[open], selected);
-				expr = self.select(expr, select)?;
+				expr = self.select(expr, select).await?;
 				selected = true;
 			} else { break; }
 		}

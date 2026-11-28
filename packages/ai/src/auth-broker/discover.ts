@@ -656,9 +656,10 @@ export class AuthBrokerStartupError extends AuthBrokerError {
 /**
  * This machine's credential store, `<agentDir>/agent.db`. `OMP_AUTH_ENCRYPT`, else
  * `auth.encrypt` in `<agentDir>/config.yml`, forces sealing new secrets under the
- * OS-vault master key on or off; unset, the store keeps its current mode (see
- * {@link SqliteAuthCredentialStore.unlock}). In broker mode only the logins kept
- * on this machine land here; the broker encrypts its own store.
+ * OS-vault master key on, or off (unsealing those sealed earlier); unset, the
+ * store keeps its current mode (see {@link SqliteAuthCredentialStore.unlock}).
+ * In broker mode only the logins kept on this machine land here; the broker
+ * encrypts its own store.
  */
 export function openLocalAuthCredentialStore(agentDir: string = getAgentDir()): Promise<SqliteAuthCredentialStore> {
 	return openLocalStore(agentDir, authSettingsReader({ agentDir }));

@@ -1,6 +1,7 @@
 import { transcriptEntryMessage } from "../../../../session/transcript/transcript-entry";
 import { jsx } from "@oh-my-pi/pi-tui";
 import { CopySelector } from "../../../../ui/overlays/pickers/copy-selector";
+import { openPath } from "../../../../utils/open";
 import { type CopyPickSource } from "../../../../modes/view-model/overlays/copy-selector";
 import type { CustomCommandContext } from "../../../../extensibility/custom-commands/types";
 import { isTranscriptEntry } from "../../../../session/session-context";
@@ -121,9 +122,14 @@ export async function selectSessionTextReviewSource(
 				title: "Select message to annotate",
 				actionLabel: "select",
 				onPick: (content: string, label: string, source: CopyPickSource) => done({ content, label, ...source }),
+				onOpen: (href: string, label: string) => {
+					done(undefined);
+					openPath(href);
+					ctx.ui.notify(`Opening ${label}: ${href}`, "info");
+				},
 				onCancel: () => done(undefined),
 			}),
-		{ overlay: true },
+		{ overlay: true, fullscreen: true },
 	);
 	return selection ? sourceFromSelection(ctx, selection, latest?.id) : undefined;
 }

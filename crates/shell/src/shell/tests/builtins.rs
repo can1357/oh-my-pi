@@ -767,6 +767,117 @@ async fn awk_exit_leaves_seekable_stdin_offset() {
 	let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// `grep -m1` swallowed the input after the match, including printed context.
+#[tokio::test(flavor = "multi_thread")]
+async fn grep_max_count_restores_seekable_stdin_offset() {
+	let dir = tempfile::tempdir().expect("temp dir");
+	std::fs::write(dir.path().join("data"), "1\n2\n3\n4\n5\n6\n").expect("write data");
+	let cwd = quote_arg(dir.path().to_str().expect("utf8 path"));
+	for (command, expected) in [
+		("grep -m1 3", "3\n|\n4\n5\n6\n"),
+		("grep -m1 -A2 3", "3\n4\n5\n|\n4\n5\n6\n"),
+		("grep -cm1 3", "1\n|\n4\n5\n6\n"),
+		("head -n1; grep -m1 3", "1\n3\n|\n4\n5\n6\n"),
+		("grep -vm1 -A2 3", "1\n2\n3\n|\n2\n3\n4\n5\n6\n"),
+	] {
+		let (result, output) =
+			execute_captured(format!("cd {cwd}; {{ {command}; echo '|'; cat; }} < data")).await;
+		assert_eq!(result.exit_code, Some(0), "{command}");
+		assert_eq!(output, expected, "{command}");
+	}
+}
+
+/// `sed -u` previously swallowed the rest of a pipe after printing its header.
+#[tokio::test(flavor = "multi_thread")]
+async fn sed_unbuffered_quit_leaves_the_pipe_for_the_next_reader() {
+	let dir = tempfile::tempdir().expect("temp dir");
+	let out = dir.path().join("out.txt");
+	let config = ShellConfig {
+		session_env:   None,
+		snapshot_path: None,
+		minimizer:     None,
+		filesystem:    Fs::native(),
+		seed:          None,
+	};
+	let mut session = create_session(&config).await.expect("create_session");
+	let result = session
+		.run_test(
+			format!(
+				"printf 'header\\nz\\na\\n' | {{ sed -u 1q; sort; }} > {}",
+				quote_arg(out.to_str().unwrap()),
+			),
+			&TestStdio::null(),
+		)
+		.await
+		.expect("run pipe");
+	assert_eq!(exit_code(&result), 0);
+	assert_eq!(std::fs::read_to_string(out).unwrap(), "header\na\nz\n");
+}
+
+/// After `q` and `Q`, a following reader used to see EOF instead of the
+/// remaining records.
+#[tokio::test(flavor = "multi_thread")]
+async fn sed_quit_leaves_the_seekable_stdin_offset() {
+	let dir = tempfile::tempdir().expect("temp dir");
+	let input = dir.path().join("data.txt");
+	let out = dir.path().join("out.txt");
+	std::fs::write(&input, "one\ntwo\nthree\n").expect("write data");
+	let config = ShellConfig {
+		session_env:   None,
+		snapshot_path: None,
+		minimizer:     None,
+		filesystem:    Fs::native(),
+		seed:          None,
+	};
+	let mut session = create_session(&config).await.expect("create_session");
+	let params = TestStdio::null();
+	let input_arg = quote_arg(input.to_str().unwrap());
+	let out_arg = quote_arg(out.to_str().unwrap());
+
+	for (script, expected) in [
+		("1q", "one\n|two\nthree\n"),
+		("1Q", "|two\nthree\n"),
+		("N;q", "one\ntwo\n|three\n"),
+		("p", "one\none\ntwo\ntwo\nthree\nthree\n|"),
+	] {
+		let result = session
+			.run_test(
+				format!("{{ sed '{script}'; printf '|'; cat; }} < {input_arg} > {out_arg}"),
+				&params,
+			)
+			.await
+			.expect("run seekable");
+		assert_eq!(exit_code(&result), 0, "{script}");
+		assert_eq!(std::fs::read_to_string(&out).unwrap(), expected, "{script}");
+	}
+}
+
+/// A short matching line stayed buffered until its producer wrote again or
+/// closed the stream.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn grep_line_buffered_delivers_before_more_input() {
+	let consume = "{ read -r line; printf '%s\\n' \"$line\"; printf '\\n' > ack; }";
+	for (produce, filter, finish) in [
+		("mkfifo ack; { printf 'a\\n'; read -r reply < ack; } |", "grep --line-buffered a", ""),
+		(
+			"mkfifo input ack; { printf 'a\\n'; read -r reply < ack; } > input &",
+			"grep --line-buffered a input",
+			"; wait",
+		),
+	] {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let cwd = quote_arg(dir.path().to_str().expect("utf8 path"));
+		let command = format!("cd {cwd}; {produce} {filter} | {consume}{finish}");
+		let (result, output) =
+			tokio::time::timeout(std::time::Duration::from_secs(5), execute_captured(command))
+				.await
+				.expect("the consumer must see the match before allowing the producer to exit");
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert_eq!(output, "a\n");
+	}
+}
+
 /// `head --help` / invalid flag must be handled in-process (rendered to the
 /// command streams, returned as an exit code) — head has its own `run`
 /// entry point bypassing uutils' process-exiting parser, and literalized
@@ -1791,7 +1902,7 @@ async fn xargs_parallel_signal_death_stops_scheduling() {
 #[tokio::test(flavor = "multi_thread")]
 async fn xargs_unlimited_parallel_observes_signal_before_next_launch() {
 	let (result, output) = execute_captured(
-		"{ printf 'first\\nsecond\\n'; sleep 1; printf 'third\\n'; } | xargs -n1 -P0 /bin/sh -c 'if \
+		"{ printf 'first\\n'; sleep 1; printf 'second\\nthird\\n'; } | xargs -n1 -P0 /bin/sh -c 'if \
 		 [ \"$1\" = first ]; then kill -9 $$; else echo unexpected; fi' _"
 			.into(),
 	)
@@ -2040,4 +2151,32 @@ async fn say_speaks_through_the_speech_host_of_its_run() {
 		.collect();
 	assert_eq!(spoken, ["hi", "piped\n", "subshell", "xargs"]);
 	assert_eq!(requests[0].rate, Some(200));
+}
+
+/// An external that `xargs` starts after the downstream reader exited wrote
+/// into a pump and exited 0, so `yes | xargs -n1 /bin/echo | head` never ended.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn external_started_after_reader_exit_gets_sigpipe() {
+	let command = "seq 1 3000 | xargs -n1 /bin/echo | head -2; echo \"PS=${PIPESTATUS[1]}\"";
+	let (_, output) = tokio::time::timeout(
+		std::time::Duration::from_secs(20),
+		execute_captured(command.to_owned()),
+	)
+	.await
+	.expect("xargs must stop once its output pipe is gone");
+	assert_eq!(output, "1\n2\nxargs: /bin/echo: terminated by signal 13\nPS=125\n");
+}
+/// A builtin that `xargs` ran and the emulated SIGPIPE ended reached xargs as
+/// an ordinary exit of 141, so xargs went on instead of reporting the signal.
+#[tokio::test(flavor = "multi_thread")]
+async fn xargs_reports_builtin_sigpipe_as_a_signal() {
+	let command = "yes | xargs -n1 echo | head -2; echo \"PS=${PIPESTATUS[1]}\"";
+	let (_, output) = tokio::time::timeout(
+		std::time::Duration::from_secs(20),
+		execute_captured(command.to_owned()),
+	)
+	.await
+	.expect("xargs must stop once its output pipe is gone");
+	assert_eq!(output, "y\ny\nxargs: echo: terminated by signal 13\nPS=125\n");
 }

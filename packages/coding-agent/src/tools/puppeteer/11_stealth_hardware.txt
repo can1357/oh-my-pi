@@ -1,0 +1,59 @@
+const hardwareConcurrencyName = "hardwareConcurrency";
+let hardwareConcurrencyProto = Object_getPrototypeOf(navigator);
+let hardwareConcurrencyOwner;
+let hardwareConcurrencyDescriptor;
+
+while (hardwareConcurrencyProto && !hardwareConcurrencyDescriptor) {
+	hardwareConcurrencyDescriptor = Object_getOwnPropertyDescriptor(
+		hardwareConcurrencyProto,
+		hardwareConcurrencyName,
+	);
+	if (hardwareConcurrencyDescriptor) {
+		hardwareConcurrencyOwner = hardwareConcurrencyProto;
+	} else {
+		hardwareConcurrencyProto = Object_getPrototypeOf(hardwareConcurrencyProto);
+	}
+}
+
+const hardwareConcurrencyValue = 8;
+let shouldPatchHardwareConcurrency = false;
+
+if (
+	hardwareConcurrencyOwner &&
+	hardwareConcurrencyDescriptor &&
+	hardwareConcurrencyDescriptor.configurable &&
+	typeof hardwareConcurrencyDescriptor.get === "function"
+) {
+	shouldPatchHardwareConcurrency = true;
+	try {
+		shouldPatchHardwareConcurrency =
+			Reflect_apply(hardwareConcurrencyDescriptor.get, navigator, []) !==
+			hardwareConcurrencyValue;
+	} catch {
+		shouldPatchHardwareConcurrency = false;
+	}
+}
+
+if (shouldPatchHardwareConcurrency) {
+	const hardwareConcurrencyAccessors = {
+		get hardwareConcurrency() {
+			Reflect_apply(hardwareConcurrencyDescriptor.get, this, []);
+			return hardwareConcurrencyValue;
+		},
+	};
+	const getHardwareConcurrency = Object_getOwnPropertyDescriptor(
+		hardwareConcurrencyAccessors,
+		hardwareConcurrencyName,
+	).get;
+
+	if (typeof patchToString === "function") {
+		patchToString(getHardwareConcurrency, "get hardwareConcurrency");
+	}
+
+	Object_defineProperty(hardwareConcurrencyOwner, hardwareConcurrencyName, {
+		get: getHardwareConcurrency,
+		set: hardwareConcurrencyDescriptor.set,
+		enumerable: hardwareConcurrencyDescriptor.enumerable,
+		configurable: hardwareConcurrencyDescriptor.configurable,
+	});
+}

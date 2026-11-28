@@ -757,6 +757,10 @@ export interface CompiledProvider {
 export interface CompiledCompatRules {
 	/** Compiled-format version; bump on incompatible shape changes. */
 	version: 1;
+	/** Hash of the serialized policy alone, excluding `hash` and `priceChanges`. */
+	hash: string;
+	/** Distinct effective price-change instants in the policy, ascending (Unix ms). */
+	priceChanges: number[];
 	/** Every compiled source file, `rules/`-relative, sorted. */
 	files: string[];
 	taxonomy: CompiledTaxonomy;

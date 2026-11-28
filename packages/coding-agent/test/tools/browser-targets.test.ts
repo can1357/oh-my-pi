@@ -255,7 +255,7 @@ describe("browser open with a mirrored WSL relay", () => {
 		const panelName = "windows-panel";
 		try {
 			spyOn(networking, "getWslNetworkingMode").mockReturnValue("mirrored");
-			spyOn(discovery, "discoverRelayEndpoints").mockReturnValue([]);
+			spyOn(discovery, "discoverRelayEndpoints").mockResolvedValue([]);
 			const windows = spyOn(windowsDiscovery, "discoverWindowsRelay");
 			// Use the real prelude, browser registry, relay and tab supervisor; only emulate the page worker.
 			globalThis.Worker = class extends EventTarget {
@@ -334,7 +334,7 @@ describe("browser targets with the relay", () => {
 	it("rediscovers a rotated Windows relay instead of listing the old browser", async () => {
 		process.env.PI_BROWSER_RELAY = "1";
 		const mode = spyOn(networking, "getWslNetworkingMode").mockReturnValue("mirrored");
-		const local = spyOn(discovery, "discoverRelayEndpoints").mockReturnValue([]);
+		const local = spyOn(discovery, "discoverRelayEndpoints").mockResolvedValue([]);
 		const windows = spyOn(windowsDiscovery, "discoverWindowsRelay");
 		const methods: string[] = [];
 		using reused = Bun.serve({
@@ -347,7 +347,7 @@ describe("browser targets with the relay", () => {
 		});
 		const hosts: RelayServer[] = [];
 		try {
-			local.mockReturnValueOnce([reused.url.origin]);
+			local.mockResolvedValueOnce([reused.url.origin]);
 			const tool = session();
 			for (const title of ["First", "Second"]) {
 				const host = startRelayServer({ port: 0 });

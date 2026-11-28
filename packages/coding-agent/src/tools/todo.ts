@@ -774,7 +774,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 	async execute(
 		_toolCallId: string,
 		params: TodoParams,
-		_signal?: AbortSignal,
+		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<TodoToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<TodoToolDetails>> {
@@ -795,14 +795,30 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		const { phases: updated, errors } = readOnly
 			? { phases: previousPhases, errors: [] as string[] }
 			: applyParams(clonePhases(previousPhases), entry);
+		let current = previousPhases;
+		let uncommitted: TodoToolDetails["uncommitted"];
+		if (op !== "view" && errors.length === 0) {
+			const commit = () => this.session.setTodoPhases?.(updated);
+			const asked = this.session.applyTodoChange?.({ op, previous: previousPhases, next: updated }, commit, signal);
+			if (!asked) commit();
+			else {
+				// A decider that commits does so before returning, so awaiting a plain result adds no delay to the commit.
+				const outcome = await asked;
+				if (outcome.kind !== "committed") {
+					errors.push(outcome.message);
+					uncommitted = outcome.kind;
+					current = clonePhases(this.session.getTodoPhases?.() ?? []);
+				}
+			}
+		}
 		// A batch with any error is discarded wholesale: persisting a
 		// half-applied batch makes the natural retry hit "already exists" for
-		// the ops that did land. State and rendered summary stay at previous.
+		// the ops that did land. State and rendered summary stay as they are.
 		const failed = errors.length > 0;
-		const effective = failed ? previousPhases : updated;
+		const effective = failed ? current : updated;
 		const completedTasks = readOnly || failed ? [] : getCompletionTransitions(previousPhases, updated);
-		if (!readOnly && !failed) this.session.setTodoPhases?.(updated);
 		const details: TodoToolDetails = { op, phases: effective, storage };
+		if (uncommitted) details.uncommitted = uncommitted;
 		if (completedTasks.length > 0) details.completedTasks = completedTasks;
 
 		return {
