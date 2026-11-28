@@ -21,17 +21,21 @@ import { uriToFile } from "./uri";
 
 export { detectLanguageId } from "../utils/lang-from-path";
 
-const UTF8_KEEPING_BOM = new TextDecoder("utf-8", { ignoreBOM: true });
-
-/**
- * Read a file's text, refusing FIFOs, devices and sockets, whose reads can block forever
- * or never end. Edit snapshots keep the BOM so they match the on-disk text.
- */
-export async function readTextFromDisk(filePath: string, keepBom = false): Promise<string> {
+/** Refuse FIFOs, devices and sockets, whose reads can block forever or never end. */
+async function regularFile(filePath: string): Promise<Bun.BunFile> {
 	const kind = specialFileKind(await fs.stat(filePath));
 	if (kind) throw new Error(`Cannot open '${filePath}': it is a ${kind}, not a regular file or directory.`);
-	const file = Bun.file(filePath);
-	return keepBom ? UTF8_KEEPING_BOM.decode(await file.bytes()) : file.text();
+	return Bun.file(filePath);
+}
+
+/** Read a file's text, refusing FIFOs, devices and sockets, whose reads can block forever or never end. */
+export async function readTextFromDisk(filePath: string): Promise<string> {
+	return (await regularFile(filePath)).text();
+}
+
+/** Read a file's bytes, refusing what {@link readTextFromDisk} refuses. */
+export async function readBytesFromDisk(filePath: string): Promise<Uint8Array> {
+	return (await regularFile(filePath)).bytes();
 }
 
 // =============================================================================

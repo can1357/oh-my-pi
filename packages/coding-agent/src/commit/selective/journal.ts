@@ -115,10 +115,15 @@ export interface FileSnapshot {
 	text: string | null;
 }
 
+/** `bytes` as a snapshot's text: UTF-8 with any BOM kept, as {@link readSnapshot} reads a file. */
+export function snapshotText(bytes: Uint8Array): string {
+	return UTF8.decode(bytes);
+}
+
 /** Read `file` before writing it; `undefined` when it cannot be read (the write then goes unjournaled). */
 export async function readSnapshot(file: string): Promise<FileSnapshot | undefined> {
 	try {
-		return { text: UTF8.decode(await Bun.file(file).bytes()) };
+		return { text: snapshotText(await Bun.file(file).bytes()) };
 	} catch (error) {
 		return isEnoent(error) ? { text: null } : undefined;
 	}

@@ -113,6 +113,41 @@ describe("applyEditsThenRename", () => {
 			{ path: path.join(real, "out", "pkg", "small.ts"), before: null, after: "export const small = 1;\n" },
 		]);
 	});
+
+	it("leaves files reached through a renamed link to a folder out of the journal", async () => {
+		const target = path.join(dir, "target");
+		await Bun.write(path.join(target, "child.ts"), "export const child = 1;\n");
+		const link = path.join(dir, "link");
+		await fs.symlink(target, link, "junction");
+		const renamed = path.join(dir, "renamed-link");
+		const recorded: WorkspaceFileChange[] = [];
+
+		await applyEditsThenRename(
+			[],
+			link,
+			renamed,
+			[{ from: path.join(link, "child.ts"), to: path.join(renamed, "child.ts") }],
+			change => recorded.push(change),
+		);
+
+		expect((await fs.lstat(renamed)).isSymbolicLink()).toBe(true);
+		expect(await Bun.file(path.join(target, "child.ts")).text()).toBe("export const child = 1;\n");
+		expect(recorded).toEqual([]);
+	});
+
+	it("restores a UTF-16 reference byte for byte when the move fails", async () => {
+		const blocker = path.join(dir, "blocker");
+		await Bun.write(blocker, "not a dir");
+		const dest = path.join(blocker, "sub", "renamed.ts");
+		const utf16 = new Uint8Array([0xff, 0xfe, ...Buffer.from(refBefore, "utf16le")]);
+		await Bun.write(ref, utf16);
+
+		await expect(
+			applyEditsThenRename([{ filePath: ref, edits: importEdit }], source, dest, [{ from: source, to: dest }]),
+		).rejects.toThrow();
+
+		expect(await Bun.file(ref).bytes()).toEqual(utf16);
+	});
 });
 
 describe("workspace edit recorder", () => {
@@ -281,7 +316,11 @@ describe("workspace edit recorder", () => {
 				documentChanges: [
 					{ kind: "create", uri: fileToUri(overwritten), options: { overwrite: true } },
 					{
-						textDocument: { uri: fileToUri(overwritten), version: null },
+						// An equivalent spelling of the overwritten file's URI.
+						textDocument: {
+							uri: fileToUri(overwritten).replace("overwritten.ts", "over%77ritten.ts"),
+							version: null,
+						},
 						edits: [
 							{
 								range: { start: { line: 0, character: 0 }, end: { line: 0, character: 0 } },
@@ -351,5 +390,23 @@ describe("workspace edit recorder", () => {
 		expect(await Bun.file(target).text()).toBe("keep target\n");
 		expect(await Bun.file(child).text()).toBe("keep child\n");
 		expect(recorded).toEqual([{ path: edited, before: "oldName\n", after: "newName\n" }]);
+	});
+
+	it("edits a UTF-16 file as the text the server was sent", async () => {
+		const file = path.join(dir, "utf16.ts");
+		await Bun.write(file, new Uint8Array([0xff, 0xfe, ...Buffer.from("const oldName = 1;\n", "utf16le")]));
+
+		await applyWorkspaceEdit(
+			{
+				changes: {
+					[fileToUri(file)]: [
+						{ range: { start: { line: 0, character: 6 }, end: { line: 0, character: 13 } }, newText: "newName" },
+					],
+				},
+			},
+			dir,
+		);
+
+		expect(await Bun.file(file).text()).toBe("const newName = 1;\n");
 	});
 });
