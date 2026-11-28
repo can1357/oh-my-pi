@@ -10,6 +10,8 @@ use std::{
 	},
 };
 
+use serde::Deserialize;
+
 use crate::protocol::{BridgeOp, V8ErrorPayload, V8Inbound, V8Outbound};
 
 const PRELUDE_JS: &str = include_str!("prelude.js");
@@ -45,29 +47,10 @@ impl BoundedArrayBufferAllocator {
 	}
 }
 
-unsafe extern "C" fn ab_allocate(handle: &BoundedArrayBufferAllocator, len: usize) -> *mut c_void {
-	if len == 0 {
-		return NonNull::<u8>::dangling().as_ptr().cast();
-	}
-	if !handle.try_reserve(len) {
-		return std::ptr::null_mut();
-	}
-	let Ok(layout) = Layout::from_size_align(len, 16) else {
-		handle.allocated.fetch_sub(len, Ordering::SeqCst);
-		return std::ptr::null_mut();
-	};
-	// SAFETY: `layout` has non-zero size and power-of-two alignment 16.
-	let ptr = unsafe { alloc_zeroed(layout) };
-	if ptr.is_null() {
-		handle.allocated.fetch_sub(len, Ordering::SeqCst);
-		return std::ptr::null_mut();
-	}
-	ptr.cast()
-}
-
-unsafe extern "C" fn ab_allocate_uninitialized(
+unsafe fn ab_alloc_inner(
 	handle: &BoundedArrayBufferAllocator,
 	len: usize,
+	zeroed: bool,
 ) -> *mut c_void {
 	if len == 0 {
 		return NonNull::<u8>::dangling().as_ptr().cast();
@@ -80,7 +63,13 @@ unsafe extern "C" fn ab_allocate_uninitialized(
 		return std::ptr::null_mut();
 	};
 	// SAFETY: `layout` has non-zero size and power-of-two alignment 16.
-	let ptr = unsafe { alloc(layout) };
+	let ptr = unsafe {
+		if zeroed {
+			alloc_zeroed(layout)
+		} else {
+			alloc(layout)
+		}
+	};
 	if ptr.is_null() {
 		handle.allocated.fetch_sub(len, Ordering::SeqCst);
 		return std::ptr::null_mut();
@@ -88,14 +77,26 @@ unsafe extern "C" fn ab_allocate_uninitialized(
 	ptr.cast()
 }
 
+unsafe extern "C" fn ab_allocate(handle: &BoundedArrayBufferAllocator, len: usize) -> *mut c_void {
+	// SAFETY: `handle` is valid for the lifetime of the V8 allocator.
+	unsafe { ab_alloc_inner(handle, len, true) }
+}
+
+unsafe extern "C" fn ab_allocate_uninitialized(
+	handle: &BoundedArrayBufferAllocator,
+	len: usize,
+) -> *mut c_void {
+	// SAFETY: `handle` is valid for the lifetime of the V8 allocator.
+	unsafe { ab_alloc_inner(handle, len, false) }
+}
+
 unsafe extern "C" fn ab_free(handle: &BoundedArrayBufferAllocator, data: *mut c_void, len: usize) {
 	if len == 0 || data.is_null() {
 		return;
 	}
 	if let Ok(layout) = Layout::from_size_align(len, 16) {
-		// SAFETY: `data` was allocated by
-		// `ab_allocate`/`ab_allocate_uninitialized` with the same `len` and align
-		// 16.
+		// SAFETY: `data` was allocated by `ab_alloc_inner` with the same `len`
+		// and align 16.
 		unsafe { dealloc(data.cast(), layout) };
 		handle.allocated.fetch_sub(len, Ordering::SeqCst);
 	}
@@ -116,9 +117,35 @@ static AB_VTABLE: v8::RustAllocatorVtable<BoundedArrayBufferAllocator> = v8::Rus
 	drop:                   ab_drop,
 };
 
-struct NearHeapState {
-	handle:   v8::IsolateHandle,
-	exceeded: Arc<AtomicBool>,
+pub struct RunControl {
+	active_run_id:       Mutex<Option<String>>,
+	cancel_flag:         AtomicBool,
+	heap_limit_exceeded: AtomicBool,
+	isolate_handle:      v8::IsolateHandle,
+}
+
+impl RunControl {
+	pub fn handle_async_inbound(&self, msg: &V8Inbound) {
+		match msg {
+			V8Inbound::Cancel { run_id } => {
+				let matches = self
+					.active_run_id
+					.lock()
+					.is_ok_and(|guard| guard.as_deref() == Some(run_id.as_str()));
+				if matches {
+					self.cancel_flag.store(true, Ordering::SeqCst);
+					self.isolate_handle.terminate_execution();
+				}
+			},
+			V8Inbound::Close => self.terminate_on_eof(),
+			V8Inbound::Run { .. } | V8Inbound::ToolReply { .. } => {},
+		}
+	}
+
+	pub fn terminate_on_eof(&self) {
+		self.cancel_flag.store(true, Ordering::SeqCst);
+		self.isolate_handle.terminate_execution();
+	}
 }
 
 unsafe extern "C" fn on_near_heap_limit(
@@ -127,11 +154,11 @@ unsafe extern "C" fn on_near_heap_limit(
 	_initial_heap_limit: usize,
 ) -> usize {
 	if !data.is_null() {
-		// SAFETY: `data` was created by `Box::into_raw` and lives until isolate
-		// teardown.
-		let state = unsafe { &*(data as *const NearHeapState) };
-		state.exceeded.store(true, Ordering::SeqCst);
-		state.handle.terminate_execution();
+		// SAFETY: `data` is `Arc::as_ptr(&control)` and `Drop` removes this
+		// callback before `control` drops.
+		let control = unsafe { &*(data as *const RunControl) };
+		control.heap_limit_exceeded.store(true, Ordering::SeqCst);
+		control.isolate_handle.terminate_execution();
 	}
 	current_heap_limit.saturating_add(NEAR_HEAP_HEADROOM_BYTES)
 }
@@ -156,12 +183,16 @@ fn host_import_module_dynamically<'s>(
 	resolver.reject(scope, err);
 	Some(resolver.get_promise(scope))
 }
+
 struct BridgeState {
 	active_run_id:     Option<String>,
 	next_call_seq:     u64,
 	pending_resolvers: HashMap<String, v8::Global<v8::PromiseResolver>>,
 	final_expr_set:    bool,
 	final_expr_value:  Option<v8::Global<v8::Value>>,
+	max_heap_mb:       u64,
+	should_close:      bool,
+	control:           Arc<RunControl>,
 	emit:              Box<dyn FnMut(V8Outbound)>,
 }
 
@@ -176,62 +207,17 @@ impl BridgeState {
 	}
 }
 
-pub struct RunHandleTracker {
-	active_run_id:  Arc<Mutex<Option<String>>>,
-	cancel_flag:    Arc<AtomicBool>,
-	isolate_handle: v8::IsolateHandle,
-}
-
-impl RunHandleTracker {
-	pub fn handle_async_inbound(&self, msg: &V8Inbound) {
-		match msg {
-			V8Inbound::Cancel { run_id } => {
-				let matches = self
-					.active_run_id
-					.lock()
-					.is_ok_and(|guard| guard.as_deref() == Some(run_id.as_str()));
-				if matches {
-					self.cancel_flag.store(true, Ordering::SeqCst);
-					self.isolate_handle.terminate_execution();
-				}
-			},
-			V8Inbound::Close => {
-				self.cancel_flag.store(true, Ordering::SeqCst);
-				self.isolate_handle.terminate_execution();
-			},
-			V8Inbound::Run { .. } | V8Inbound::ToolReply { .. } => {},
-		}
-	}
-
-	pub fn terminate_on_eof(&self) {
-		self.cancel_flag.store(true, Ordering::SeqCst);
-		self.isolate_handle.terminate_execution();
-	}
-}
-
 pub struct V8SandboxRuntime {
-	isolate:             v8::OwnedIsolate,
-	context:             v8::Global<v8::Context>,
-	max_heap_mb:         u64,
-	heap_limit_exceeded: Arc<AtomicBool>,
-	cancel_flag:         Arc<AtomicBool>,
-	active_run_tracker:  Arc<Mutex<Option<String>>>,
-	near_heap_ptr:       *mut NearHeapState,
+	isolate: v8::OwnedIsolate,
+	context: v8::Global<v8::Context>,
+	control: Arc<RunControl>,
 }
 
 impl Drop for V8SandboxRuntime {
 	fn drop(&mut self) {
-		if !self.near_heap_ptr.is_null() {
-			self
-				.isolate
-				.remove_near_heap_limit_callback(on_near_heap_limit, 0);
-			// SAFETY: `near_heap_ptr` was allocated via `Box::into_raw` when
-			// registering the callback and callback is now unregistered.
-			unsafe {
-				drop(Box::from_raw(self.near_heap_ptr));
-			}
-			self.near_heap_ptr = std::ptr::null_mut();
-		}
+		self
+			.isolate
+			.remove_near_heap_limit_callback(on_near_heap_limit, 0);
 	}
 }
 
@@ -254,19 +240,23 @@ impl V8SandboxRuntime {
 		isolate.set_host_import_module_dynamically_callback(host_import_module_dynamically);
 		isolate.set_allow_wasm_code_generation_callback(disallow_wasm_codegen);
 
-		let isolate_handle = isolate.thread_safe_handle();
-		let heap_limit_exceeded = Arc::new(AtomicBool::new(false));
-		let near_heap_ptr = Box::into_raw(Box::new(NearHeapState {
-			handle:   isolate_handle,
-			exceeded: Arc::clone(&heap_limit_exceeded),
-		}));
-		isolate.add_near_heap_limit_callback(on_near_heap_limit, near_heap_ptr.cast());
+		let control = Arc::new(RunControl {
+			active_run_id:       Mutex::new(None),
+			cancel_flag:         AtomicBool::new(false),
+			heap_limit_exceeded: AtomicBool::new(false),
+			isolate_handle:      isolate.thread_safe_handle(),
+		});
+		isolate
+			.add_near_heap_limit_callback(on_near_heap_limit, Arc::as_ptr(&control).cast_mut().cast());
 		isolate.set_slot(BridgeState {
 			active_run_id: None,
 			next_call_seq: 0,
 			pending_resolvers: HashMap::new(),
 			final_expr_set: false,
 			final_expr_value: None,
+			max_heap_mb: clamped_mb,
+			should_close: false,
+			control: Arc::clone(&control),
 			emit,
 		});
 
@@ -278,31 +268,16 @@ impl V8SandboxRuntime {
 		};
 
 		match context_result {
-			Ok(context) => Ok(Self {
-				isolate,
-				context,
-				max_heap_mb: clamped_mb,
-				heap_limit_exceeded,
-				cancel_flag: Arc::new(AtomicBool::new(false)),
-				active_run_tracker: Arc::new(Mutex::new(None)),
-				near_heap_ptr,
-			}),
+			Ok(context) => Ok(Self { isolate, context, control }),
 			Err(err) => {
 				isolate.remove_near_heap_limit_callback(on_near_heap_limit, 0);
-				// SAFETY: `near_heap_ptr` was allocated above and callback is now
-				// unregistered.
-				unsafe { drop(Box::from_raw(near_heap_ptr)) };
 				Err(err)
 			},
 		}
 	}
 
-	pub fn tracker(&self) -> RunHandleTracker {
-		RunHandleTracker {
-			active_run_id:  Arc::clone(&self.active_run_tracker),
-			cancel_flag:    Arc::clone(&self.cancel_flag),
-			isolate_handle: self.isolate.thread_safe_handle(),
-		}
+	pub fn tracker(&self) -> Arc<RunControl> {
+		Arc::clone(&self.control)
 	}
 
 	pub fn emit_outbound(&mut self, msg: V8Outbound) {
@@ -320,12 +295,14 @@ impl V8SandboxRuntime {
 		emit_completion_value: bool,
 		rx: &Receiver<V8Inbound>,
 	) -> bool {
-		// Clear any stale termination/heap flags before starting a new run.
-		self.cancel_flag.store(false, Ordering::SeqCst);
-		self.heap_limit_exceeded.store(false, Ordering::SeqCst);
+		self.control.cancel_flag.store(false, Ordering::SeqCst);
+		self
+			.control
+			.heap_limit_exceeded
+			.store(false, Ordering::SeqCst);
 		self.isolate.cancel_terminate_execution();
 
-		if let Ok(mut guard) = self.active_run_tracker.lock() {
+		if let Ok(mut guard) = self.control.active_run_id.lock() {
 			*guard = Some(run_id.to_string());
 		}
 		if let Some(state) = self.isolate.get_slot_mut::<BridgeState>() {
@@ -333,9 +310,9 @@ impl V8SandboxRuntime {
 			state.pending_resolvers.clear();
 			state.final_expr_set = false;
 			state.final_expr_value = None;
+			state.should_close = false;
 		}
 
-		let mut should_close = false;
 		let outcome = self.run_cell_inner(
 			run_id,
 			code,
@@ -343,36 +320,24 @@ impl V8SandboxRuntime {
 			suppress_final_expr,
 			emit_completion_value,
 			rx,
-			&mut should_close,
 		);
-		let has_dangling = if let Some(state) = self.isolate.get_slot_mut::<BridgeState>() {
-			state.active_run_id = None;
-			!state.pending_resolvers.is_empty()
-		} else {
-			false
-		};
-		if has_dangling {
-			let context_global = self.context.clone();
-			v8::scope!(let scope, &mut self.isolate);
-			let context = v8::Local::new(scope, &context_global);
-			let mut ctx_scope = v8::ContextScope::new(scope, context);
-			reject_all_pending(&mut ctx_scope, "V8 cell finished before host call settled", false);
-		}
-		if let Ok(mut guard) = self.active_run_tracker.lock() {
+
+		if let Ok(mut guard) = self.control.active_run_id.lock() {
 			*guard = None;
 		}
-		if let Some(state) = self.isolate.get_slot_mut::<BridgeState>() {
-			state.pending_resolvers.clear();
-			state.final_expr_set = false;
-			state.final_expr_value = None;
-		}
+		let should_close = self
+			.isolate
+			.get_slot_mut::<BridgeState>()
+			.is_some_and(|state| {
+				state.active_run_id = None;
+				state.pending_resolvers.clear();
+				state.final_expr_set = false;
+				state.final_expr_value = None;
+				state.should_close
+			});
 
-		let outcome = if outcome.is_ok() && self.cancel_flag.swap(false, Ordering::SeqCst) {
-			Err(V8ErrorPayload {
-				name:    Some("AbortError".into()),
-				message: "Execution aborted".into(),
-				stack:   None,
-			})
+		let outcome = if outcome.is_ok() && self.control.cancel_flag.swap(false, Ordering::SeqCst) {
+			Err(V8ErrorPayload::abort("Execution aborted"))
 		} else {
 			outcome
 		};
@@ -401,141 +366,103 @@ impl V8SandboxRuntime {
 		suppress_final_expr: bool,
 		emit_completion_value: bool,
 		rx: &Receiver<V8Inbound>,
-		should_close: &mut bool,
 	) -> Result<(), V8ErrorPayload> {
-		let max_heap_mb = self.max_heap_mb;
-		let heap_exceeded = Arc::clone(&self.heap_limit_exceeded);
-		let cancel_flag = Arc::clone(&self.cancel_flag);
 		let context_global = self.context.clone();
-
 		v8::scope!(let scope, &mut self.isolate);
 		let context = v8::Local::new(scope, &context_global);
 		let mut ctx_scope = v8::ContextScope::new(scope, context);
 
-		let tc = std::pin::pin!(v8::TryCatch::new(&mut ctx_scope));
-		let mut tc = tc.init();
+		let res = (|| -> Result<(), V8ErrorPayload> {
+			let tc = std::pin::pin!(v8::TryCatch::new(&mut ctx_scope));
+			let mut tc = tc.init();
 
-		let Some(source) = v8::String::new(&tc, code) else {
-			return Err(V8ErrorPayload::new("Failed to allocate V8 source string"));
-		};
-		let Some(resource_name) = v8::String::new(&tc, filename) else {
-			return Err(V8ErrorPayload::new("Failed to allocate V8 filename string"));
-		};
-		let origin = v8::ScriptOrigin::new(
-			&tc,
-			resource_name.into(),
-			0,
-			0,
-			false,
-			-1,
-			None,
-			false,
-			false,
-			false,
-			None,
-		);
-
-		let Some(script) = v8::Script::compile(&tc, source, Some(&origin)) else {
-			return Err(extract_try_catch_error(
+			let source = v8::String::new(&tc, code)
+				.ok_or_else(|| V8ErrorPayload::new("Failed to allocate V8 source string"))?;
+			let resource_name = v8::String::new(&tc, filename)
+				.ok_or_else(|| V8ErrorPayload::new("Failed to allocate V8 filename string"))?;
+			let origin = v8::ScriptOrigin::new(
 				&tc,
-				max_heap_mb,
-				&heap_exceeded,
-				&cancel_flag,
-				should_close,
-			));
-		};
+				resource_name.into(),
+				0,
+				0,
+				false,
+				-1,
+				None,
+				false,
+				false,
+				false,
+				None,
+			);
 
-		let Some(result_val) = script.run(&tc) else {
-			return Err(extract_try_catch_error(
-				&tc,
-				max_heap_mb,
-				&heap_exceeded,
-				&cancel_flag,
-				should_close,
-			));
-		};
+			let script = v8::Script::compile(&tc, source, Some(&origin))
+				.ok_or_else(|| extract_try_catch_error(&mut tc))?;
+			let result_val = script
+				.run(&tc)
+				.ok_or_else(|| extract_try_catch_error(&mut tc))?;
 
-		tc.perform_microtask_checkpoint();
-		if tc.has_caught() || tc.has_terminated() {
-			return Err(extract_try_catch_error(
-				&tc,
-				max_heap_mb,
-				&heap_exceeded,
-				&cancel_flag,
-				should_close,
-			));
-		}
-
-		let root_settled_val = if let Ok(promise) = v8::Local::<v8::Promise>::try_from(result_val) {
-			drive_promise(
-				&mut tc,
-				promise,
-				run_id,
-				rx,
-				max_heap_mb,
-				&heap_exceeded,
-				&cancel_flag,
-				should_close,
-			)?
-		} else {
-			result_val
-		};
-
-		let (final_expr_set, final_val_global) =
-			tc.get_slot_mut::<BridgeState>()
-				.map_or((false, None), |state| {
-					let set = state.final_expr_set;
-					let val = if set && !suppress_final_expr {
-						state.final_expr_value.take()
-					} else {
-						state.final_expr_value = None;
-						None
-					};
-					(set, val)
-				});
-
-		let value_to_emit = if let Some(val_global) = final_val_global {
-			let val = v8::Local::new(&tc, &val_global);
-			if let Ok(promise) = v8::Local::<v8::Promise>::try_from(val) {
-				Some(drive_promise(
-					&mut tc,
-					promise,
-					run_id,
-					rx,
-					max_heap_mb,
-					&heap_exceeded,
-					&cancel_flag,
-					should_close,
-				)?)
-			} else {
-				Some(val)
+			tc.perform_microtask_checkpoint();
+			if tc.has_caught() || tc.has_terminated() {
+				return Err(extract_try_catch_error(&mut tc));
 			}
-		} else if !final_expr_set && !suppress_final_expr && emit_completion_value {
-			Some(root_settled_val)
-		} else {
-			None
-		};
 
-		if let Some(val) = value_to_emit {
-			let global = context.global(&tc);
-			if let Some(key) = v8::String::new(&tc, "__omp_emit_final_expr__")
-				&& let Some(emit_val) = global.get(&tc, key.into())
-				&& let Ok(emit_fn) = v8::Local::<v8::Function>::try_from(emit_val)
+			let root_settled_val = if let Ok(promise) = v8::Local::<v8::Promise>::try_from(result_val)
 			{
-				emit_fn.call(&tc, global.into(), &[val]);
-				if tc.has_caught() || tc.has_terminated() {
-					return Err(extract_try_catch_error(
-						&tc,
-						max_heap_mb,
-						&heap_exceeded,
-						&cancel_flag,
-						should_close,
-					));
+				drive_promise(&mut tc, promise, run_id, rx)?
+			} else {
+				result_val
+			};
+
+			let (final_expr_set, final_val_global) =
+				tc.get_slot_mut::<BridgeState>()
+					.map_or((false, None), |state| {
+						let set = state.final_expr_set;
+						let val = if set && !suppress_final_expr {
+							state.final_expr_value.take()
+						} else {
+							state.final_expr_value = None;
+							None
+						};
+						(set, val)
+					});
+
+			let value_to_emit = if let Some(val_global) = final_val_global {
+				let val = v8::Local::new(&tc, &val_global);
+				if let Ok(promise) = v8::Local::<v8::Promise>::try_from(val) {
+					Some(drive_promise(&mut tc, promise, run_id, rx)?)
+				} else {
+					Some(val)
+				}
+			} else if !final_expr_set && !suppress_final_expr && emit_completion_value {
+				Some(root_settled_val)
+			} else {
+				None
+			};
+
+			if let Some(val) = value_to_emit {
+				let global = context.global(&tc);
+				if let Some(key) = v8::String::new(&tc, "__omp_emit_final_expr__")
+					&& let Some(emit_val) = global.get(&tc, key.into())
+					&& let Ok(emit_fn) = v8::Local::<v8::Function>::try_from(emit_val)
+				{
+					emit_fn.call(&tc, global.into(), &[val]);
+					if tc.has_caught() || tc.has_terminated() {
+						return Err(extract_try_catch_error(&mut tc));
+					}
 				}
 			}
+
+			Ok(())
+		})();
+
+		let has_dangling = ctx_scope.get_slot_mut::<BridgeState>().is_some_and(|s| {
+			s.active_run_id = None;
+			!s.pending_resolvers.is_empty()
+		});
+		if has_dangling {
+			reject_all_pending(&mut ctx_scope, "V8 cell finished before host call settled", false);
 		}
 
-		Ok(())
+		res
 	}
 }
 
@@ -544,10 +471,6 @@ fn drive_promise<'s>(
 	promise: v8::Local<'s, v8::Promise>,
 	run_id: &str,
 	rx: &Receiver<V8Inbound>,
-	max_heap_mb: u64,
-	heap_exceeded: &AtomicBool,
-	cancel_flag: &AtomicBool,
-	should_close: &mut bool,
 ) -> Result<v8::Local<'s, v8::Value>, V8ErrorPayload> {
 	loop {
 		match promise.state() {
@@ -587,13 +510,7 @@ fn drive_promise<'s>(
 						}
 						tc.perform_microtask_checkpoint();
 						if tc.has_caught() || tc.has_terminated() {
-							return Err(extract_try_catch_error(
-								tc,
-								max_heap_mb,
-								heap_exceeded,
-								cancel_flag,
-								should_close,
-							));
+							return Err(extract_try_catch_error(tc));
 						}
 					},
 					Ok(V8Inbound::Run { run_id: busy_id, .. }) => {
@@ -610,21 +527,15 @@ fn drive_promise<'s>(
 					Ok(V8Inbound::Cancel { run_id: cancel_id }) => {
 						if cancel_id == run_id {
 							reject_all_pending(tc, "Execution aborted", true);
-							return Err(V8ErrorPayload {
-								name:    Some("AbortError".into()),
-								message: "Execution aborted".into(),
-								stack:   None,
-							});
+							return Err(V8ErrorPayload::abort("Execution aborted"));
 						}
 					},
 					Ok(V8Inbound::Close) | Err(_) => {
-						*should_close = true;
+						if let Some(state) = tc.get_slot_mut::<BridgeState>() {
+							state.should_close = true;
+						}
 						reject_all_pending(tc, "V8 runtime closed", true);
-						return Err(V8ErrorPayload {
-							name:    Some("AbortError".into()),
-							message: "V8 runtime closed".into(),
-							stack:   None,
-						});
+						return Err(V8ErrorPayload::abort("V8 runtime closed"));
 					},
 				}
 			},
@@ -636,10 +547,10 @@ fn reject_all_pending(scope: &mut v8::PinScope<'_, '_>, message: &str, is_abort:
 	let pending: Vec<v8::Global<v8::PromiseResolver>> = scope
 		.get_slot_mut::<BridgeState>()
 		.map_or_default(|state| state.pending_resolvers.drain().map(|(_, v)| v).collect());
-	let payload = V8ErrorPayload {
-		name:    Some(if is_abort { "AbortError" } else { "Error" }.into()),
-		message: message.into(),
-		stack:   None,
+	let payload = if is_abort {
+		V8ErrorPayload::abort(message)
+	} else {
+		V8ErrorPayload::new(message)
 	};
 	for resolver_global in pending {
 		let resolver = v8::Local::new(scope, &resolver_global);
@@ -806,6 +717,12 @@ fn cb_call_tool(
 	});
 }
 
+#[derive(Deserialize)]
+struct ReadOptions {
+	offset: Option<u64>,
+	limit:  Option<u64>,
+}
+
 fn cb_url_read(
 	scope: &mut v8::PinScope<'_, '_>,
 	args: v8::FunctionCallbackArguments,
@@ -816,26 +733,20 @@ fn cb_url_read(
 	let options = if opt_val.is_undefined() || opt_val.is_null() {
 		None
 	} else {
-		match v8_to_json(scope, opt_val) {
-			Ok(val) => {
-				let obj = val.as_object();
-				let valid_int = |k: &str, min: i64| -> Result<(), &'static str> {
-					match obj.and_then(|m| m.get(k)) {
-						None | Some(serde_json::Value::Null) => Ok(()),
-						Some(v) => match v.as_i64() {
-							Some(n) if n >= min => Ok(()),
-							_ => Err("read() options offset must be >= 1 and limit >= 0"),
-						},
-					}
+		match v8_to_raw_json(scope, opt_val) {
+			Ok(raw) => {
+				let parsed: ReadOptions = match serde_json::from_str::<ReadOptions>(raw.get()) {
+					Ok(opts) if opts.offset != Some(0) => opts,
+					_ => {
+						throw_type_error(
+							scope,
+							"read() options offset (>= 1) and limit (>= 0) must be integers",
+						);
+						return;
+					},
 				};
-				if obj.is_none() || valid_int("offset", 1).is_err() || valid_int("limit", 0).is_err() {
-					throw_type_error(
-						scope,
-						"read() options offset (>= 1) and limit (>= 0) must be integers",
-					);
-					return;
-				}
-				Some(val)
+				let _ = parsed.limit;
+				Some(serde_json::from_str(raw.get()).expect("valid json"))
 			},
 			Err(msg) => {
 				throw_type_error(scope, &msg);
@@ -911,14 +822,6 @@ fn json_to_v8<'s>(
 	v8::json::parse(scope, json_str).ok_or_else(|| "Failed to parse JSON into V8 value".to_string())
 }
 
-fn v8_to_json(
-	scope: &mut v8::PinScope<'_, '_>,
-	value: v8::Local<'_, v8::Value>,
-) -> Result<serde_json::Value, String> {
-	let raw = v8_to_raw_json(scope, value)?;
-	serde_json::from_str(raw.get()).map_err(|err| format!("Failed to parse serialized JSON: {err}"))
-}
-
 fn v8_error_from_payload<'s>(
 	scope: &v8::PinScope<'s, '_>,
 	payload: &V8ErrorPayload,
@@ -960,28 +863,25 @@ fn v8_error_from_payload<'s>(
 }
 
 fn extract_try_catch_error(
-	tc: &v8::PinnedRef<'_, v8::TryCatch<'_, '_, v8::HandleScope<'_>>>,
-	max_heap_mb: u64,
-	heap_exceeded: &AtomicBool,
-	cancel_flag: &AtomicBool,
-	should_close: &mut bool,
+	tc: &mut v8::PinnedRef<'_, v8::TryCatch<'_, '_, v8::HandleScope<'_>>>,
 ) -> V8ErrorPayload {
 	if tc.has_terminated() {
 		tc.cancel_terminate_execution();
-		if heap_exceeded.swap(false, Ordering::SeqCst) {
-			*should_close = true;
-			return V8ErrorPayload {
-				name:    Some("RangeError".into()),
-				message: format!("V8 isolate heap limit exceeded ({max_heap_mb} MiB)"),
-				stack:   None,
-			};
-		}
-		if cancel_flag.load(Ordering::SeqCst) {
-			return V8ErrorPayload {
-				name:    Some("AbortError".into()),
-				message: "Execution aborted".into(),
-				stack:   None,
-			};
+		if let Some(state) = tc.get_slot_mut::<BridgeState>() {
+			if state
+				.control
+				.heap_limit_exceeded
+				.swap(false, Ordering::SeqCst)
+			{
+				state.should_close = true;
+				return V8ErrorPayload::named(
+					"RangeError",
+					format!("V8 isolate heap limit exceeded ({} MiB)", state.max_heap_mb),
+				);
+			}
+			if state.control.cancel_flag.load(Ordering::SeqCst) {
+				return V8ErrorPayload::abort("Execution aborted");
+			}
 		}
 		return V8ErrorPayload::new("V8 execution terminated");
 	}

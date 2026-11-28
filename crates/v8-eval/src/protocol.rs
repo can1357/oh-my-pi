@@ -95,6 +95,14 @@ impl V8ErrorPayload {
 	pub fn new(message: impl Into<String>) -> Self {
 		Self { message: message.into(), ..Default::default() }
 	}
+
+	pub fn named(name: impl Into<String>, message: impl Into<String>) -> Self {
+		Self { name: Some(name.into()), message: message.into(), stack: None }
+	}
+
+	pub fn abort(message: impl Into<String>) -> Self {
+		Self::named("AbortError", message)
+	}
 }
 
 pub fn read_inbound_frame<R: BufRead>(
