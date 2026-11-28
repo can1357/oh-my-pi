@@ -543,6 +543,10 @@
 - Sessions started from collaboration prompts now receive automatic titles.
 - Fixed `/tan` forks ending an idle wait prematurely when their assignment remains blocked.
 
+### Changed
+
+- Changed the task tool prompt so the `effort` hint (when `task.enableEffort` is on) defaults to `lo` for lookups, mechanical edits and known fixes, `med` for ordinary implementation, and `hi` only when `solutionSpace` names genuinely open choices ([#16664](https://github.com/can1357/oh-my-pi/pull/16664) by [@Komzpa](https://github.com/Komzpa))
+
 ## [19.1.0] - 2026-11-21
 
 ### Breaking Changes

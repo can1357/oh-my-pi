@@ -54,7 +54,9 @@ Run one agent synchronously.
 - `tools`: eval-defined, run in your kernel.
 {{/if}}
 {{#if effortEnabled}}
-- `effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is.
+- `effort`: `"lo"`|`"med"`|`"hi"` by how open-ended the problem is, matching `solutionSpace`.
+  - Default `lo` for lookups, mechanical edits, and known fixes; `med` for ordinary implementation.
+  - Use `hi` only when `solutionSpace` names genuinely open choices (design or cause unknown, several competing approaches).
 {{/if}}
 {{#if perCallModelEnabled}}
 - `model`: one exact `provider/model-id[@upstream][:level]` string for this spawn only{{#if batchEnabled}}; per `tasks[]` item{{/if}}.
