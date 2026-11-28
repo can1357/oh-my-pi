@@ -9,7 +9,7 @@
  */
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
-import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import type { ContentBlockParam, MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { AnthropicOptions } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type {
 	AssistantMessage,
@@ -279,6 +279,49 @@ describe("anthropic message threads", () => {
 
 		expect(sent.map(request => request.body.thread?.type)).toEqual(["create", "continue", "create"]);
 		expect(userTexts(sent[2].body)).toEqual(["first", "reply 1", "second", "reply 2", "third"]);
+	});
+
+	it("keeps a long turn cache-reachable when it replays an expired thread", async () => {
+		// Twelve parallel calls after the thread expired: the full replay's tail
+		// breakpoint cannot look back past the results to the previous entry.
+		const calls = Array.from({ length: 12 }, (_, n) => ({ type: "tool_use", id: `toolu_${n}`, name: "lookup" }));
+		const { fetch, sent } = endpoint([textResponse("msg_1", "one"), sseResponse("msg_2", calls, "tool_use")]);
+		const chat = session(fetch);
+
+		setSystemTime(new Date("2026-11-03T10:00:00Z"));
+		await chat.turn("first");
+		setSystemTime(new Date("2026-11-03T10:01:00Z"));
+		await chat.turn("fan out");
+		for (const call of calls) {
+			chat.messages.push({
+				role: "toolResult",
+				toolCallId: call.id,
+				toolName: call.name,
+				content: [{ type: "text", text: `result ${call.id}` }],
+				isError: false,
+				timestamp: 9,
+			});
+		}
+		setSystemTime(new Date("2026-11-03T10:09:00Z"));
+		await chat.turn("third");
+
+		const [create, , replay] = sent.map(request => request.body);
+		expect(replay.thread).toEqual({ type: "create" });
+		const blocks = replay.messages.flatMap((message): ContentBlockParam[] =>
+			typeof message.content === "string" ? [{ type: "text", text: message.content }] : message.content,
+		);
+		const marked = blocks.flatMap((block, index) => ("cache_control" in block && block.cache_control ? [index] : []));
+		const firstResult = blocks.findIndex(block => block.type === "tool_result");
+		// The first block after the stored fan-out reads the previous request's entry;
+		// the newest block writes this turn.
+		expect(marked).toContain(firstResult);
+		expect(marked).toContain(blocks.length - 1);
+		const breakpoints = (value: unknown): number =>
+			(JSON.stringify(value ?? null).match(/"cache_control":\{/g) ?? []).length;
+		expect(breakpoints(replay.system) + breakpoints(replay.tools) + breakpoints(replay.messages)).toBeLessThanOrEqual(
+			4,
+		);
+		expect(breakpoints(create.messages)).toBeGreaterThan(0);
 	});
 
 	it("replays the full conversation in the same turn when the server refuses a continue", async () => {
