@@ -384,6 +384,56 @@ describe("TermBackend main surface", () => {
 		backend.stop();
 	});
 
+	it("leaves out an image cut across history batches when the rows after its head retire", () => {
+		defineRolePainter("rows", "test.streamed-image-grow", node => {
+			const props = node.props() as { lines: readonly string[] };
+			// A streaming head: all but its last three rows are final.
+			return { rows: props.lines, stable: props.lines.length - 3 };
+		});
+		const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
+		const reply = signal(["h0", "h1", ...image, "t0", "t1", "t2"]);
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({
+			main: <rows key="reply" role="test.streamed-image-grow" lines={reply} />,
+			dock: <rows key="dock" lines={["dock"]} />,
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		backend.start();
+		// The stable head (through the image's first row) went to history over a full screen; the live
+		// copy of the image was left out because that row is off the screen.
+		expect(driver.frames.at(-1)!.history?.rows).toEqual(["h0", "h1", RESERVED_ROW]);
+		expect(driver.frames.at(-1)!.viewport).toEqual([RESERVED_ROW, RESERVED_ROW, "t0", "t1", "t2", "dock"]);
+		// The stream grows: the rows after the head retire into a batch written from the screen's top
+		// row, where the image's cursor-up would clamp and draw it over the rows below.
+		reply.set(["h0", "h1", ...image, "t0", "t1", "t2", "t3", "t4", "t5", "t6"]);
+		backend.renderNow();
+		expect(driver.frames.at(-1)!.history?.rows).toEqual([RESERVED_ROW, RESERVED_ROW, "t0", "t1"]);
+		backend.stop();
+	});
+
+	it("leaves out an image cut across history batches when the flush retires its block", () => {
+		defineRolePainter("rows", "test.streamed-image-flush", node => {
+			const props = node.props() as { lines: readonly string[] };
+			// A streaming head: its first three rows are final.
+			return { rows: props.lines, stable: 3 };
+		});
+		const image = anchoredRows("\x1b]1337;File=inline=1;width=2;height=3:AA==\x07", 3);
+		const driver = new FakeDriver();
+		const surface = createSurface(() => ({
+			main: <rows key="reply" role="test.streamed-image-flush" lines={["h0", "h1", ...image, "t0", "t1", "t2"]} />,
+			dock: <rows key="dock" lines={["dock"]} />,
+		}));
+		const backend = new TermBackend({ surface, driver, theme: () => PLAIN_THEME, separator: () => 0 });
+		backend.start();
+		expect(driver.frames.at(-1)!.history?.rows).toEqual(["h0", "h1", RESERVED_ROW]);
+		expect(driver.frames.at(-1)!.viewport).toEqual([RESERVED_ROW, RESERVED_ROW, "t0", "t1", "t2", "dock"]);
+		// The shutdown flush retires the rest of the block in one batch: the image's first row is
+		// still off the screen, so that batch leaves the image out as the viewport did.
+		backend.flush();
+		expect(driver.frames.at(-1)!.history?.rows).toEqual([RESERVED_ROW, RESERVED_ROW, "t0", "t1", "t2"]);
+		backend.stop();
+	});
+
 	/**
 	 * A transcript (`a` settled, `b` live) over a dock of an optional cover (a docked report, a
 	 * waiting ask: every row of it draws over the transcript) and a one-row composer.

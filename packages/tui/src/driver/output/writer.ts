@@ -641,9 +641,15 @@ export class FrameWriter {
 		let skipped = 0;
 		if (this.#pushed.length > 0 && (this.#pendingClear || history?.kind === "replay")) this.#pushed = [];
 		if (this.#pushed.length > 0 && past.length > 0) {
-			// Rows a height shrink already pushed into scrollback are not written twice.
+			// Rows a height shrink already pushed into scrollback are not written twice. Compare the
+			// original identity of rows whose cut image was replaced, not the replacement's bytes.
 			let same = 0;
-			while (same < past.length && same < this.#pushed.length && past[same] === this.#pushed[same]) same++;
+			while (same < past.length && same < this.#pushed.length) {
+				const original = history?.originalRows?.[same];
+				const row = original === undefined ? past[same] : normalizeRow(original, width);
+				if (row !== this.#pushed[same]) break;
+				same++;
+			}
 			this.#pushed = same === past.length ? this.#pushed.slice(same) : [];
 			skipped = same;
 			past = past.slice(skipped);

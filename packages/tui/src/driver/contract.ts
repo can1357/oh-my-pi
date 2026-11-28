@@ -75,6 +75,8 @@ export interface FramePlan {
 		readonly id: number;
 		readonly rows: readonly string[];
 		readonly kind?: "append" | "replay";
+		/** Original strings at indexes where a cut image was replaced; lets the writer recognize rows a resize already pushed. */
+		readonly originalRows?: readonly (string | undefined)[];
 		/** Marks for new rows only; omitted from the portion that replays old history. */
 		readonly marks?: readonly HistoryRowMark[];
 	};
