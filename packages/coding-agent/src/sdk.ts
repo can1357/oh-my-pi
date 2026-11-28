@@ -1649,6 +1649,7 @@ const CAPTURE_DROPPED_KEYS = [
 	"matcherDigest",
 	"matcherPaths",
 	"matcherEntries",
+	"matcherSections",
 	"approval",
 	"formatApprovalDetails",
 	"approvalCacheTargets",

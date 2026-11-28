@@ -591,9 +591,7 @@ export class EditTool implements AgentTool<TInput> {
 	 * section targets plus move/rename destinations. "write" while no target is known.
 	 */
 	readonly approval = (args: unknown): ToolApprovalDecision => {
-		const { paths, fileOps } = this.#inspect(args);
-		const targets = [...paths];
-		for (const op of fileOps) if (op.kind === "move" && op.to !== undefined) targets.push(op.to);
+		const targets = this.#targets(args);
 		if (targets.length === 0) return "write";
 		const router = InternalUrlRouter.instance();
 		return strictestApproval(targets.map(target => router.writeTier(target, undefined, this.session)));
@@ -615,9 +613,7 @@ export class EditTool implements AgentTool<TInput> {
 	 * plus move/rename destinations, mirroring {@link approval}.
 	 */
 	readonly approvalCacheTargets = (args: unknown): readonly string[] | undefined => {
-		const { paths, fileOps } = this.#inspect(args);
-		const targets = [...paths];
-		for (const op of fileOps) if (op.kind === "move" && op.to !== undefined) targets.push(op.to);
+		const targets = this.#targets(args);
 		const keys: string[] = [];
 		for (const target of targets) {
 			const key = approvalTargetKey(this.session.cwd, target);
@@ -634,15 +630,20 @@ export class EditTool implements AgentTool<TInput> {
 		return digest || undefined;
 	}
 
+	/** Every file the payload touches, as {@link approval} sees them: deleted and moved files too, not only those it adds lines to. */
 	matcherPaths(args: unknown): readonly string[] | undefined {
-		const inspection = this.#inspect(args);
-		const paths = inspection.entries.length > 0 ? inspection.entries.map(entry => entry.path) : inspection.paths;
-		return paths.length > 0 ? paths : undefined;
+		const targets = this.#targets(args);
+		return targets.length > 0 ? targets : undefined;
 	}
 
 	matcherEntries(args: unknown): readonly { path: string; digest: string }[] | undefined {
 		const entries = this.#inspect(args).entries;
 		return entries.length > 0 ? entries : undefined;
+	}
+
+	matcherSections(args: unknown): readonly { path: string; text: string }[] | undefined {
+		const sections = this.#inspect(args).sections;
+		return sections.length > 0 ? sections : undefined;
 	}
 
 	openArgStream(init: AgentToolArgStreamInit): AgentToolArgStream {
@@ -865,7 +866,12 @@ export class EditTool implements AgentTool<TInput> {
 		if (this.#magic) {
 			// The payload names its files itself; the native inspectors do not know its syntax.
 			const input = (args as { input?: unknown } | null | undefined)?.input;
-			return { paths: typeof input === "string" ? magicEditPaths(input) : [], entries: [], fileOps: [] };
+			return {
+				paths: typeof input === "string" ? magicEditPaths(input) : [],
+				entries: [],
+				fileOps: [],
+				sections: [],
+			};
 		}
 		const tagged = typeof args === "object" && args !== null ? (args as InspectedArgs) : undefined;
 		const cached = tagged?.[kInspection];
@@ -874,10 +880,18 @@ export class EditTool implements AgentTool<TInput> {
 		try {
 			inspection = editInspect(this.mode, JSON.stringify(args ?? {}));
 		} catch {
-			inspection = { paths: [], entries: [], fileOps: [] };
+			inspection = { paths: [], entries: [], fileOps: [], sections: [] };
 		}
 		if (tagged) tagged[kInspection] = { mode: this.mode, inspection };
 		return inspection;
+	}
+
+	/** Every path the payload writes: section targets plus move/rename destinations. */
+	#targets(args: unknown): string[] {
+		const { paths, fileOps } = this.#inspect(args);
+		const targets = [...paths];
+		for (const op of fileOps) if (op.kind === "move" && op.to !== undefined) targets.push(op.to);
+		return targets;
 	}
 
 	/**
@@ -1001,7 +1015,7 @@ export class EditTool implements AgentTool<TInput> {
 		try {
 			inspection = editInspect(this.mode, argsJson);
 		} catch {
-			inspection = { paths: [], entries: [], fileOps: [] };
+			inspection = { paths: [], entries: [], fileOps: [], sections: [] };
 		}
 		call.argsView = { version: call.argsVersion, inspection, args: parsePartialArgs(argsJson) };
 		return call.argsView;

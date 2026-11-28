@@ -14,20 +14,27 @@ import {
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
-import { logger, prompt, relativePathWithinRoot, withTimeout } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, relativePathWithinRoot, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
 import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
+import type { ToolGuardCall } from "../extensibility/extensions/runner";
 import {
+	JUDGED_RULE_THRESHOLD,
+	judgeRuleProbabilities,
 	judgeRules,
+	type RuleProbabilities,
 	type TtsrCheckOptions,
 	type TtsrManager,
 	type TtsrMatchContext,
 	type TtsrOutput,
 } from "../export/ttsr";
+import { gateTimeoutMs } from "../export/ttsr-settings";
+import ttsrGateRefusedTemplate from "../prompts/system/ttsr-gate-refused.md" with { type: "text" };
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import ttsrProseNoticeTemplate from "../prompts/system/ttsr-prose-notice.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import ttsrWarningTemplate from "../prompts/system/ttsr-warning.md" with { type: "text" };
+import type { GateVerdict } from "../tools/tool-guard";
 import type { AgentSessionEvent } from "./agent-session-events";
 import { escapeHarnessTags } from "./harness-tags";
 import type { SessionManager } from "./session-manager";
@@ -56,6 +63,9 @@ interface TtsrContinueOptions {
 	onSkip?: (reason: TtsrContinueSkipReason) => void;
 	onError?: () => void;
 }
+
+/** What a gate judges of one call: its tool, arguments and id, and the name the model called it by. */
+export type GatedCall = Pick<ToolGuardCall, "toolCallId" | "tool" | "args" | "name">;
 
 /** Capabilities the TTSR coordinator borrows from its owning session. */
 export interface TtsrCoordinatorHost {
@@ -653,6 +663,110 @@ export class TtsrCoordinator {
 			warning,
 			rules.map(rule => rule.name),
 		);
+	}
+
+	/**
+	 * Judges a call against `gate: before` rules before it runs: the refusal shown in place of its
+	 * result, or none to run it, and whether any gate rule covered the call at all. The call keeps the
+	 * name the model called the tool by, which rule scopes name; a call without one (bridged from an
+	 * eval cell, which reaches a tool by either name) matches scopes naming the tool or its wire name.
+	 * When the judge is off, fails, outlasts `ttsr.gateTimeoutMs`, answers no probability in 0..1 or
+	 * can read only part of the call, each rule's `onJudgeError` decides. Rejects when `signal` aborts
+	 * the gate at any point: an aborted call is neither refused nor run.
+	 */
+	async gateToolCall(call: GatedCall, signal?: AbortSignal): Promise<GateVerdict> {
+		const manager = this.#manager;
+		if (!manager?.hasGateRules()) return { covered: false };
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: call.toolCallId,
+			name: call.name ?? call.tool.name,
+			arguments: isRecord(call.args) ? call.args : {},
+		};
+		const settings = this.#host.settings;
+		// Read from the operator layers only; a project layer does not set the gate's wait.
+		const timeout = AbortSignal.timeout(gateTimeoutMs(settings.grantAuthority?.() ?? settings));
+		const deadline = signal ? AbortSignal.any([signal, timeout]) : timeout;
+		// No name from the model: a bridged call matches scopes under its wire name too.
+		const wireName = call.name === undefined ? call.tool.customWireName?.toLowerCase() : undefined;
+		const toolAliases = wireName ? [wireName] : undefined;
+		const verdicts = await Promise.all(
+			this.#inspector
+				.gateOutputs(toolCall)
+				.map(output => this.#gateOutput(manager, output, signal, deadline, toolAliases)),
+		);
+		// Prefiltering or a judge-less rule settles without waiting on the signal: an abort in
+		// between still rejects.
+		signal?.throwIfAborted();
+		const covered = verdicts.some(verdict => verdict !== undefined);
+		const refused = verdicts.find(verdict => verdict?.rule !== undefined);
+		if (!refused?.rule) return { covered };
+		const { rule, output, unjudged, truncated } = refused;
+		this.#host.emitSessionEvent({ type: "ttsr_triggered", rules: [rule] }).catch(() => {});
+		return {
+			covered,
+			refusal: prompt.render(ttsrGateRefusedTemplate, {
+				name: rule.name,
+				path: this.#displayRulePath(rule.path),
+				subject: output.subject,
+				content: rule.content,
+				unjudged,
+				truncated,
+			}),
+		};
+	}
+
+	/**
+	 * Undefined when no gate rule covers `output`; else the first gate rule, in rule order, that refuses
+	 * it (`unjudged` when the judge gave no answer, `truncated` when it read only a prefix of `output`),
+	 * or no rule when every one allows it. Tool scopes also match `toolAliases`.
+	 */
+	async #gateOutput(
+		manager: TtsrManager,
+		output: TtsrOutput,
+		signal: AbortSignal | undefined,
+		deadline: AbortSignal,
+		toolAliases: readonly string[] | undefined,
+	): Promise<{ output: TtsrOutput; rule?: Rule; unjudged?: boolean; truncated?: boolean } | undefined> {
+		const candidates = await untilAborted(signal, () =>
+			manager.gateCandidates(output.content, output.context, toolAliases),
+		);
+		if (candidates.length === 0) return undefined;
+		const judge = this.#host.ruleJudge();
+		let judged: RuleProbabilities | undefined;
+		if (judge) {
+			try {
+				judged = await untilAborted(deadline, () =>
+					judgeRuleProbabilities(judge, output, candidates, { signal: deadline }),
+				);
+			} catch (error) {
+				// A call the user aborted says nothing about the judge.
+				if (signal?.aborted) throw error;
+				logger.warn("TTSR gate judge failed; onJudgeError decides", {
+					subject: output.subject,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		const truncated = judged?.truncated === true;
+		for (const [index, { rule }] of candidates.entries()) {
+			const probability = judged?.probabilities[index];
+			// A probability outside 0..1 is no answer.
+			const answered = probability !== undefined && probability >= 0 && probability <= 1;
+			// A yes about the part the judge read refuses; a no covers only that part.
+			if (answered && probability >= JUDGED_RULE_THRESHOLD) return { rule, output, unjudged: false };
+			if (answered && !truncated) continue;
+			if (rule.onJudgeError === "block") return { rule, output, unjudged: true, truncated };
+			if (truncated) {
+				logger.warn("TTSR gate judge read only part of the call; running it", {
+					rule: rule.name,
+					subject: output.subject,
+				});
+			} else if (judged) {
+				logger.warn("TTSR gate judge gave no answer; running the call", { rule: rule.name });
+			}
+		}
+		return { output };
 	}
 
 	#getStreamingToolCallBlock(message: AgentMessage, contentIndex: number): ToolCall | undefined {

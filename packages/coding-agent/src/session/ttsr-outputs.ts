@@ -11,7 +11,10 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import type { TtsrMatchContext, TtsrOutput } from "../export/ttsr";
 
 /** Tool surface TTSR reads: identity plus the optional matcher hooks. */
-export type TtsrTool = Pick<AgentTool, "name" | "customWireName" | "matcherPaths" | "matcherDigest" | "matcherEntries">;
+export type TtsrTool = Pick<
+	AgentTool,
+	"name" | "customWireName" | "matcherPaths" | "matcherDigest" | "matcherEntries" | "matcherSections"
+>;
 
 type MatcherEntries = readonly { path: string; digest: string }[];
 
@@ -165,6 +168,41 @@ export class TtsrToolInspector {
 		if (/\S/.test(reasoning)) {
 			outputs.push({ content: reasoning, context: { source: "thinking" }, subject: "reasoning" });
 		}
+		return outputs;
+	}
+
+	/**
+	 * What a gate judges about one tool call before it runs. A tool reporting per-file sections
+	 * (multi-file edits) is judged per file: each added-line digest and each file's section of the
+	 * call, under that file alone, so a file-scoped gate sees what the call deletes, moves or removes
+	 * there and nothing of the other files. Else its outputs as above and, when those are per-file
+	 * digests, the whole call once more under every file it touches.
+	 */
+	gateOutputs(toolCall: ToolCall): TtsrOutput[] {
+		const entries = this.entries(toolCall);
+		const context = this.matchContext(toolCall, 0);
+		const sections = this.#inspect(toolCall).tool?.matcherSections?.(toolCall.arguments ?? {});
+		if (sections && sections.length > 0) {
+			const outputs = entries ? this.#toolCallOutputs(toolCall, 0) : [];
+			for (const section of sections) {
+				// A section that is only added lines was judged as its digest.
+				if (entries?.some(entry => entry.path === section.path && entry.digest === section.text)) continue;
+				outputs.push({
+					content: section.text,
+					context: this.perFileContext(context, section.path),
+					subject: `\`${toolCall.name}\` call on \`${section.path}\``,
+				});
+			}
+			return outputs;
+		}
+		const outputs = this.#toolCallOutputs(toolCall, 0);
+		if (!entries) return outputs;
+		const args = toolCall.arguments;
+		outputs.push({
+			content: typeof args === "string" ? args : JSON.stringify(args ?? {}),
+			context,
+			subject: `\`${toolCall.name}\` call`,
+		});
 		return outputs;
 	}
 

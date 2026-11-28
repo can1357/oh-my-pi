@@ -7,7 +7,9 @@
  *
  * Judged rules (`question`) never match mid-stream: the session asks the judge
  * model about each completed output ({@link TtsrManager.judgedCandidates}) and
- * delivers a yes as a non-interrupting warning.
+ * delivers a yes as a non-interrupting warning. Gate rules (`gate: before`) are
+ * judged on each tool call before it runs ({@link TtsrManager.gateCandidates});
+ * a yes refuses the call.
  */
 import * as path from "node:path";
 import type { Judge, JudgeOptions, NoulQuestion } from "@oh-my-pi/pi-ai";
@@ -78,27 +80,47 @@ function jevPrefix(text: string, maxTokens: number): string {
 	return end === text.length ? text : text.slice(0, end);
 }
 
+/** Each candidate's yes-probability from one judge request, and whether the judge read all of the content. */
+export interface RuleProbabilities {
+	/** Index for index with the candidates. */
+	probabilities: number[];
+	/** The content passed {@link JUDGED_CONTENT_MAX_TOKENS}: the judge read only its prefix. */
+	truncated: boolean;
+}
+
 /**
- * Ask every candidate's question about `output` in one request — Jev bills the
- * shared state once — and return the rules judged violated. Judge failures
- * propagate to the caller.
+ * Ask every candidate's question about `output` in one request (Jev bills the
+ * shared state once) and return each candidate's yes-probability. Judge
+ * failures propagate to the caller.
  */
+export async function judgeRuleProbabilities(
+	judge: Judge,
+	output: TtsrOutput,
+	candidates: readonly JudgedCandidate[],
+	options?: JudgeOptions,
+): Promise<RuleProbabilities> {
+	const questions: Record<string, NoulQuestion> = {};
+	for (const [index, candidate] of candidates.entries()) {
+		questions[`q${index}`] = { type: "noul", instructions: candidate.question };
+	}
+	const content = jevPrefix(output.content, JUDGED_CONTENT_MAX_TOKENS);
+	const { answers } = await judge.judge({ state: { output: output.subject, content }, questions }, options);
+	return {
+		probabilities: candidates.map((_, index) => answers[`q${index}`].noul),
+		truncated: content.length < output.content.length,
+	};
+}
+
+/** The candidates {@link judgeRuleProbabilities} judges violated. */
 export async function judgeRules(
 	judge: Judge,
 	output: TtsrOutput,
 	candidates: readonly JudgedCandidate[],
 	options?: JudgeOptions,
 ): Promise<Rule[]> {
-	const questions: Record<string, NoulQuestion> = {};
-	for (const [index, candidate] of candidates.entries()) {
-		questions[`q${index}`] = { type: "noul", instructions: candidate.question };
-	}
-	const { answers } = await judge.judge(
-		{ state: { output: output.subject, content: jevPrefix(output.content, JUDGED_CONTENT_MAX_TOKENS) }, questions },
-		options,
-	);
+	const { probabilities } = await judgeRuleProbabilities(judge, output, candidates, options);
 	return candidates
-		.filter((_, index) => answers[`q${index}`].noul >= JUDGED_RULE_THRESHOLD)
+		.filter((_, index) => probabilities[index] >= JUDGED_RULE_THRESHOLD)
 		.map(candidate => candidate.rule);
 }
 
@@ -124,6 +146,8 @@ interface TtsrEntry {
 	astConditions: string[];
 	/** Judge question; set → conditions only prefilter completed output, never stream matches. */
 	question?: string;
+	/** `gate: before`: `question` is judged on each in-scope tool call before it runs, never after output. */
+	gate: boolean;
 	scope: TtsrScope;
 	globalPathGlobs?: Bun.Glob[];
 }
@@ -577,6 +601,7 @@ export class TtsrManager {
 	#canMatchText = false;
 	#canMatchThinking = false;
 	#hasJudgedRules = false;
+	#hasGateRules = false;
 
 	constructor(settings?: TtsrSettingsSource) {
 		if (typeof settings === "function") {
@@ -775,7 +800,8 @@ export class TtsrManager {
 		return false;
 	}
 
-	#matchesScope(entry: TtsrEntry, context: TtsrMatchContext): boolean {
+	/** `toolAliases` (lowercase) are further names a tool scope matches besides `context.toolName`. */
+	#matchesScope(entry: TtsrEntry, context: TtsrMatchContext, toolAliases?: readonly string[]): boolean {
 		if (context.source === "text") {
 			return entry.scope.allowText;
 		}
@@ -790,7 +816,7 @@ export class TtsrManager {
 
 		const toolName = context.toolName?.trim().toLowerCase();
 		for (const toolScope of entry.scope.toolScopes) {
-			if (toolScope.toolName && toolScope.toolName !== toolName) {
+			if (toolScope.toolName && toolScope.toolName !== toolName && !toolAliases?.includes(toolScope.toolName)) {
 				continue;
 			}
 			if (toolScope.pathGlob && !this.#matchesGlob(toolScope.pathGlob, context.filePaths)) {
@@ -814,11 +840,31 @@ export class TtsrManager {
 		const conditions = this.#compileConditions(rule);
 		const astConditions = (rule.astCondition ?? []).map(pattern => pattern.trim()).filter(p => p.length > 0);
 		const question = rule.question?.trim() || undefined;
+		const gate = rule.gate === "before";
+		if (gate && !question) {
+			logger.warn("TTSR gate rule has no question, skipping rule", { ruleName: rule.name });
+			return false;
+		}
 		if (conditions.length === 0 && astConditions.length === 0 && !question) {
 			return false;
 		}
 
 		const scope = this.#buildScope(rule);
+		if (gate) {
+			// Gates judge tool calls only; with no `scope` that is every tool call.
+			if (rule.scope?.length && (scope.allowText || scope.allowThinking)) {
+				logger.warn("TTSR gate rule judges tool calls only, ignoring text and thinking scope", {
+					ruleName: rule.name,
+				});
+			}
+			scope.allowText = false;
+			scope.allowThinking = false;
+			if (rule.repeatMode || rule.interruptMode) {
+				logger.warn("TTSR gate rule judges every call, ignoring repeatMode and interruptMode", {
+					ruleName: rule.name,
+				});
+			}
+		}
 		if (!this.#hasReachableScope(scope)) {
 			logger.warn("TTSR scope excludes all streams, skipping rule", {
 				ruleName: rule.name,
@@ -833,10 +879,13 @@ export class TtsrManager {
 			conditionTraits: conditions.map(analyzeCondition),
 			astConditions,
 			question,
+			gate,
 			scope,
 			globalPathGlobs,
 		});
-		if (question) {
+		if (gate) {
+			this.#hasGateRules = true;
+		} else if (question) {
 			this.#hasJudgedRules = true;
 		} else {
 			if (scope.allowText) this.#canMatchText = true;
@@ -1046,9 +1095,14 @@ export class TtsrManager {
 		return false;
 	}
 
-	/** True when any registered rule is judged (`question`). */
+	/** True when any registered rule is judged after output (`question` without `gate`). */
 	hasJudgedRules(): boolean {
 		return this.#settings.enabled && this.#hasJudgedRules;
+	}
+
+	/** True when any registered rule gates tool calls before they run (`gate: before`). */
+	hasGateRules(): boolean {
+		return this.#settings.enabled && this.#hasGateRules;
 	}
 
 	/**
@@ -1064,8 +1118,39 @@ export class TtsrManager {
 		for (const entry of this.#rules.values()) {
 			if (
 				!entry.question ||
+				entry.gate ||
 				!this.#canTrigger(entry.rule) ||
 				!this.#matchesScope(entry, context) ||
+				!this.#matchesGlobalPaths(entry, context) ||
+				!(await this.#passesPrefilter(entry, content, context))
+			) {
+				continue;
+			}
+			candidates.push({ rule: entry.rule, question: entry.question });
+		}
+		return candidates;
+	}
+
+	/**
+	 * Gate rules to ask about one tool call before it runs: in scope, inside the
+	 * rule's path globs, and past the `condition`/`astCondition` prefilter. No
+	 * repeat gate: a refused call retried unchanged is judged again. Tool scopes
+	 * match `context.toolName` or any of `toolAliases` (lowercase).
+	 */
+	async gateCandidates(
+		content: string,
+		context: TtsrMatchContext,
+		toolAliases?: readonly string[],
+	): Promise<JudgedCandidate[]> {
+		if (!this.hasGateRules()) {
+			return [];
+		}
+		const candidates: JudgedCandidate[] = [];
+		for (const entry of this.#rules.values()) {
+			if (
+				!entry.gate ||
+				!entry.question ||
+				!this.#matchesScope(entry, context, toolAliases) ||
 				!this.#matchesGlobalPaths(entry, context) ||
 				!(await this.#passesPrefilter(entry, content, context))
 			) {
@@ -1267,6 +1352,7 @@ export class TtsrManager {
 		this.#canMatchText = replacement.#canMatchText;
 		this.#canMatchThinking = replacement.#canMatchThinking;
 		this.#hasJudgedRules = replacement.#hasJudgedRules;
+		this.#hasGateRules = replacement.#hasGateRules;
 		this.resetBuffer();
 
 		if (!this.#settings.enabled) return registered;

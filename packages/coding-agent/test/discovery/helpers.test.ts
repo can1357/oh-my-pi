@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
-import { loadFilesFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { buildRuleFromMarkdown, createSourceMeta, loadFilesFromDir } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { parseFrontmatter, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 describe("parseFrontmatter", () => {
@@ -73,6 +74,39 @@ Body content`;
 			nestedField: { innerKey: "value" },
 		});
 		expect(result.body).toBe("Body content");
+	});
+});
+
+describe("rule gate frontmatter", () => {
+	test("a rule file with gate: before registers as a gate that blocks when unjudged", () => {
+		const rule = buildRuleFromMarkdown(
+			"no-rm.md",
+			"---\nquestion: Does the command delete files?\ngate: before\nonJudgeError: block\n---\nNever delete files.",
+			"no-rm.md",
+			createSourceMeta("test", "no-rm.md", "project"),
+		);
+		const manager = new TtsrManager({});
+
+		expect(rule).toMatchObject({ gate: "before", onJudgeError: "block" });
+		expect(manager.addRule(rule)).toBe(true);
+		expect(manager.hasGateRules()).toBe(true);
+		expect(manager.hasJudgedRules()).toBe(false);
+	});
+
+	test("unsupported gate and onJudgeError values leave an after-output judged rule", () => {
+		const rule = buildRuleFromMarkdown(
+			"no-rm.md",
+			"---\nquestion: Does the command delete files?\ngate: after\nonJudgeError: maybe\n---\nNever delete files.",
+			"no-rm.md",
+			createSourceMeta("test", "no-rm.md", "project"),
+		);
+		const manager = new TtsrManager({});
+
+		expect(rule.gate).toBeUndefined();
+		expect(rule.onJudgeError).toBeUndefined();
+		expect(manager.addRule(rule)).toBe(true);
+		expect(manager.hasGateRules()).toBe(false);
+		expect(manager.hasJudgedRules()).toBe(true);
 	});
 });
 

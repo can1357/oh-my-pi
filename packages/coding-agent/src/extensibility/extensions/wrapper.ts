@@ -531,6 +531,42 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 		}
 
+		// 3. The tool guard: rule gates judge every call; its harm judge screens only calls the approval
+		// gate let through on its own. A call the user just approved in a prompt was asked for; a tool
+		// command run inside `bash` passes its own approval above, so only its own prompt counts. An
+		// abort while a gate waits on its judge rejects: the call neither runs nor counts as refused.
+		// The model's name for the call, which rule scopes match: a custom wire name (`apply_patch`)
+		// when it used one. A call that is not the batch's own (bridged from an eval cell, or a tool
+		// command under its `bash` call) has none.
+		const userApproved = approvalCheck.required;
+		const batchCall = context?.toolCall?.toolCalls[context.toolCall.index];
+		const calledName =
+			batchCall?.id === toolCallId &&
+			(batchCall.name === this.tool.name || batchCall.name === this.tool.customWireName)
+				? batchCall.name
+				: undefined;
+		let refusal: string | undefined;
+		try {
+			refusal = await this.runner.runToolGuard?.(
+				{
+					toolCallId,
+					tool: this.tool,
+					args: resolvedArgs,
+					tier: resolved.tier,
+					prompted: userApproved,
+					name: calledName,
+				},
+				signal,
+			);
+		} catch (err) {
+			cancelPreflight();
+			throw err;
+		}
+		if (refusal !== undefined) {
+			cancelPreflight();
+			throw new Error(refusal);
+		}
+
 		// Execute the actual tool
 		let result: AgentToolResult<TDetails, TParameters>;
 		let executionError: Error | undefined;

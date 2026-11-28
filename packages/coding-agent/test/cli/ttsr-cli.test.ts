@@ -256,6 +256,50 @@ describe("omp ttsr", () => {
 				expect(first).toHaveProperty("scope");
 			}
 		});
+
+		it("shows a rule's gate and onJudgeError in the listing and in test details", async () => {
+			const originalCwd = getProjectDir();
+			const projectDir = path.join(testTmpDir, `.tmp-ttsr-gate-${Math.random().toString(36).slice(2)}`);
+			const rulesDir = path.join(getProjectAgentDir(projectDir), "rules");
+			fs.mkdirSync(rulesDir, { recursive: true });
+			await Bun.write(
+				path.join(rulesDir, "gated-push.md"),
+				"---\nquestion: Does the command push to a remote?\ngate: before\nonJudgeError: block\n---\nNever push.",
+			);
+			setProjectDir(projectDir);
+			try {
+				captureStreams();
+				await run({ action: "list", json: true });
+				const rule = (JSON.parse(stdout) as Array<Record<string, unknown>>).find(r => r.name === "gated-push");
+				expect(rule).toMatchObject({ gate: "before", onJudgeError: "block" });
+
+				captureStreams();
+				await run({ action: "list" });
+				const line = stdout.split("\n").find(l => l.includes("gated-push"));
+				expect(line).toContain("gate: before");
+				expect(line).toContain("onJudgeError: block");
+
+				captureStreams();
+				const gatedRule = path.join(rulesDir, "gated-push.md");
+				await run({
+					action: "test",
+					test: { rule: gatedRule, snippet: "git push", source: "tool", tool: "bash" },
+					json: true,
+				});
+				const report = JSON.parse(stdout) as { notTriggered: Array<Record<string, unknown>> };
+				expect(report.notTriggered[0]).toMatchObject({ gate: "before", onJudgeError: "block" });
+
+				captureStreams();
+				await run({
+					action: "test",
+					test: { rule: gatedRule, snippet: "git push", source: "tool", tool: "bash", verbose: true },
+				});
+				expect(stdout).toContain("onJudgeError: block");
+			} finally {
+				setProjectDir(originalCwd);
+				resetSettingsForTest();
+			}
+		});
 	});
 
 	describe("scan — directory scanning", () => {

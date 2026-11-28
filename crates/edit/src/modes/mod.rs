@@ -1,6 +1,6 @@
 //! The five edit-mode engines.
 
-use crate::engine::{EditMode, ModeEngine};
+use crate::engine::{EditMode, FileOpIntent, ModeEngine};
 
 pub mod apply_patch;
 pub mod hashline;
@@ -52,4 +52,32 @@ pub(crate) fn added_lines<'a>(rows: impl Iterator<Item = &'a str>) -> Option<Str
 		}
 	}
 	out
+}
+
+/// Appends `text` to `path`'s section in [`crate::Inspection::sections`],
+/// merging repeat sections of one path.
+pub(crate) fn push_section(sections: &mut Vec<(String, String)>, path: &str, text: &str) {
+	if let Some((_, existing)) = sections.iter_mut().find(|(candidate, _)| candidate == path) {
+		existing.push('\n');
+		existing.push_str(text);
+	} else {
+		sections.push((path.to_owned(), text.to_owned()));
+	}
+}
+
+/// Gives each move destination its source's section.
+pub(crate) fn pair_move_destinations(
+	sections: &mut Vec<(String, String)>,
+	file_ops: &[FileOpIntent],
+) {
+	for op in file_ops {
+		if let FileOpIntent::Move { from, to } = op
+			&& let Some(text) = sections
+				.iter()
+				.find(|(path, _)| path == from)
+				.map(|(_, text)| text.clone())
+		{
+			push_section(sections, to, &text);
+		}
+	}
 }

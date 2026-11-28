@@ -2335,19 +2335,26 @@ export declare function editGrammar(mode: string): string | null
 export declare function editInspect(mode: string, argsJson: string): EditInspection
 
 /**
- * Static projection of a payload: target paths, per-file digests, and
- * delete/move intents.
+ * Static projection of a payload: target paths, per-file digests, delete/move
+ * intents, and each file's section of the payload.
  */
 export interface EditInspection {
   paths: Array<string>
   entries: Array<EditMatcherEntry>
   fileOps: Array<EditFileOpIntent>
+  sections: Array<EditMatcherSection>
 }
 
 /** `(path, added-lines digest)` for stream matchers. */
 export interface EditMatcherEntry {
   path: string
   digest: string
+}
+
+/** `(path, section)`: the payload text about one file, patch grammar kept. */
+export interface EditMatcherSection {
+  path: string
+  text: string
 }
 
 /** Session-wide policy; TypeScript builds it once per tool call. */

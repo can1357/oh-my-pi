@@ -1979,6 +1979,7 @@ impl ModeEngine for PatchEngine {
 			paths: vec![path.clone()],
 			entries: digest.map_or_default(|value| vec![(path.clone(), value)]),
 			file_ops,
+			sections: Vec::new(),
 		}
 	}
 }

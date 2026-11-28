@@ -168,6 +168,48 @@ fn matcher_paths_entries_and_file_ops_follow_the_envelope() {
 	assert_eq!(inspection.paths, ["a.txt", "c.txt"]);
 	assert_eq!(inspection.entries, [("a.txt".into(), "new".into())]);
 	assert_eq!(inspection.file_ops.len(), 2);
+	let moved = "*** Update File: a.txt\n*** Move to: b.txt\n@@\n-old\n+new";
+	assert_eq!(inspection.sections, [
+		("a.txt".into(), moved.into()),
+		("c.txt".into(), "*** Delete File: c.txt".into()),
+		("b.txt".into(), moved.into()),
+	]);
+}
+
+#[test]
+fn a_hunk_line_mentioning_the_end_marker_keeps_the_rest_of_its_section() {
+	let engine = ApplyPatchEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
+	let body = "*** Update File: src/lib.rs\n@@\n-    // handles \"*** End Patch\" lines\n-    // \
+	            Copyright 2026 Acme\n+    // handles envelope ends";
+	for input in [
+		format!("*** Begin Patch\n{body}\n*** End Patch"),
+		format!("<<'EOF'\n*** Begin Patch\n{body}\n*** End Patch\nEOF\n"),
+	] {
+		let args = omp_edit::stream_json::ArgSnapshot {
+			input: Some(input),
+			complete: true,
+			..Default::default()
+		};
+		let inspection = engine.inspect(&args);
+		assert_eq!(inspection.sections, [("src/lib.rs".into(), body.into())]);
+	}
+}
+
+#[test]
+fn indented_header_text_inside_an_update_hunk_stays_in_its_section() {
+	let engine = ApplyPatchEngine { allow_fuzzy: true, fuzzy_threshold: 0.95 };
+	let body = "*** Update File: secrets.env\n@@\n *** Add File: notes.txt\n-TOKEN=1";
+	let input = format!("*** Begin Patch\n{body}\n*** End Patch");
+	let parsed = parse_apply_patch(&input).unwrap();
+	assert_eq!(parsed.len(), 1);
+	assert_eq!(parsed[0].path, "secrets.env");
+	let args = omp_edit::stream_json::ArgSnapshot {
+		input: Some(input),
+		complete: true,
+		..Default::default()
+	};
+	let inspection = engine.inspect(&args);
+	assert_eq!(inspection.sections, [("secrets.env".into(), body.into())]);
 }
 
 #[tokio::test]

@@ -134,7 +134,7 @@ function buildRule(
 	source: SourceMeta,
 	options?: RuleMarkdownOptions,
 ): Rule {
-	const { condition, astCondition, question, scope } = parseRuleConditionAndScope(frontmatter);
+	const { condition, astCondition, question, gate, onJudgeError, scope } = parseRuleConditionAndScope(frontmatter);
 
 	let globs: string[] | undefined;
 	if (Array.isArray(frontmatter.globs)) {
@@ -162,6 +162,8 @@ function buildRule(
 		condition,
 		astCondition,
 		question,
+		gate,
+		onJudgeError,
 		scope,
 		agents: parseRuleAgents(frontmatter.agents),
 		interruptMode,

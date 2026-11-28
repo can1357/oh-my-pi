@@ -886,6 +886,13 @@ pub struct EditMatcherEntry {
 	pub digest: String,
 }
 
+/// `(path, section)`: the payload text about one file, patch grammar kept.
+#[napi(object)]
+pub struct EditMatcherSection {
+	pub path: String,
+	pub text: String,
+}
+
 /// A destructive file operation a payload declares.
 #[napi(object)]
 pub struct EditFileOpIntent {
@@ -895,13 +902,14 @@ pub struct EditFileOpIntent {
 	pub to:   Option<String>,
 }
 
-/// Static projection of a payload: target paths, per-file digests, and
-/// delete/move intents.
+/// Static projection of a payload: target paths, per-file digests, delete/move
+/// intents, and each file's section of the payload.
 #[napi(object)]
 pub struct EditInspection {
 	pub paths:    Vec<String>,
 	pub entries:  Vec<EditMatcherEntry>,
 	pub file_ops: Vec<EditFileOpIntent>,
+	pub sections: Vec<EditMatcherSection>,
 }
 
 /// Inspect `argsJson` (the JSON-serialized, possibly partial tool args)
@@ -930,6 +938,11 @@ pub fn edit_inspect(mode: String, args_json: String) -> Result<EditInspection> {
 					EditFileOpIntent { kind: "move".into(), path: from, to: Some(to) }
 				},
 			})
+			.collect(),
+		sections: inspection
+			.sections
+			.into_iter()
+			.map(|(path, text)| EditMatcherSection { path, text })
 			.collect(),
 	})
 }

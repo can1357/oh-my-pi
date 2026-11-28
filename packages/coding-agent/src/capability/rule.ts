@@ -34,6 +34,10 @@ export interface RuleFrontmatter {
 	astCondition?: string | string[];
 	/** Natural-language yes/no question a judge model answers on each completed in-scope output. */
 	question?: string;
+	/** `before`: judge `question` against each in-scope tool call before it runs, refusing a yes. */
+	gate?: string;
+	/** For a gate the judge cannot answer: `allow` (default) runs the call, `block` refuses it. */
+	onJudgeError?: string;
 	/** New key for TTSR stream scope. */
 	scope?: string | string[];
 	/** Agent-name globs this rule applies to; absent = every agent. `main` targets the top-level session. */
@@ -71,6 +75,13 @@ export interface Rule {
 	 * `astCondition`, when also set, only gate whether the question is asked.
 	 */
 	question?: string;
+	/**
+	 * `before`: `question` is asked of each in-scope tool call before it runs, and a yes refuses the
+	 * call instead of warning after it.
+	 */
+	gate?: "before";
+	/** What a gate does when the judge cannot answer (off, failing, timed out); default `allow`. */
+	onJudgeError?: "block" | "allow";
 	/** Optional stream scope tokens (for example: text, thinking, tool:edit(*.ts)). */
 	scope?: string[];
 	/** Lowercased agent-name globs this rule applies to (absent = every agent). */
@@ -253,7 +264,8 @@ function isLikelyFileGlob(value: string): boolean {
 }
 
 /**
- * Parse the TTSR trigger fields (`condition`, `astCondition`, `question`) and `scope` from rule frontmatter.
+ * Parse the TTSR trigger fields (`condition`, `astCondition`, `question`, `gate`, `onJudgeError`) and `scope`
+ * from rule frontmatter.
  *
  * - `condition` accepts string or string[]
  * - `scope` accepts string or string[]
@@ -262,10 +274,11 @@ function isLikelyFileGlob(value: string): boolean {
  *   `*.rs` => `tool:edit(*.rs)`, `tool:write(*.rs)` and a catch-all condition `.*`
  * - `astCondition` holds ast-grep patterns and is kept verbatim (no glob inference)
  * - `question` accepts a single non-empty string
+ * - `gate` accepts only `before`; `onJudgeError` accepts `block` or `allow`. Other values warn and are ignored.
  */
 export function parseRuleConditionAndScope(
 	frontmatter: RuleFrontmatter,
-): Pick<Rule, "condition" | "astCondition" | "question" | "scope"> {
+): Pick<Rule, "condition" | "astCondition" | "question" | "gate" | "onJudgeError" | "scope"> {
 	const rawCondition = frontmatter.condition ?? frontmatter.ttsr_trigger ?? frontmatter.ttsrTrigger;
 	const parsedCondition = normalizeRuleField(rawCondition);
 	const astCondition = normalizeRuleField(frontmatter.astCondition);
@@ -292,8 +305,17 @@ export function parseRuleConditionAndScope(
 		condition: condition.length > 0 ? Array.from(new Set(condition)) : undefined,
 		astCondition,
 		question: typeof frontmatter.question === "string" ? frontmatter.question.trim() || undefined : undefined,
+		gate: parseRuleEnum("gate", frontmatter.gate, ["before"]),
+		onJudgeError: parseRuleEnum("onJudgeError", frontmatter.onJudgeError, ["block", "allow"]),
 		scope: scope.length > 0 ? Array.from(new Set(scope)) : undefined,
 	};
+}
+
+function parseRuleEnum<T extends string>(key: string, value: unknown, values: readonly T[]): T | undefined {
+	const match = values.find(candidate => candidate === value);
+	if (value === undefined || match !== undefined) return match;
+	logger.warn(`Rules: unsupported \`${key}\` value, ignoring it`, { value, supported: values });
+	return undefined;
 }
 
 /** Leading PCRE-style inline flag group, e.g. `(?i)` or `(?ims)`. */

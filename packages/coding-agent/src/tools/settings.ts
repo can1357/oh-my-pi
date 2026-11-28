@@ -371,6 +371,50 @@ export const cfgToolsRestrictedFolders = register({
 	},
 });
 
+// Tool guard: the judge role screens calls that approval allowed. Its thresholds and the user's
+// allowances are read from the operator layers (Settings.grantAuthority()), never from a project.
+export const cfgToolGuardEnabled = register({
+	id: "tools.guard.enabled",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Approvals",
+		label: "Tool Guard",
+		description:
+			"After approval allows a call that can do harm (a shell command that is not only reads, a write outside the working directory, eval, browser, MCP tools), ask the judge model what it would do and whether the user asked for it, and refuse a risky call nobody asked for. Any judge failure lets the call through.",
+	},
+});
+
+function validateProbability(id: string): (raw: unknown) => void {
+	return raw => {
+		if (raw === undefined) return;
+		if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0 || raw > 1) {
+			throw new Error(`${id} must be a number from 0 to 1`);
+		}
+	};
+}
+
+export const cfgToolGuardRiskThreshold = register({
+	id: "tools.guard.riskThreshold",
+	type: "number",
+	default: 0.6,
+	validate: validateProbability("tools.guard.riskThreshold"),
+});
+
+export const cfgToolGuardAskedThreshold = register({
+	id: "tools.guard.askedThreshold",
+	type: "number",
+	default: 0.3,
+	validate: validateProbability("tools.guard.askedThreshold"),
+});
+
+export const cfgToolGuardAllowances = register({
+	id: "tools.guard.allowances",
+	type: "string",
+	default: undefined,
+});
+
 // Todo tool
 // Todo settings deliberately have no `protocolDefault`: protocol embedders need project-level opt-outs
 // for reminder/prelude prompt injection.

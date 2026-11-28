@@ -534,8 +534,88 @@ fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
 		.collect()
 }
 
-fn inspect_entries(input: &str) -> (Vec<String>, Vec<(String, String)>, Vec<FileOpIntent>) {
+/// Byte offset where the envelope's file sections end: the start of the
+/// closing `*** End Patch` line when it is the last line (inside an optional
+/// heredoc wrapper), the way `parse_with_options` reads the envelope, else the
+/// end of the input. Marker text inside a hunk line never ends a section.
+fn envelope_body_end(input: &str) -> usize {
+	let mut text = input.trim_end();
+	let last_line = |text: &str| text.rfind('\n').map_or(0, |at| at + 1);
+	if matches!(js_trim(input).split('\n').next(), Some("<<EOF" | "<<'EOF'" | "<<\"EOF\""))
+		&& js_trim(&text[last_line(text)..]) == "EOF"
+	{
+		text = text[..last_line(text)].trim_end();
+	}
+	let line = last_line(text);
+	if js_trim(&text[line..]) == END_PATCH_MARKER {
+		line
+	} else {
+		input.len()
+	}
+}
+
+/// Start offset and path of each line before `body_end` that
+/// `parse_with_options` reads as a file header. Inside an update body only a
+/// column-0 `*** Add/Delete/Update File:` line ends the body, and inside an add
+/// body every `+` line is content, so header text on a hunk line never starts
+/// a section.
+fn section_headers(input: &str, body_end: usize) -> Vec<(String, usize)> {
+	enum Body {
+		None,
+		Add,
+		Update,
+	}
+	let mut headers = Vec::new();
+	let mut body = Body::None;
+	let mut offset = 0;
+	for raw in input[..body_end].split_inclusive('\n') {
+		let start = offset;
+		offset += raw.len();
+		let line = raw.strip_suffix('\n').unwrap_or(raw);
+		let in_body = match body {
+			Body::None => false,
+			Body::Add => line.starts_with('+'),
+			Body::Update => {
+				!(line.starts_with("*** Add File:")
+					|| line.starts_with("*** Delete File:")
+					|| line.starts_with("*** Update File:"))
+			},
+		};
+		if in_body {
+			continue;
+		}
+		let trimmed = js_trim(line);
+		let header = trimmed
+			.strip_prefix(ADD_FILE_MARKER)
+			.map(|path| (path, Body::Add))
+			.or_else(|| {
+				trimmed
+					.strip_prefix(DELETE_FILE_MARKER)
+					.map(|path| (path, Body::None))
+			})
+			.or_else(|| {
+				trimmed
+					.strip_prefix(UPDATE_FILE_MARKER)
+					.map(|path| (path, Body::Update))
+			});
+		body = Body::None;
+		if let Some((path, next)) = header {
+			headers.push((path.to_owned(), start));
+			body = next;
+		}
+	}
+	headers
+}
+
+fn inspect_entries(input: &str) -> Inspection {
 	let paths = envelope_paths(input).map(str::to_owned).collect::<Vec<_>>();
+	let body_end = envelope_body_end(input);
+	let headers = section_headers(input, body_end);
+	let mut sections = Vec::new();
+	for (index, (path, start)) in headers.iter().enumerate() {
+		let end = headers.get(index + 1).map_or(body_end, |(_, next)| *next);
+		super::push_section(&mut sections, path, input[*start..end].trim());
+	}
 	let entries = parse_apply_patch(input)
 		.or_else(|_| parse_apply_patch_streaming(input))
 		.unwrap_or_default();
@@ -565,11 +645,12 @@ fn inspect_entries(input: &str) -> (Vec<String>, Vec<(String, String)>, Vec<File
 			file_ops.push(FileOpIntent::Move { from: entry.path, to: rename });
 		}
 	}
-	let matcher_entries = order
+	let entries = order
 		.into_iter()
 		.map(|path| (path.clone(), digests.remove(&path).unwrap()))
 		.collect();
-	(paths, matcher_entries, file_ops)
+	super::pair_move_destinations(&mut sections, &file_ops);
+	Inspection { paths, entries, file_ops, sections }
 }
 
 /// Codex envelope mode engine.
@@ -651,8 +732,7 @@ impl ModeEngine for ApplyPatchEngine {
 		let Some(input) = args.input.as_deref() else {
 			return Inspection::default();
 		};
-		let (paths, entries, file_ops) = inspect_entries(input);
-		Inspection { paths, entries, file_ops }
+		inspect_entries(input)
 	}
 }
 

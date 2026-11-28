@@ -16,6 +16,7 @@
 ### Added
 
 - Added `CompactionSettings.summaryMaxTokens` to set the output budget for regular compaction summaries; history that fits alongside the actual previous summary and requested output is retained ([#18688](https://github.com/can1357/oh-my-pi/issues/18688))
+- Added optional `AgentTool.matcherSections(args)` hook returning each touched file's section of a multi-file payload, so pre-execution TTSR gates judge each file on its own ([#19893](https://github.com/can1357/oh-my-pi/pull/19893) by [@Xytronix](https://github.com/Xytronix))
 
 ### Changed
 
