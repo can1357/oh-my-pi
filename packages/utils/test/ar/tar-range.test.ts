@@ -3,7 +3,7 @@ import { ArchiveError } from "../../src/ar/error";
 import { DEFAULT_ARCHIVE_LIMITS } from "../../src/ar/limits";
 import { openArchive } from "../../src/ar/open";
 import { ArchiveReader } from "../../src/ar/reader";
-import { type ByteSource, memoryByteSource } from "../../src/ar/source";
+import { type ByteSource, memoryByteSource, readByteSourceChunks, STREAM_CHUNK_SIZE } from "../../src/ar/source";
 import { encodeTar, readTar } from "../../src/ar/tar";
 import { arFixture as fixture } from "./fixtures";
 
@@ -41,6 +41,29 @@ describe("plain tar range reads", () => {
 		expect(reads.length).toBe(beforeOversizedRead);
 	});
 
+	test("refuses an oversized member through readFileChunks as over maxMemberSize, before reading it", async () => {
+		const bytes = await encodeTar([["large.bin", new Uint8Array(8192)]]);
+		const reads: [number, number][] = [];
+		const source: ByteSource = {
+			size: bytes.byteLength,
+			async read(start, end) {
+				reads.push([start, end]);
+				return bytes.subarray(start, end);
+			},
+		};
+		const archive = await openArchive({ source, format: "tar" }, { limits: { maxMemberSize: 4096 } });
+		reads.length = 0;
+		// Plain tar reads the member 1 MiB at a time, so memory is not what refuses it.
+		await expect(archive.readFileChunks("large.bin").next()).rejects.toThrow(
+			/^Archive member 'large\.bin' exceeds the member size limit \(8\.0KB > 4\.0KB\)$/,
+		);
+		// `readFile` holds the member whole, so its refusal still says so.
+		await expect(archive.readFile("large.bin")).rejects.toThrow(
+			/^Archive member 'large\.bin' is too large to extract in memory \(8\.0KB > 4\.0KB limit\)$/,
+		);
+		expect(reads).toEqual([]);
+	});
+
 	test("opens a plain tar above a lowered in-memory limit through the public API", async () => {
 		const bytes = await encodeTar([
 			["first.txt", new TextEncoder().encode("first")],
@@ -70,6 +93,7 @@ describe("plain tar range reads", () => {
 			expect(new TextDecoder().decode((await archive.readFile(memberPath)).bytes)).toBe(expected);
 			if (name === "tar-sparse-oldgnu.tar") {
 				await expect(archive.readFile("data/sparse.bin")).rejects.toThrow("sparse file");
+				await expect(archive.readFileChunks("data/sparse.bin").next()).rejects.toThrow("sparse file");
 			}
 		}
 	});
@@ -93,6 +117,23 @@ describe("plain tar range reads", () => {
 		);
 		shortReads = true;
 		await expect(new ArchiveReader("tar", entries).readFile("hello.txt")).rejects.toThrow("truncated");
+	});
+
+	test("rejects a short member range before yielding it, even if the next range would be long", async () => {
+		const bytes = await encodeTar([["data.bin", new Uint8Array(STREAM_CHUNK_SIZE + 2)]]);
+		let readingMember = false;
+		let reads = 0;
+		const source: ByteSource = {
+			size: bytes.byteLength,
+			async read(start, end) {
+				// The two wrong lengths add up to the declared member size.
+				return bytes.subarray(start, readingMember ? end + (reads++ === 0 ? -1 : 1) : end);
+			},
+		};
+		const archive = await openArchive({ source, format: "tar" });
+		readingMember = true;
+		await expect(archive.readFileChunks("data.bin").next()).rejects.toThrow("Archive member 'data.bin' is truncated");
+		expect(reads).toBe(1);
 	});
 
 	test("keeps corrupt-header, entry, path, and metadata limits on the ranged path", async () => {
@@ -156,5 +197,25 @@ describe("plain tar range reads", () => {
 				{ limits: DEFAULT_ARCHIVE_LIMITS },
 			),
 		).rejects.toBeInstanceOf(ArchiveError);
+	});
+});
+
+describe("readByteSourceChunks ranges", () => {
+	const source: ByteSource = {
+		size: 10,
+		async read() {
+			throw new Error("This range must not read from the source");
+		},
+	};
+
+	test.each([
+		["a reversed range", 5, 3],
+		["a NaN end", 0, Number.NaN],
+	] as const)("rejects %s", async (_name, start, end) => {
+		await expect(readByteSourceChunks(source, start, end).next()).rejects.toThrow("Invalid archive range");
+	});
+
+	test("yields no chunks for a valid empty range", async () => {
+		expect(await readByteSourceChunks(source, 5, 5).next()).toEqual({ done: true, value: undefined });
 	});
 });

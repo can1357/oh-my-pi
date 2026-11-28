@@ -88,6 +88,12 @@ export interface MemberSource {
 	 * the container records them) and throw {@link ArchiveError} on mismatch.
 	 */
 	read(size: number, memberPath: string): Promise<Uint8Array>;
+	/**
+	 * {@link read}'s bytes as a sequence of bounded chunks, with the same
+	 * checks, for a member too large to hold whole. Formats without it are read
+	 * through {@link read} as one chunk.
+	 */
+	chunks?(size: number, memberPath: string): AsyncIterable<Uint8Array>;
 }
 
 /**

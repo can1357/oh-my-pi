@@ -22,12 +22,12 @@ import {
 	resolveImageDataUrlSync,
 } from "./blob-store";
 import { buildSessionContext } from "./session-context";
-import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
+import type { FileEntry, RawFileEntry, SessionEntry } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
 import { isExternalizableImagePosition, isPersistenceTruncatedString } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 import { enotdir } from "./session-storage-errors";
-import { SESSION_HEADER_READ_LIMIT, sessionHeaderIdFromPrefix } from "./session-header-id";
+import { isValidSessionHeader, SESSION_HEADER_READ_LIMIT, sessionHeaderIdFromPrefix } from "./session-header-id";
 import {
 	parseTitleSlotFromContent,
 	parseTitleSlotLine,
@@ -142,10 +142,6 @@ function splitTitleSlot(content: string): { body: string; slot: SessionTitleUpda
 	if (!slot) return { body: content, slot: undefined };
 	const newlineIndex = content.indexOf("\n");
 	return { body: content.slice(newlineIndex + 1), slot };
-}
-
-function isValidSessionHeader(entry: FileEntry | undefined): entry is SessionHeader {
-	return entry?.type === "session" && typeof entry.id === "string";
 }
 
 function applyTitleSlot(entry: FileEntry | undefined, slot: SessionTitleUpdate | undefined): void {

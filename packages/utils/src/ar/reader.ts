@@ -1,6 +1,7 @@
 import { ensureParentDirectories, resolveArchiveLinkPath, upsertArchiveEntry } from "./entries";
 import { ArchiveError } from "./error";
 import { type ArchiveLimits, assertArchiveMemberSize, DEFAULT_ARCHIVE_LIMITS } from "./limits";
+import { chunksOrWhole } from "./member-chunks";
 import { formatArchivePathForError, normalizeArchiveLookupPath } from "./paths";
 import type {
 	ArchiveDirectoryEntry,
@@ -8,6 +9,7 @@ import type {
 	ArchiveIndexEntry,
 	ArchiveNode,
 	ExtractedArchiveFile,
+	MemberSource,
 } from "./types";
 
 /** Raise the canonical error for a symlink whose target cannot be materialized. */
@@ -125,6 +127,37 @@ export class ArchiveReader {
 
 	/** Extract one file member's bytes, following symlink aliases. */
 	async readFile(subPath: string): Promise<ExtractedArchiveFile> {
+		const { path, entry, source } = this.#fileMember(subPath, "whole");
+		const bytes = await source.read(entry.size, path);
+		return {
+			path,
+			isDirectory: false,
+			size: entry.size,
+			mtimeMs: entry.mtimeMs,
+			mode: entry.mode,
+			bytes,
+		};
+	}
+
+	/**
+	 * {@link readFile}'s bytes as chunks. Plain tar reads at most 1 MiB at a
+	 * time. A format without chunked reads yields the whole member as one
+	 * chunk. The member-size limit still applies; its refusal names that
+	 * limit, not memory.
+	 */
+	async *readFileChunks(subPath: string): AsyncGenerator<Uint8Array> {
+		const { path, entry, source } = this.#fileMember(subPath, "chunked");
+		yield* chunksOrWhole(source, entry.size, path);
+	}
+
+	/**
+	 * The file member `subPath` names, following symlink aliases; throws when it is not a readable file,
+	 * or when it is over `maxMemberSize`, worded for how the caller will `read` it.
+	 */
+	#fileMember(
+		subPath: string,
+		read: "whole" | "chunked",
+	): { path: string; entry: ArchiveIndexEntry; source: MemberSource } {
 		const normalizedPath = normalizeArchiveLookupPath(subPath);
 		if (!normalizedPath) {
 			throw new ArchiveError("Archive file path is required");
@@ -144,19 +177,11 @@ export class ArchiveReader {
 		if (!entry.storage) {
 			throw new ArchiveError(`Archive file '${normalizedPath}' has no readable storage`);
 		}
-		assertArchiveMemberSize(entry.size, normalizedPath, this.limits);
+		assertArchiveMemberSize(entry.size, normalizedPath, this.limits, read);
 
 		if (entry.storage.type === "link") {
 			throwUnreadableArchiveLink(entry.storage.targetPath, normalizedPath);
 		}
-		const bytes = await entry.storage.source.read(entry.size, normalizedPath);
-		return {
-			path: normalizedPath,
-			isDirectory: false,
-			size: entry.size,
-			mtimeMs: entry.mtimeMs,
-			mode: entry.mode,
-			bytes,
-		};
+		return { path: normalizedPath, entry, source: entry.storage.source };
 	}
 }

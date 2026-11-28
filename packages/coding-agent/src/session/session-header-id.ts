@@ -5,7 +5,8 @@ import { parseTitleSlotLine } from "./session-title-slot";
 /** Upper bound on the bytes read to find a header: real headers (and the title slot before them) are far smaller. */
 export const SESSION_HEADER_READ_LIMIT = 1024 * 1024;
 
-function isValidSessionHeader(entry: FileEntry | undefined): entry is SessionHeader {
+/** Whether `entry` is a session header: a `session` record with a string id. */
+export function isValidSessionHeader(entry: FileEntry | undefined): entry is SessionHeader {
 	return entry?.type === "session" && typeof entry.id === "string";
 }
 
