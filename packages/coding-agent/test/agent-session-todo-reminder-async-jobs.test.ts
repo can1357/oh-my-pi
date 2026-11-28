@@ -264,7 +264,7 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		expect(extensionRunner.emitSessionStop).not.toHaveBeenCalled();
 	});
 
-	it("invokes session_stop exactly once on the next stop after the owned job drains", async () => {
+	it("invokes session_stop once when a job wait ends without resuming and once on the next stop", async () => {
 		vi.spyOn(session.agent, "continue").mockResolvedValue();
 		const job = registerGatedJob("Main");
 
@@ -276,10 +276,12 @@ describe("AgentSession todo reminder async-job deferral", () => {
 		job.resolve();
 		await manager.waitForAll();
 		await manager.drainDeliveries();
+		await session.waitForIdle();
+		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(1);
 
 		emitTextOnlyStop();
 		await session.waitForIdle();
 
-		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(1);
+		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(2);
 	});
 });

@@ -110,6 +110,7 @@ import {
 	logger,
 	postmortem,
 	prompt,
+	Serial,
 	Snowflake,
 	stringProperty,
 	toError,
@@ -815,8 +816,40 @@ const noOpUIContext: ExtensionUIContext = {
 
 type AgentEndEvent = Extract<AgentEvent, { type: "agent_end" }>;
 
+export type StopRoute =
+	| "normal"
+	| "no-assistant-message"
+	| "skip-superseded-speculative-maintenance"
+	| "successful-yield"
+	| "active-goal-compaction-blocked"
+	| "aborted"
+	| "trailing-tool-call"
+	| "compaction-blocked"
+	| "maintenance-failed";
+
+export type StopContinuation = "allowed" | "refused";
+
+const STOP_CONTINUATION: Record<StopRoute, StopContinuation> = {
+	normal: "allowed",
+	"no-assistant-message": "refused",
+	"skip-superseded-speculative-maintenance": "refused",
+	"successful-yield": "refused",
+	"active-goal-compaction-blocked": "refused",
+	aborted: "refused",
+	"trailing-tool-call": "refused",
+	"compaction-blocked": "refused",
+	"maintenance-failed": "refused",
+};
+
+interface DeferredStop {
+	readonly route: StopRoute | "async-wait-ended" | "continuation-dropped";
+	readonly continuation: StopContinuation;
+	readonly lastAssistantMessage: AssistantMessage | undefined;
+	readonly generation: number;
+}
+
 /** How a model loop's routing ends it; see {@link AgentSession} `#endLoop`. */
-type LoopEndOptions = { continuing?: boolean };
+type LoopEndOptions = { continuing?: boolean; deferredStop?: DeferredStop; superseded?: boolean };
 
 /** A model loop's end, held while its run stays open; see {@link AgentSession} `#endLoop`. */
 interface LoopEnd {
@@ -827,6 +860,14 @@ interface LoopEnd {
 	readonly yielded: boolean;
 	/** `agent_pause` was emitted for this loop. */
 	paused: boolean;
+	/** A newer prompt owns the run, but this loop still gets its terminal extension notification. */
+	readonly superseded: boolean;
+	/** A pass still owed if this loop is not resumed. */
+	deferredStop: DeferredStop | undefined;
+	/** The stop pass ran and did not schedule a continuation. */
+	stopPassTerminal: boolean;
+	/** A delivery can start the next loop while the deferred pass is still running. */
+	stopTask?: Promise<void>;
 }
 
 type PostPromptSkipReason = "aborted" | "stale-generation";
@@ -926,6 +967,7 @@ type ScheduledAgentContinueOptions = {
 
 type ScheduledAgentContinueRequest = {
 	schedulerToken: number;
+	loopEpoch: number;
 	options: ScheduledAgentContinueOptions;
 };
 
@@ -1194,8 +1236,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#runStartedAt: number | undefined;
 	/** Bumped at every `agent_start`; lets a late loop end tell it was overtaken by a newer loop. */
 	#runEpoch = 0;
-	/** The last core `agent_end` handed to {@link #endLoop}; a failed maintenance pass ends any other. */
-	#settledAgentEnd: AgentEndEvent | undefined;
+	/** Core ends already handed to {@link #endLoop}, including ends overtaken by a new loop. */
+	#settledAgentEnds = new WeakSet<AgentEndEvent>();
+	#sessionStopPasses = new WeakSet<AgentEndEvent>();
+	/** Publish a superseded loop's extension end before the next stop pass can interleave. */
+	readonly #stopLoops = new Serial();
+	/** Loop whose scheduled continuation was refused because foreground compaction was active. */
+	#compactionSkippedContinueEpoch: number | undefined;
 	/** A run is open: from its first `agent_start` until its `agent_end` (see {@link isRunActive}). */
 	#runActive = false;
 	/** The open run's latest loop end; undefined while that loop is live or still routing. */
@@ -1549,7 +1596,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		},
 	};
 	#promptSequence = 0;
-	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
+	#postTurnHandoffSpeculationCompletion: Promise<void> | undefined;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
@@ -4550,6 +4597,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return processing;
 		}
 		const loopEpoch = this.#runEpoch;
+		const generation = this.#promptGeneration;
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#trackPostPromptTask(promise);
 		this.#inFlightAgentEndMaintenance.add(promise);
@@ -4565,7 +4613,23 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			const message = toError(error).message;
 			logger.error("agent_end maintenance failed", { error: message });
 			this.emitNotice("warning", `Post-turn maintenance failed: ${message}`, "agent-end");
-			if (this.#settledAgentEnd !== event) this.#endLoop(event, [...this.agent.state.messages], loopEpoch);
+			if (!this.#settledAgentEnds.has(event)) {
+				const messages = [...this.agent.state.messages];
+				try {
+					if (!this.#sessionStopPasses.has(event)) {
+						const lastAssistantMessage = event.messages.findLast(
+							(message): message is AssistantMessage => message.role === "assistant",
+						);
+						await this.#stopLoop(event, messages, loopEpoch, {
+							generation,
+							lastAssistantMessage,
+							route: "maintenance-failed",
+						});
+					}
+				} finally {
+					if (!this.#settledAgentEnds.has(event)) this.#endLoop(event, messages, loopEpoch);
+				}
+			}
 		} finally {
 			this.#inFlightAgentEndMaintenance.delete(promise);
 			resolve();
@@ -5295,16 +5359,15 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				await this.#settleServiceTier(assistantMsg);
 				this.#ttsr.onAssistantMessageEnd(assistantMsg);
 				const speculativeHandoff = this.#maintenance.speculationCompletion("handoff");
-				// Empty and thinking-only stops still need recovery while the handoff runs.
-				// Preserve the existing settle path for completed server-tool output.
+				// Mark eligible replies so a length or overflow stop can await the handoff before maintenance.
 				if (
 					speculativeHandoff &&
 					(assistantMsg.stopReason !== "stop" ||
 						assistantTurnDelivered(presentNarrationAsAnswer(assistantMsg)) ||
 						assistantMsg.content.some(content => content.type === "anthropicServerTool"))
 				) {
-					this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
-					this.#skippedPostTurnSpeculationCompletion = speculativeHandoff;
+					this.#maintenance.handoffSpeculationAssistantTimestamp = assistantMsg.timestamp;
+					this.#postTurnHandoffSpeculationCompletion = speculativeHandoff;
 				}
 				await this.#recovery.onAssistantSettledSuccessfully(assistantMsg);
 				// Broker deployments: report this request's burn so the broker can
@@ -5410,17 +5473,24 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end") {
 			const settledMessages = event.messages;
-			const activeMessages = this.agent.state.messages;
+			let activeMessages = this.agent.state.messages;
 			// TTSR retry work runs concurrently and clears the live flag before
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
-			const endLoop = (options?: LoopEndOptions) => this.#endLoop(event, activeMessages, loopEpoch, options);
 			await this.#goalRuntime.onAgentEnd({ currentUsage: () => this.#goalUsage() });
 			const fallbackAssistant = settledMessages.findLast(
 				(message): message is AssistantMessage => message.role === "assistant",
 			);
 			const msg = this.#lastAssistantMessage ?? fallbackAssistant;
 			this.#lastAssistantMessage = undefined;
+			const stopContext = { generation: eventPromptGeneration, lastAssistantMessage: msg };
+			const endLoop = (options: { continuing: true }) =>
+				this.#endLoop(event, activeMessages, loopEpoch, {
+					...options,
+					deferredStop: { ...stopContext, route: "continuation-dropped", continuation: "allowed" },
+				});
+			const stopLoop = (route: StopRoute) =>
+				this.#stopLoop(event, activeMessages, loopEpoch, { ...stopContext, route });
 			if (!msg) {
 				this.#lastSuccessfulYieldToolCallId = undefined;
 				logger.debug("agent_end maintenance routing", {
@@ -5428,7 +5498,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					goalModeEnabled: this.#goalModeState?.enabled === true,
 					goalStatus: this.#goalModeState?.goal.status,
 				});
-				endLoop();
+				await stopLoop("no-assistant-message");
 				return;
 			}
 			// A turn that ended on its own (not the interrupt's aborted message) closes the stopped run.
@@ -5483,10 +5553,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				}
 			}
 
-			if (this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp === msg.timestamp) {
-				const skippedSpeculationCompletion = this.#skippedPostTurnSpeculationCompletion;
-				this.#maintenance.skipPostTurnMaintenanceAssistantTimestamp = undefined;
-				this.#skippedPostTurnSpeculationCompletion = undefined;
+			if (this.#maintenance.handoffSpeculationAssistantTimestamp === msg.timestamp) {
+				const handoffCompletion = this.#postTurnHandoffSpeculationCompletion;
+				this.#maintenance.handoffSpeculationAssistantTimestamp = undefined;
+				this.#postTurnHandoffSpeculationCompletion = undefined;
 				this.#lastSuccessfulYieldToolCallId = undefined;
 				const model = this.model;
 				const requiresSpeculativeRecovery =
@@ -5495,28 +5565,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					msg.model === model.id &&
 					(msg.stopReason === "length" ||
 						(msg.stopReason === "error" && AIError.isContextOverflow(msg, model.contextWindow ?? 0)));
-				const speculationCompletion = requiresSpeculativeRecovery ? skippedSpeculationCompletion : undefined;
+				const speculationCompletion = requiresSpeculativeRecovery ? handoffCompletion : undefined;
 				if (!speculationCompletion) {
-					maintenanceRoute("skip-post-turn-maintenance");
-					endLoop();
-					return;
+					maintenanceRoute("speculative-handoff-running");
+				} else {
+					const promptSequence = this.#promptSequence;
+					const messagesBeforeWait = [...activeMessages];
+					maintenanceRoute("await-speculative-compaction");
+					await speculationCompletion;
+					if (
+						this.#isDisposed ||
+						this.#abortInProgress ||
+						this.#promptGeneration !== eventPromptGeneration ||
+						this.#promptSequence !== promptSequence
+					) {
+						maintenanceRoute("skip-superseded-speculative-maintenance");
+						activeMessages = messagesBeforeWait;
+						await stopLoop("skip-superseded-speculative-maintenance");
+						return;
+					}
+					maintenanceRoute("resume-post-turn-maintenance");
 				}
-
-				const promptSequence = this.#promptSequence;
-				const promptGeneration = this.#promptGeneration;
-				maintenanceRoute("await-speculative-compaction");
-				await speculationCompletion;
-				if (
-					this.#isDisposed ||
-					this.#abortInProgress ||
-					this.#promptGeneration !== promptGeneration ||
-					this.#promptSequence !== promptSequence
-				) {
-					maintenanceRoute("skip-superseded-speculative-maintenance");
-					endLoop();
-					return;
-				}
-				maintenanceRoute("resume-post-turn-maintenance");
 			}
 
 			const activeGoal = this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active";
@@ -5542,7 +5611,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				} else {
 					maintenanceRoute("post-yield-trailing-stop-suppressed");
 				}
-				endLoop();
+				await stopLoop("successful-yield");
 				return;
 			}
 			this.#lastSuccessfulYieldToolCallId = undefined;
@@ -5604,7 +5673,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						automaticContinuationBlocked: compactionResult.automaticContinuationBlocked === true,
 					});
 					this.#recovery.resolveRetry();
-					endLoop(compactionResult.continuationScheduled ? { continuing: true } : undefined);
+					if (compactionResult.continuationScheduled) endLoop({ continuing: true });
+					else await stopLoop("active-goal-compaction-blocked");
 					return;
 				}
 			}
@@ -5635,7 +5705,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			if (msg.stopReason === "aborted") {
 				this.#recovery.resolveRetry();
 				this.#resetSessionStopContinuationState();
-				endLoop(ttsrAbortPendingAtAgentEnd ? { continuing: true } : undefined);
+				if (ttsrAbortPendingAtAgentEnd) endLoop({ continuing: true });
+				else await stopLoop("aborted");
 				return;
 			}
 			const requestBodyTimeoutRecovery = await this.#recovery.handleResponsesRequestBodyReadTimeout(msg);
@@ -5724,22 +5795,22 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				await this.#recovery.persistTerminalEmptyErrorTurn(msg);
 			}
 			await this.#recovery.onErrorSettledWithoutRetry(msg, compactionResult);
+			if (compactionResult.continuationScheduled) {
+				endLoop({ continuing: true });
+				return;
+			}
 			// Stop-time todo reconciliation only fires at a text-only final stop. A run
 			// that ends still mid-tool-use (deadline hit, context full, etc.) skips the
 			// reminder so we don't pile a follow-up onto an already in-flight turn.
 			// Mid-run sync is handled separately via #takeMidRunTodoNudge so a long
 			// tool-use loop still gets prodded to keep the live HUD honest (issue #3651).
-			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
-			if (hasToolCalls) {
-				endLoop();
+			if (msg.content.some(content => content.type === "toolCall")) {
+				await stopLoop("trailing-tool-call");
 				return;
 			}
-			// When compaction queued recovery or hit a deliberate dead-end, skip the
-			// rewind/todo/session_stop passes: any reminder or hook continuation we append
-			// here would race the retry, auto-continue prompt, queued-message drain, or
-			// the explicit pause that is preventing a compaction loop.
-			if (compactionResult.continuationScheduled || compactionResult.automaticContinuationBlocked) {
-				endLoop(compactionResult.continuationScheduled ? { continuing: true } : undefined);
+			// A reminder or hook continuation can undo the pause that prevents a compaction loop.
+			if (compactionResult.automaticContinuationBlocked) {
+				await stopLoop("compaction-blocked");
 				return;
 			}
 			// A capped empty stop still has stopReason "stop"; built-in reminders
@@ -5773,15 +5844,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					return;
 				}
 			}
-			// Something outside the model will resume the run (a background job, a child agent, a
-			// queued peer message): the run pauses until it does, so stop hooks wait for a loop that
-			// actually ends the run (the todo reminder above defers the same way).
-			if (this.#wakeSources()) {
-				endLoop();
-				return;
-			}
-			const sessionStopWillContinue = await this.#emitSessionStopEvent(activeMessages, msg);
-			endLoop(sessionStopWillContinue ? { continuing: true } : undefined);
+			await stopLoop("normal");
 		}
 	};
 
@@ -5859,6 +5922,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		}
 	}
 
+	/** Record a continuation that foreground compaction prevents this loop from starting. */
+	#compactionSkipsAgentContinue(request: ScheduledAgentContinueRequest): boolean {
+		if (!this.isCompacting) return false;
+		if (request.loopEpoch === this.#runEpoch) this.#compactionSkippedContinueEpoch = request.loopEpoch;
+		return true;
+	}
+
 	async #runAgentContinue(
 		signal: AbortSignal,
 		request: ScheduledAgentContinueRequest,
@@ -5913,7 +5983,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 					});
 					await this.agent.waitForIdle();
 					await this.#drainInFlightEventHandlers();
-					if (signal.aborted || this.#isDisposed || this.#abortInProgress || this.isCompacting) {
+					if (
+						signal.aborted ||
+						this.#isDisposed ||
+						this.#abortInProgress ||
+						this.#compactionSkipsAgentContinue(request)
+					) {
 						return { status: "skipped", reason: "session-unavailable" };
 					}
 					if (request.options.generation !== undefined && this.#promptGeneration !== request.options.generation) {
@@ -5939,6 +6014,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#scheduleAgentContinue(options: ScheduledAgentContinueOptions): void {
 		const request: ScheduledAgentContinueRequest = {
 			schedulerToken: ++this.#agentContinueSchedulerToken,
+			loopEpoch: this.#runEpoch,
 			options,
 		};
 		logger.debug("agent.continue scheduled", {
@@ -5959,7 +6035,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			async signal => {
 				try {
 					// Foreground compaction may be replacing history or reconnecting persistence.
-					if (signal.aborted || this.#isDisposed || this.#abortInProgress || this.isCompacting) {
+					if (
+						signal.aborted ||
+						this.#isDisposed ||
+						this.#abortInProgress ||
+						this.#compactionSkipsAgentContinue(request)
+					) {
 						this.#skipAgentContinue("session-unavailable", request);
 						return;
 					}
@@ -5987,7 +6068,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 						// A request made by the active turn's agent_end is its next step,
 						// not a duplicate of that turn. Wait until it settles before starting.
 						await active.promise;
-						if (signal.aborted || this.#isDisposed || this.isCompacting) {
+						if (signal.aborted || this.#isDisposed || this.#compactionSkipsAgentContinue(request)) {
 							this.#skipAgentContinue("session-unavailable", request);
 							return;
 						}
@@ -6311,19 +6392,29 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 * throws first.
 	 */
 	#endLoop(event: AgentEndEvent, activeMessages: AgentMessage[], loopEpoch: number, options?: LoopEndOptions): void {
-		this.#settledAgentEnd = event;
+		this.#settledAgentEnds.add(event);
+		const superseded = options?.superseded === true;
+		if (superseded) void this.#notifyExtensionsLoopEnd(activeMessages);
 		// Maintenance awaits before routing, and a wake, steer or scheduled continuation can
 		// start the next loop meanwhile. Its `agent_start` already told subscribers the run
 		// goes on, so this end folds into the run instead of being announced after it;
 		// extensions, notified per loop, still hear of it.
 		if (loopEpoch !== this.#runEpoch) {
-			void this.#notifyExtensionsLoopEnd(activeMessages, { awaiting: false });
+			if (!superseded) void this.#notifyExtensionsLoopEnd(activeMessages, { awaiting: false });
 			return;
 		}
 		// A loop whose start was never observed (it began while the agent was disconnected)
 		// still belongs to a run that must end.
 		this.#openRun();
-		const end: LoopEnd = { event, activeMessages, yielded: !options?.continuing, paused: false };
+		const end: LoopEnd = {
+			event,
+			activeMessages,
+			yielded: !options?.continuing,
+			paused: false,
+			superseded,
+			deferredStop: options?.deferredStop,
+			stopPassTerminal: !options?.continuing && this.#sessionStopPasses.has(event),
+		};
 		this.#loopEnd = end;
 		if (options?.continuing) this.#pauseLoop(end);
 		this.#scheduleRunCheck();
@@ -6346,7 +6437,12 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			yielded: end.yielded,
 			awaiting,
 		}).catch(error => logger.warn("agent_pause session event emission failed", { error: String(error) }));
-		void this.#notifyExtensionsLoopEnd(end.activeMessages, { awaiting });
+		if (end.superseded) return;
+		if (end.stopTask) {
+			void end.stopTask.then(() => this.#notifyExtensionsLoopEnd(end.activeMessages, { awaiting }));
+		} else {
+			void this.#notifyExtensionsLoopEnd(end.activeMessages, { awaiting });
+		}
 	}
 
 	/**
@@ -6405,10 +6501,13 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			activeMessages: [...this.agent.state.messages],
 			yielded: true,
 			paused: false,
+			superseded: false,
+			deferredStop: undefined,
+			stopPassTerminal: false,
 		};
-		// An agent may start blocking on this one after its loop stopped (a paused run): the
-		// stall guard's notice turn then continues the run, as at the loop's end.
-		if (this.#lastTurnSettledCleanly() && this.#continueForStalledWaiters()) {
+		// A waiter can arrive after a loop pauses. Give it a notice unless the stop pass has
+		// already settled this loop without a continuation.
+		if (!this.#loopEnd.stopPassTerminal && this.#lastTurnSettledCleanly() && this.#continueForStalledWaiters()) {
 			// A stop-time notice, not outside work, resumes the run.
 			if (!this.#loopEnd.paused) this.#loopEnd = { ...this.#loopEnd, yielded: false };
 			this.#pauseLoop(this.#loopEnd);
@@ -6419,6 +6518,36 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			return;
 		}
 		const end = this.#loopEnd;
+		const deferredStop = end.deferredStop;
+		if (deferredStop) {
+			end.deferredStop = undefined;
+			const continuation =
+				deferredStop.route === "continuation-dropped" && this.#compactionSkippedContinueEpoch === this.#runEpoch
+					? "refused"
+					: deferredStop.continuation;
+			const task = Promise.resolve()
+				.then(() =>
+					this.#emitSessionStopEvent(end.activeMessages, deferredStop.lastAssistantMessage, {
+						event: end.event,
+						generation: deferredStop.generation,
+						route: deferredStop.route,
+						continuation,
+					}),
+				)
+				.then(willContinue => {
+					if (this.#loopEnd !== end) return;
+					if (!willContinue) {
+						end.stopPassTerminal = this.#sessionStopPasses.has(end.event);
+						return;
+					}
+					if (!end.paused) this.#loopEnd = { ...end, yielded: false };
+					this.#pauseLoop(this.#loopEnd);
+				})
+				.catch(error => logger.error("Deferred session_stop failed", { error: String(error) }));
+			end.stopTask = task;
+			this.#trackPostPromptTask(task);
+			return;
+		}
 		this.#closeRun();
 		void this.#emitSessionEvent(end.event).catch(error =>
 			logger.warn("agent_end session event emission failed", { error: String(error) }),
@@ -6426,7 +6555,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		// A subscriber may queue input from `agent_end` itself (a collab guest's steer racing
 		// the settle): nothing polls the queue any more, so it starts the next run.
 		this.#drainStrandedQueuedMessages();
-		void this.#notifyExtensionsLoopEnd(end.activeMessages);
+		if (!end.superseded) void this.#notifyExtensionsLoopEnd(end.activeMessages);
 	}
 
 	/** Whether the latest model turn ended on its own with an answer: no error, abort, or stop mid-tool-use. */
@@ -6446,29 +6575,89 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		ended?.resolve();
 	}
 
+	#stopLoop(
+		event: AgentEndEvent,
+		messages: AgentMessage[],
+		loopEpoch: number,
+		stop: { route: StopRoute; generation: number; lastAssistantMessage: AssistantMessage | undefined },
+	): Promise<void> {
+		return this.#stopLoops.run(async () => {
+			const { route, generation, lastAssistantMessage } = stop;
+			const continuation = STOP_CONTINUATION[route];
+			const superseded = route === "skip-superseded-speculative-maintenance";
+			if (!superseded && this.#wakeSources()) {
+				this.#endLoop(event, messages, loopEpoch, {
+					deferredStop: { ...stop, route: route === "normal" ? "async-wait-ended" : route, continuation },
+				});
+				return;
+			}
+			const willContinue = await this.#emitSessionStopEvent(messages, lastAssistantMessage, {
+				event,
+				generation,
+				route,
+				continuation,
+			});
+			this.#endLoop(event, messages, loopEpoch, {
+				continuing: willContinue,
+				superseded:
+					superseded && generation === this.#promptGeneration && !this.#abortInProgress && !this.#isDisposed,
+			});
+		});
+	}
+
 	/** @returns true when a hidden session_stop continuation turn was scheduled. */
 	async #emitSessionStopEvent(
 		messages: AgentMessage[],
-		lastAssistantMessage = this.getLastAssistantMessage(),
+		lastAssistantMessage: AssistantMessage | undefined,
+		options: {
+			event: AgentEndEvent;
+			generation: number;
+			route: DeferredStop["route"];
+			continuation: StopContinuation;
+		},
 	): Promise<boolean> {
-		if (this.#abortInProgress || this.#isDisposed || this.#activeAgentPromptGeneration !== this.#promptGeneration) {
-			this.#resetSessionStopContinuationState();
+		const { event, generation, route, continuation } = options;
+		// A superseding prompt owns the continuation state, even while the older hook is running.
+		const superseded = route === "skip-superseded-speculative-maintenance";
+		if (
+			this.#abortInProgress ||
+			this.#isDisposed ||
+			this.#activeAgentPromptGeneration !== this.#promptGeneration ||
+			generation !== this.#promptGeneration
+		) {
+			if (!superseded) this.#resetSessionStopContinuationState();
 			return false;
 		}
 		if (this.#agentKind === "sub" || !this.#extensionRunner?.hasHandlers("session_stop")) {
 			return false;
 		}
-		const generation = this.#promptGeneration;
-		const result = await this.#extensionRunner.emitSessionStop({
-			messages,
-			turn_id: Math.max(0, this.#turnIndex - 1),
-			last_assistant_message: lastAssistantMessage,
-			session_id: this.sessionId,
-			session_file: this.sessionFile,
-			stop_hook_active: this.#sessionStopHookActive,
-			signal: this.#postPromptTasksAbortController.signal,
-		});
-		if (this.#promptGeneration !== generation || this.#abortInProgress || this.#isDisposed) {
+		if (this.#sessionStopPasses.has(event)) return false;
+		this.#sessionStopPasses.add(event);
+		const refused = continuation === "refused";
+		const loopEpoch = this.#runEpoch;
+		const result = await this.#extensionRunner.emitSessionStop(
+			{
+				messages,
+				turn_id: Math.max(0, this.#turnIndex - 1),
+				last_assistant_message: lastAssistantMessage,
+				session_id: this.sessionId,
+				session_file: this.sessionFile,
+				stop_hook_active: !superseded && this.#sessionStopHookActive,
+				signal: this.#postPromptTasksAbortController.signal,
+			},
+			refused ? { runEveryHandler: true } : undefined,
+		);
+		if (refused) {
+			if (!superseded) this.#resetSessionStopContinuationState();
+			logger.debug("session_stop continuation refused", { route });
+			return false;
+		}
+		if (
+			this.#promptGeneration !== generation ||
+			this.#runEpoch !== loopEpoch ||
+			this.#abortInProgress ||
+			this.#isDisposed
+		) {
 			this.#resetSessionStopContinuationState();
 			return false;
 		}

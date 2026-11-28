@@ -664,7 +664,7 @@ export class SessionMaintenance {
 	 * request and the threshold pass falls back to the next method instead.
 	 */
 	#failedRemoteSpeculation: string | undefined;
-	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
+	#handoffSpeculationAssistantTimestamp: number | undefined;
 	/**
 	 * Consecutive no-progress `response.incomplete` (length-stop) recoveries in
 	 * the current continuation loop. Bounded by {@link INCOMPLETE_RECOVERY_MAX_RETRIES};
@@ -797,13 +797,13 @@ export class SessionMaintenance {
 		run.controller.abort();
 	}
 
-	/** Assistant timestamp whose post-turn maintenance must be skipped once. */
-	get skipPostTurnMaintenanceAssistantTimestamp(): number | undefined {
-		return this.#skipPostTurnMaintenanceAssistantTimestamp;
+	/** Marks a reply whose length or overflow stop must await a speculative handoff before maintenance. */
+	get handoffSpeculationAssistantTimestamp(): number | undefined {
+		return this.#handoffSpeculationAssistantTimestamp;
 	}
 
-	set skipPostTurnMaintenanceAssistantTimestamp(timestamp: number | undefined) {
-		this.#skipPostTurnMaintenanceAssistantTimestamp = timestamp;
+	set handoffSpeculationAssistantTimestamp(timestamp: number | undefined) {
+		this.#handoffSpeculationAssistantTimestamp = timestamp;
 	}
 
 	/**
