@@ -23,10 +23,12 @@ import {
 	replaceTabs,
 	sliceCells,
 	sliceColumns,
+	spaces,
 	truncate,
 	visibleWidth,
 	wrap,
 } from "@oh-my-pi/pi-tui/text/width";
+import { segmentGraphemes } from "@oh-my-pi/pi-utils/graphemes";
 import type { ChoiceField, FormBlock, FormField, FormSpan } from "../../../tools/html-form/parse";
 import { spansText } from "../../../tools/html-form/parse";
 import { type FormPart, isFoldCaption } from "../../forms/html-form/layout";
@@ -34,6 +36,7 @@ import type { MediaState } from "../../forms/html-form/media";
 import { rasterLabel } from "../../transcript/figures/svg";
 import { type Active, type HtmlFormModel, isDropdown, OTHER_ROW } from "../../forms/html-form/model";
 import { foldPills } from "../../overlays/panels/ask-dialog";
+import type { LineState } from "../../overlays/settings/line-edit";
 import { defineAskCardLook } from "../panels/ask-dialog";
 import { bindingGlyph, boxRows } from "../panels/common";
 import { getKeybindings } from "../../../config/keybindings/keybindings";
@@ -108,14 +111,15 @@ const DROPDOWN_RIGHT_MARGIN = 2;
 /** A text block of at most this many rows right before a field is its caption: no blank row parts them. */
 const CAPTION_MAX_ROWS = 4;
 
+const NOTE_LAYOUT_LIMIT = 2048;
+type NoteDisplayLine = LineState & { readonly omittedBefore: boolean; readonly omittedAfter: boolean };
+
 /** What the column shows: which field is open and where its highlight is. */
 interface View {
 	readonly active: Active;
 	readonly row: number;
 	readonly dropdown: number | undefined;
-	readonly note:
-		| { readonly field: number; readonly option: number; readonly text: string; readonly cursor: number }
-		| undefined;
+	readonly note: (NoteDisplayLine & { readonly field: number; readonly option: number }) | undefined;
 	readonly focused: boolean;
 }
 
@@ -150,8 +154,6 @@ function styled(theme: Theme, spans: readonly FormSpan[], base: string): string 
 		.join("");
 }
 
-const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-
 /** Crop a styled input around the caret, marking the edges with more text. */
 function caretViewport(theme: Theme, line: string, width: number, caretEnd: number, caretWidth: number): string {
 	if (width < caretWidth) return theme.style("inverse", " ");
@@ -182,7 +184,7 @@ function caretLine(
 ): string {
 	const flat = text.replaceAll("\n", " ");
 	const at = Math.max(0, Math.min(cursor, flat.length));
-	const grapheme = graphemes.segment(flat).containing(at);
+	const grapheme = segmentGraphemes(flat).containing(at);
 	const start = grapheme?.index ?? at;
 	const ch = grapheme?.segment ?? " ";
 	const before = flat.slice(0, start);
@@ -193,6 +195,32 @@ function caretLine(
 	if (width === undefined) return line;
 	const caretWidth = Math.max(1, visibleWidth(ch));
 	return caretViewport(theme, line, width, visibleWidth(before) + caretWidth, caretWidth);
+}
+
+/** Paint the caret after wrapping so moving it cannot change word breaks. */
+function paintEditorRow(theme: Theme, text: string, row: EditorRow, caret: number | undefined): string {
+	const part = text.slice(row.start, row.textEnd);
+	if (caret === undefined) return theme.fgResolved("text", part);
+	if (caret >= row.textEnd) return theme.fgResolved("text", `${part}▏`);
+	const { index, segment } = segmentGraphemes(part).containing(caret - row.start)!;
+	return theme.fgResolved(
+		"text",
+		`${part.slice(0, index)}${theme.style("inverse", segment)}${part.slice(index + segment.length)}`,
+	);
+}
+
+/** Add an editor, returning the row after its caret for viewport anchoring. */
+function appendWrappedEditorRows(lines: string[], theme: Theme, line: LineState, width: number): number {
+	const { text, cursor } = line;
+	const indent = Math.min(4, Math.max(0, width - 3));
+	const gutter = spaces(indent);
+	const rows = layoutText(text, editorWrapWidth(width, indent));
+	const caretRow = rowOf(rows, cursor);
+	const focusEnd = lines.length + caretRow + 1;
+	for (let i = 0; i < rows.length; i++) {
+		lines.push(gutter + paintEditorRow(theme, text, rows[i]!, i === caretRow ? cursor : undefined));
+	}
+	return focusEnd;
 }
 
 // ─── Content blocks ─────────────────────────────────────────────────────────
@@ -383,10 +411,7 @@ function optionRows(
 		if (view.note && view.note.field === index && view.note.option === row) {
 			const label = flattenLine(spansText(field.options[row]!.label));
 			lines.push(clip(`    ${theme.fg("muted", `Note for ${label} · ${noteEditHint(model)}`)}`, width));
-			lines.push(
-				`    ${theme.fgResolved("text", `${view.note.text.slice(0, view.note.cursor)}▏${view.note.text.slice(view.note.cursor)}`)}`,
-			);
-			column.focusEnd = lines.length;
+			column.focusEnd = appendWrappedEditorRows(lines, theme, view.note, width);
 		}
 	}
 }
@@ -435,9 +460,9 @@ function dropdownRows(
 	return out;
 }
 
-/** Cells a textarea's rows wrap at in a column `width` wide: past its bar, a cell short for the caret after a full row. */
-function textareaWrap(width: number): number {
-	return Math.max(1, width - 5);
+/** Text columns past the editor gutter, leaving one cell for the caret at row end. */
+function editorWrapWidth(width: number, indent = 4): number {
+	return Math.max(1, width - indent - 1);
 }
 
 /** One paint's textarea layouts by wrap width, then text: a paint builds the column several times. */
@@ -479,13 +504,9 @@ function openFieldLines(
 		column.focusEnd = lines.length;
 		if (view.note && view.note.field === index) {
 			const label = flattenLine(spansText(field.options[view.note.option]!.label));
-			column.overlay = {
-				at: lines.length,
-				rows: [
-					clip(`    ${theme.fg("muted", `Note for ${label} · ${noteEditHint(model)}`)}`, width),
-					`    ${theme.fgResolved("text", `${view.note.text.slice(0, view.note.cursor)}▏${view.note.text.slice(view.note.cursor)}`)}`,
-				],
-			};
+			const rows = [clip(`    ${theme.fg("muted", `Note for ${label} · ${noteEditHint(model)}`)}`, width)];
+			column.focusEnd = lines.length + appendWrappedEditorRows(rows, theme, view.note, width);
+			column.overlay = { at: lines.length, rows };
 		} else if (view.dropdown !== undefined) column.overlay = { at: lines.length, rows: [] };
 	} else {
 		lines.push(labelLine(theme, model, field, view, width));
@@ -495,25 +516,14 @@ function openFieldLines(
 			const text = answer.text.text;
 			const cursor = answer.text.cursor;
 			const room = Math.max(1, width - 4);
-			const rows = textareaRows(layouts, text, textareaWrap(width));
+			const rows = textareaRows(layouts, text, editorWrapWidth(width));
 			const caretRow = rowOf(rows, cursor);
 			const shown = Math.max(4, rows.length);
 			for (let r = 0; r < shown; r++) {
 				const row = rows[r];
-				const part = row ? text.slice(row.start, row.textEnd) : "";
-				let content = theme.fgResolved("text", part);
-				// The caret: a bar after the row's text, else the character under it inverted.
-				if (row && r === caretRow && view.focused) {
-					const at = cursor - row.start;
-					if (cursor >= row.textEnd) content = theme.fgResolved("text", `${part}▏`);
-					else {
-						const ch = String.fromCodePoint(part.codePointAt(at)!);
-						content = theme.fgResolved(
-							"text",
-							`${part.slice(0, at)}${theme.style("inverse", ch)}${part.slice(at + ch.length)}`,
-						);
-					}
-				}
+				let content = row
+					? paintEditorRow(theme, text, row, r === caretRow && view.focused ? cursor : undefined)
+					: theme.fgResolved("text", "");
 				if (r === 0 && text === "") {
 					// The placeholder sits at the right edge, a cell in from it; it goes when it does not fit.
 					const placeholder = field.placeholder ?? "";
@@ -625,7 +635,36 @@ function buildColumn(
 		),
 	);
 	if (view.active === "submit") column.focusEnd = lines.length;
+	// Apply the note at its overlay position before counting rows. The picker itself needs the viewport height.
+	if (column.overlay) {
+		const { at, rows } = column.overlay;
+		for (let i = 0; i < rows.length; i++) lines[at + i] = rows[i]!;
+	}
 	return column;
+}
+
+/** Prepare a caret-relative excerpt once per paint, without changing the draft or its offsets. */
+function noteDisplayLine({ text, cursor }: LineState): NoteDisplayLine {
+	// A raw CR is stripped by the terminal writer; a space keeps its caret cell and UTF-16 offset.
+	if (text.length <= NOTE_LAYOUT_LIMIT)
+		return { text: text.replaceAll("\r", " "), cursor, omittedBefore: false, omittedAfter: false };
+
+	// Keep the excerpt fixed as the caret moves within a page.
+	const stride = NOTE_LAYOUT_LIMIT / 2;
+	const start = Math.max(0, Math.floor(cursor / stride) * stride - stride / 2);
+	const end = Math.min(text.length, start + NOTE_LAYOUT_LIMIT);
+	const omittedBefore = start > 0;
+	const omittedAfter = end < text.length;
+	const sample = text.slice(start, end);
+	const at = cursor - start;
+	const segments = segmentGraphemes(sample);
+	// Drop possibly clipped graphemes; if that would lose the caret, give it a visible cell.
+	const from = omittedBefore ? segments.containing(0)!.segment.length : 0;
+	const to = omittedAfter ? segments.containing(sample.length - 1)!.index : sample.length;
+	if (from >= to || at < from || (omittedAfter && at >= to))
+		return { text: "…", cursor: 0, omittedBefore, omittedAfter };
+
+	return { text: sample.slice(from, to).replaceAll("\r", " "), cursor: at - from, omittedBefore, omittedAfter };
 }
 
 function currentView(model: HtmlFormModel): View {
@@ -634,9 +673,7 @@ function currentView(model: HtmlFormModel): View {
 		active: model.active(),
 		row: model.row(),
 		dropdown: model.dropdown(),
-		note: note
-			? { field: note.field, option: note.option, text: note.line.text, cursor: note.line.cursor }
-			: undefined,
+		note: note ? { field: note.field, option: note.option, ...noteDisplayLine(note.line) } : undefined,
 		focused: model.focused(),
 	};
 }
@@ -691,24 +728,23 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 	const limit = Math.max(1, Math.floor(look.terminalRows * HEIGHT_RATIO) - CHROME_ROWS);
 	const layouts: TextareaLayouts = new Map();
 	let column = buildColumn(cx, look, view, inner, layouts);
-	let body = Math.min(tallest(cx, look, inner, view, layouts), limit);
-	const overflow = column.lines.length > body;
+	// The notice takes its rows from the body, so measure the column against what it leaves.
+	let rows = Math.min(tallest(cx, look, inner, view, layouts), limit) - skip.length;
+	const overflow = column.lines.length > rows;
 	if (overflow) {
 		column = buildColumn(cx, look, view, inner - 1, layouts);
-		body = Math.min(tallest(cx, look, inner - 1, view, layouts), limit);
+		rows = Math.min(tallest(cx, look, inner - 1, view, layouts), limit) - skip.length;
 	}
 	// Up/Down in a textarea step through the rows drawn here.
-	model.wrapWidth = textareaWrap(overflow ? inner - 1 : inner);
-	const rows = body - skip.length;
+	model.wrapWidth = editorWrapWidth(overflow ? inner - 1 : inner);
 	const lines = column.lines;
-	if (column.overlay) {
+	// Only the picker waits for the viewport height; a note's rows were already written in buildColumn.
+	if (column.overlay && !view.note && view.dropdown !== undefined && typeof view.active === "number") {
 		const at = column.overlay.at;
 		const space = Math.max(3, rows - at);
-		const overlay =
-			!view.note && view.dropdown !== undefined && typeof view.active === "number"
-				? dropdownRows(theme, model, view.active, model.field(view.active) as ChoiceField, view, inner, space)
-				: column.overlay.rows;
-		overlay.forEach((row, i) => {
+		const field = model.field(view.active) as ChoiceField;
+		const picker = dropdownRows(theme, model, view.active, field, view, inner, space);
+		picker.forEach((row, i) => {
 			lines[at + i] = row;
 		});
 	}
@@ -735,7 +771,9 @@ function paintHtmlForm(node: UiNode, cx: PaintContext): Block {
 		}
 	}
 	content.push(...skip);
-	return { rows: boxRows(theme, title(look), content, cx.width) };
+	const omissions = `${view.note?.omittedBefore ? "‹" : ""}${view.note?.omittedAfter ? "›" : ""}`;
+	const head = title(look);
+	return { rows: boxRows(theme, omissions ? `${omissions} ${head}` : head, content, cx.width) };
 }
 
 defineAskCardLook("omp.html-form", paintHtmlForm);
