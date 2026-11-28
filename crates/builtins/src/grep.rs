@@ -834,6 +834,9 @@ fn build_matcher(
 			.map_err(|error| engine_error_message(&error));
 	}
 
+	// In a UTF-8 locale the letter classes hold the letters that are not ASCII.
+	let utf8 = crate::locale::ctype_is_utf8(host);
+
 	if mode == MatchMode::Default {
 		// BRE is a distinct dialect, not ERE with different escaping: `\+` is
 		// the operator and a bare `+` is a literal. Translating through the
@@ -847,16 +850,22 @@ fn build_matcher(
 		// this translation step existed.
 		let translated: Vec<String> = patterns
 			.iter()
-			.map(|pattern| bre::bre_to_ere(pattern, bre::Backrefs::Unsupported, bre::StackedRepeats::Allowed))
-			.collect::<Result<_, _>>()
-			.map_err(|error: bre::BreError| error.gnu_message().to_owned())?;
+			.map(|pattern| {
+				let ere = bre::bre_to_ere(pattern, bre::Backrefs::Unsupported, bre::StackedRepeats::Allowed)?;
+				Ok(if utf8 { bre::utf8_letter_classes(ere.into(), ignore_case).into_owned() } else { ere })
+			})
+			.collect::<Result<_, bre::BreError>>()
+			.map_err(|error| error.gnu_message().to_owned())?;
 		return build_default_matcher(&builder, &translated, patterns).map(Engine::Rust);
 	}
 
 	let patterns = patterns
 		.iter()
-		.map(|pattern| bre::ere_to_rust(pattern, true).map_err(|error| error.gnu_message().to_owned()))
-		.collect::<Result<Vec<_>, _>>()?;
+		.map(|pattern| {
+			let ere = bre::ere_to_rust(pattern, true).map_err(|error| error.gnu_message().to_owned())?;
+			Ok(if utf8 { bre::utf8_letter_classes(ere, ignore_case) } else { ere })
+		})
+		.collect::<Result<Vec<_>, String>>()?;
 
 	builder
 		.build_many(&patterns)
@@ -2837,6 +2846,38 @@ mod tests {
 		let (code, out, err) = run(&["--label=pipe", "-HZ", "hit"], "hit\n").await;
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out.as_bytes(), b"pipe\0hit\n");
+	}
+
+	/// GNU grep 3.11 reads the letter classes as glibc defines them in a
+	/// UTF-8 locale: `[[:alpha:]]` holds `ß`, the numeral `Ⅻ` and a digit that
+	/// is not ASCII (`٣`), `[[:lower:]]` the ordinal `ª`, both cases the
+	/// title-case `ǅ`, and with case ignored `[[:lower:]]` is `[[:alpha:]]`,
+	/// which holds `中`, also beside a pattern the engine cannot run and on a
+	/// line that is not UTF-8. Regressed: the classes held ASCII letters
+	/// alone.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn utf8_letter_classes_answer_as_gnu() {
+		for (args, stdin, expected) in [
+			(&["-w", "[[:alpha:]]"][..], "ÀB\nß\n".as_bytes(), "ß\n"),
+			(&["-x", "[[:alpha:]]"], "٣\n3\n".as_bytes(), "٣\n"),
+			(&["-x", "[[:alnum:]]"], "٣\n3\n".as_bytes(), "٣\n3\n"),
+			(&["-x", "[[:lower:]]"], "ª\nǅ\nA\n".as_bytes(), "ª\nǅ\n"),
+			(&["-x", "[[:upper:]]"], "ǅ\nÀ\na\n".as_bytes(), "ǅ\nÀ\n"),
+			(&["-ix", "[[:lower:]]"], "中\n3\nx\n".as_bytes(), "中\nx\n"),
+			(&["-x", "-e", "[[:alpha:]]", "-e", r"\(y\)\1"], "Ⅻ\n".as_bytes(), "Ⅻ\n"),
+			(&["-c", "-e", "^[[:alpha:]]", "-e", r"\(x\)\1"], &b"\xc3\xa9\xff\n"[..], "1\n"),
+			// The shell hands grep the byte `\351` of `$'\351x'` as U+FFFD.
+			(&["-c", "-e", "^[[:alpha:]]", "-e", "\u{fffd}x"], &b"\xc3\xa9\xff\n"[..], "1\n"),
+		] {
+			let (mut host, capture) = Host::for_test_async("grep", stdin, "/");
+			host.set_test_var("LC_ALL", "C.UTF-8");
+			if !crate::locale::ctype_is_utf8(&host) {
+				eprintln!("skipping: the C.UTF-8 locale is not installed");
+				return;
+			}
+			let code = run_parsed(args, &mut host).await;
+			assert_eq!((code, capture.out().as_str()), (0, expected), "grep {args:?}: {}", capture.err());
+		}
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

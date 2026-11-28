@@ -690,6 +690,55 @@ fn classify_brace(mut chars: Peekable<Chars<'_>>) -> Brace {
 	}
 }
 
+/// The letter classes of `pattern`, a translated BRE or ERE, written as glibc
+/// defines them in a UTF-8 locale, where the `regex` crate reads them as
+/// ASCII: `[:alpha:]` holds every letter and every digit that is not ASCII,
+/// `[:upper:]` the title-case letters too and `[:lower:]` the four Latin ones
+/// (ǅ ǈ ǋ ǲ), and with case ignored `[:lower:]` and `[:upper:]` are
+/// `[:alpha:]`. A class name is one only inside a bracket expression, which
+/// the translation opens with the only `[` it leaves unescaped.
+#[cfg(feature = "util.grep")]
+pub(crate) fn utf8_letter_classes(pattern: Cow<'_, str>, ignore_case: bool) -> Cow<'_, str> {
+	const ALPHA: &str = r"\p{Alphabetic}[\p{Nd}--0-9]";
+	let class = |name: &str| match name {
+		"alpha" => Some(ALPHA),
+		"upper" | "lower" if ignore_case => Some(ALPHA),
+		"alnum" => Some(r"\p{Alphabetic}\p{Nd}"),
+		"upper" => Some(r"\p{Uppercase}\p{Changes_When_Lowercased}"),
+		"lower" => Some(r"\p{Lowercase}\x{1C5}\x{1C8}\x{1CB}\x{1F2}"),
+		_ => None,
+	};
+	if !pattern.contains("[:") {
+		return pattern;
+	}
+	let mut written = String::with_capacity(pattern.len() + 64);
+	let mut in_bracket = false;
+	let mut rest = &*pattern;
+	while let Some(c) = rest.chars().next() {
+		let mut taken = c.len_utf8();
+		if c == '\\' {
+			taken += rest[1..].chars().next().map_or(0, char::len_utf8);
+		} else if in_bracket
+			&& let Some(body) = rest.strip_prefix("[:")
+			&& let Some(len) = body.find(":]")
+		{
+			if let Some(class) = class(&body[..len]) {
+				written.push_str(class);
+				rest = &rest[len + 4..];
+				continue;
+			}
+			taken = len + 4;
+		} else if c == '[' {
+			in_bracket = true;
+		} else if c == ']' {
+			in_bracket = false;
+		}
+		written.push_str(&rest[..taken]);
+		rest = &rest[taken..];
+	}
+	Cow::Owned(written)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
