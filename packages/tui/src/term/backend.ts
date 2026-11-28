@@ -1126,6 +1126,10 @@ export class TermBackend {
 			const rows: string[] = ledger ?? [];
 			let last = ledgerLast;
 			let marked: Map<object, HistoryRowMark> | undefined;
+			// Where the rows of a block this batch continues end in it (0: it continues none): its
+			// earlier rows went out with an earlier batch, so an anchored image spanning that seam
+			// has its first rows only where the screen still holds them (dropped below).
+			let carriedEnd = 0;
 			const appendRows = (block: Block, from: number, to: number): void => {
 				const mark = block.historyMark;
 				if (mark && mark.row >= from && mark.row < to && !this.#marked.has(mark.key) && !marked?.has(mark.key)) {
@@ -1149,6 +1153,7 @@ export class TermBackend {
 					leads[live] = undefined;
 					for (let i = leadAt(live); i > 0; i--) rows.push("");
 					appendRows(block, skip, block.rows.length);
+					if (skip > 0) carriedEnd = rows.length;
 				}
 				if (block.rows.length > 0) last = node;
 				this.#retiring.add(node);
@@ -1182,6 +1187,7 @@ export class TermBackend {
 						for (let i = lead; i > 0; i--) rows.push("");
 						const stop = Math.min(skip + take, block.rows.length);
 						appendRows(block, skip, stop);
+						if (skip > 0) carriedEnd = rows.length;
 						if (stop > skip) content.push(node);
 						head = { node, rows: block.rows, count: stop };
 						skips[live] = stop;
@@ -1189,6 +1195,20 @@ export class TermBackend {
 						last = node;
 					}
 				}
+			}
+			// The screen rows above where this batch is written (the viewport's top before it): an
+			// anchored image carried over from an earlier batch draws over its own rows only while
+			// they reach that far down — past the top row its cursor-up clamps there and the image
+			// lands over rows that are not its own. A pin of another size leaves nothing to reach.
+			if (carriedEnd > 0) {
+				const pin = this.#pin;
+				const above =
+					!pin || pin.width !== width || pin.height !== height
+						? 0
+						: pin.bottom
+							? Math.max(0, height - pin.span)
+							: pin.below;
+				dropCutImages(rows, 0, carriedEnd, above);
 			}
 			if (rows.length > 0 || ledger) {
 				history = {
