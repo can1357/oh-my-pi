@@ -245,6 +245,42 @@ fn handle_metadata(file: &OpenFile) -> Option<Metadata> {
 	}
 }
 
+/// Whether `file` is the null device: on Unix a character device that is
+/// `/dev/null` itself (the same device and inode), on Windows a character
+/// device that is no console (`NUL`).
+#[cfg(unix)]
+fn is_null_device(file: &OpenFile) -> bool {
+	use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+
+	let OpenFile::File(file) = file else {
+		return false;
+	};
+	match (file.metadata(), std::fs::metadata("/dev/null")) {
+		(Ok(meta), Ok(null)) => {
+			meta.file_type().is_char_device() && meta.dev() == null.dev() && meta.ino() == null.ino()
+		},
+		_ => false,
+	}
+}
+
+#[cfg(windows)]
+fn is_null_device(file: &OpenFile) -> bool {
+	use std::{io::IsTerminal as _, os::windows::io::AsRawHandle as _};
+
+	use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_CHAR, GetFileType};
+
+	let OpenFile::File(file) = file else {
+		return false;
+	};
+	// SAFETY: the handle is owned by `file`, which outlives the call.
+	unsafe { GetFileType(file.as_raw_handle()) == FILE_TYPE_CHAR } && !file.is_terminal()
+}
+
+#[cfg(not(any(unix, windows)))]
+const fn is_null_device(_file: &OpenFile) -> bool {
+	false
+}
+
 /// Metadata of the regular file backing a utility's stdout (see
 /// [`Host::stdout_file`]).
 #[derive(Clone, Debug)]
@@ -938,6 +974,12 @@ impl Host {
 			return false;
 		};
 		handle_metadata(self.stdin.file()).is_some_and(|stdin| stdout.matches(&stdin))
+	}
+
+	/// Whether stdout is the null device (`>/dev/null`).
+	/// Always `false` unless the utility set [`Utility::CHECKS_STDOUT_PATH`].
+	pub fn stdout_is_null_device(&self) -> bool {
+		self.stdout_handle.as_ref().is_some_and(is_null_device)
 	}
 
 	/// Looks up an exported shell variable.
