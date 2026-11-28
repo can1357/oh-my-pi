@@ -2,12 +2,11 @@
  * Tool output pruning utilities for compaction.
  */
 
-import { type ToolResultMessage, toolWireSchema } from "@oh-my-pi/pi-ai";
-import { schemaDefinesProperty } from "@oh-my-pi/pi-ai/utils/schema/json-schema-validator";
+import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { Tokenizer } from "../tokenizer";
-import type { AgentMessage, AgentTool, AgentToolCall } from "../types";
+import type { AgentMessage, AgentToolCall } from "../types";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
 import { invalidateMessageCache } from "./message-cache";
 import { type ConvertToLlm, defaultConvertToLlm, getMessageFromEntry } from "./messages";
@@ -174,13 +173,6 @@ export interface SupersedePruneConfig extends CacheLookbackConfig {
 	 * Default false.
 	 */
 	dedupeIdentical?: boolean;
-	/**
-	 * The session's tools, which tell the dedupe pass whether a call's top-level
-	 * `i` is harness intent (dropped from its identity) or a tool input its
-	 * schema owns (kept). Absent, or for a call whose tool is not listed, `i` is
-	 * kept: that can only miss a dedupe, never merge distinct calls.
-	 */
-	tools?: readonly AgentTool[];
 	/**
 	 * Prune a candidate now when all messages after it total at most this many
 	 * estimated tokens and it sits within
@@ -487,12 +479,14 @@ export const MIN_DEDUPE_TOKENS = MIN_PRUNE_TOKENS;
  * never blanked. The newest copy of every group always survives. Returned in
  * message order.
  *
- * A top-level `i` is dropped from the identity only when it is harness intent:
- * the call's tool is in `tools` and its schema does not own `i`, the rule the
- * agent loop applies when splitting intent from tool arguments. A schema-owned
- * `i` (an MCP server may declare one) is a real input, and two calls that
- * differ in it are different calls. Unlisted tools keep `i` too, and nested
- * `i` keys are never harness intent.
+ * A top-level `i` is dropped from the identity only when the call records that
+ * intent tracing stripped it before execution (`toolCall.intentStripped`, set
+ * by the agent loop against the tool the call was dispatched to): the tool
+ * never received it. Every other `i` stays: a schema-owned `i` (an MCP server
+ * may declare one) is a real input, and two calls that differ in it are
+ * different calls. The live tools are never consulted, since an MCP
+ * `tools/list_changed` can replace a schema after its calls ran. Nested `i`
+ * keys are never harness intent.
  */
 function collectDuplicateResults(
 	entries: readonly SessionEntry[],
@@ -501,7 +495,6 @@ function collectDuplicateResults(
 	toolCalls: SentToolCalls,
 	protectedTools: readonly ProtectedToolMatcher[],
 	exclude: ReadonlySet<ToolResultMessage>,
-	tools: readonly AgentTool[] | undefined,
 ): SupersedeCandidate[] {
 	interface Occurrence {
 		index: number;
@@ -535,18 +528,6 @@ function collectDuplicateResults(
 		bucket.push({ index: i, message, toolCall, turn });
 	}
 
-	// Whether the named tool's schema owns `i`; an unlisted tool counts as owning it.
-	const ownsIntent = new Map<string, boolean>();
-	const keepsIntent = (toolName: string): boolean => {
-		let owns = ownsIntent.get(toolName);
-		if (owns === undefined) {
-			const tool = tools?.find(t => t.name === toolName) ?? tools?.find(t => t.customWireName === toolName);
-			owns = tool === undefined || schemaDefinesProperty(toolWireSchema(tool), INTENT_FIELD);
-			ownsIntent.set(toolName, owns);
-		}
-		return owns;
-	};
-
 	const candidates: SupersedeCandidate[] = [];
 	for (const bucket of byShape.values()) {
 		if (bucket.length < 2) continue;
@@ -555,7 +536,7 @@ function collectDuplicateResults(
 		for (const occurrence of bucket) {
 			const { toolCall } = occurrence;
 			let args = toolCall.arguments;
-			if (Object.hasOwn(args, INTENT_FIELD) && !keepsIntent(toolCall.name)) {
+			if (toolCall.intentStripped === true && Object.hasOwn(args, INTENT_FIELD)) {
 				const { [INTENT_FIELD]: _intent, ...rest } = args;
 				args = rest;
 			}
@@ -668,7 +649,6 @@ export function pruneSupersededToolResults(
 			toolCalls,
 			config.protectedTools,
 			exclude,
-			config.tools,
 		)) {
 			candidates.push(candidate);
 		}

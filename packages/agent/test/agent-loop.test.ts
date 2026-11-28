@@ -553,6 +553,92 @@ describe("agentLoop with AgentMessage", () => {
 		expect(tracedToolCall?.type === "toolCall" && tracedToolCall.intent).toBe("Labeling x at INDEX");
 	});
 
+	it("records intentStripped only on a call whose `i` it stripped before execution", async () => {
+		const execute = async () => ({ content: [{ type: "text" as const, text: "ok" }] });
+		const plain: AgentTool = {
+			name: "plain",
+			label: "Plain",
+			description: "Tool without `i`",
+			parameters: type({ label: "string" }),
+			execute,
+		};
+		const owner: AgentTool = {
+			name: "owner",
+			label: "Owner",
+			description: "Tool whose schema owns `i`",
+			parameters: type({ label: "string", i: "string" }),
+			execute,
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [plain, owner] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{ type: "toolCall", id: "tool-1", name: "plain", arguments: { label: "x", i: "Look" } },
+						{ type: "toolCall", id: "tool-2", name: "owner", arguments: { label: "x", i: "INDEX" } },
+						{ type: "toolCall", id: "tool-3", name: "plain", arguments: { label: "x" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter, intentTracing: true };
+		const stream = agentLoop([createUserMessage("run")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+		const calls = messages.flatMap(message =>
+			message.role === "assistant" ? message.content.filter(block => block.type === "toolCall") : [],
+		);
+		expect(calls.map(call => [call.id, call.intentStripped])).toEqual([
+			["tool-1", true],
+			["tool-2", undefined],
+			["tool-3", undefined],
+		]);
+		// The record keeps `i`; only the tool's arguments lost it.
+		expect(calls[0]?.arguments).toEqual({ label: "x", i: "Look" });
+	});
+
+	it("drops intentStripped when a beforeToolCall revision replaces the arguments", async () => {
+		const executed: unknown[] = [];
+		const tool: AgentTool = {
+			name: "plain",
+			label: "Plain",
+			description: "Tool without `i`",
+			parameters: type({ label: "string" }),
+			async execute(_toolCallId, params) {
+				executed.push(params);
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "plain", arguments: { label: "x", i: "Look" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			intentTracing: true,
+			beforeToolCall: async () => ({ args: { label: "y", i: "hook" } }),
+		};
+		const stream = agentLoop([createUserMessage("run")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+		const messages = await stream.result();
+		const call = messages
+			.flatMap(message => (message.role === "assistant" ? message.content : []))
+			.find(block => block.type === "toolCall");
+		// A revision is not re-stripped, so its `i` may reach the tool.
+		expect(executed).toEqual([{ label: "y", i: "hook" }]);
+		expect(call?.type === "toolCall" && call.arguments).toEqual({ label: "y", i: "hook" });
+		expect(call?.type === "toolCall" && call.intentStripped).toBeUndefined();
+	});
+
 	it("dispatches a tool call appended by transformAssistantMessage on a stop turn", async () => {
 		// In-text edit recovery (coding-agent) rewrites a text-only `stop` turn into
 		// a synthetic tool call inside this hook; the loop must scan tool calls

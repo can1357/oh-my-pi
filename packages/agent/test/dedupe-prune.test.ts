@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
+import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import {
 	dedupedNotice,
 	MIN_DEDUPE_TOKENS,
@@ -11,8 +12,10 @@ import {
 	type SessionMessageEntry,
 	type SupersedePruneConfig,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AgentTool } from "@oh-my-pi/pi-agent-core/types";
-import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AgentContext, AgentTool } from "@oh-my-pi/pi-agent-core/types";
+import type { AssistantMessage, Message, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { createUserMessage } from "./helpers";
 
 const tokenizer = new Tokenizer();
 const T0 = Date.UTC(2026, 10, 28, 12, 0, 0);
@@ -66,15 +69,24 @@ function result(call: ToolCall, text: string, timestamp: number): SessionMessage
 	return messageEntry(message, timestamp);
 }
 
-function toolCall(name: string, args: Record<string, unknown>): ToolCall {
-	return { type: "toolCall", id: `call-${idCounter++}`, name, arguments: args };
+function toolCall(name: string, args: Record<string, unknown>, record: Partial<ToolCall> = {}): ToolCall {
+	return { type: "toolCall", id: `call-${idCounter++}`, name, arguments: args, ...record };
 }
 
 /** One assistant turn issuing one call, plus its result. */
-function turn(name: string, args: Record<string, unknown>, text: string, timestamp: number): SessionMessageEntry[] {
-	const call = toolCall(name, args);
+function turn(
+	name: string,
+	args: Record<string, unknown>,
+	text: string,
+	timestamp: number,
+	record: Partial<ToolCall> = {},
+): SessionMessageEntry[] {
+	const call = toolCall(name, args, record);
 	return [assistant([call], timestamp), result(call, text, timestamp)];
 }
+
+/** The agent loop's record of a call whose top-level `i` it stripped as harness intent. */
+const STRIPPED = { intentStripped: true } as const;
 
 function text(entry: SessionEntry): string {
 	return (((entry as SessionMessageEntry).message as ToolResultMessage).content[0] as TextContent).text;
@@ -95,22 +107,38 @@ function dedupe(entries: SessionEntry[], over: Partial<SupersedePruneConfig> = {
 
 const GIT_STATUS = { command: "git status" };
 
-function agentTool(name: string, parameters: AgentTool["parameters"]): AgentTool {
+/** A tool returning `output` for every call. */
+function agentTool(name: string, parameters: AgentTool["parameters"], output: string): AgentTool {
 	return {
 		name,
 		label: name,
 		description: name,
 		parameters,
 		async execute() {
-			return { content: [] };
+			return { content: [{ type: "text", text: output }] };
 		},
 	};
 }
 
-/** A tool whose schema does not declare `i`: a top-level `i` on its calls is harness intent. */
-const GREP_TOOL = agentTool("grep", type({ pattern: "string", path: "string" }));
-/** An MCP-style tool whose own schema declares `i` (a page index): `i` is a real input. */
-const PAGE_TOOL = agentTool("mcp__docs__page", type({ doc: "string", i: "string" }));
+/** Run one prompt through the agent loop with intent tracing; returns `history` plus the new messages. */
+async function runLoop(tools: AgentTool[], history: AgentMessage[], calls: ToolCall[]): Promise<AgentMessage[]> {
+	const responses: MockResponse[] = [...calls.map(call => ({ content: [call] })), { content: ["done"] }];
+	const mock = createMockModel({ responses });
+	const context: AgentContext = { systemPrompt: [""], messages: [...history], tools };
+	const convertToLlm = (messages: AgentMessage[]) =>
+		messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
+	const stream = agentLoop(
+		[createUserMessage("read the guide")],
+		context,
+		{ model: mock.model, convertToLlm, intentTracing: true },
+		undefined,
+		mock.stream,
+	);
+	for await (const _event of stream) {
+		// drain
+	}
+	return [...history, ...(await stream.result())];
+}
 
 describe("pruneSupersededToolResults: identical-result dedupe", () => {
 	test("blanks the older copy of an identical result from a later turn", () => {
@@ -128,19 +156,20 @@ describe("pruneSupersededToolResults: identical-result dedupe", () => {
 	});
 
 	test("argument key order and harness intent do not split a call's identity", () => {
-		const first = turn("grep", { pattern: "foo", path: "src", i: "look for foo" }, STATUS_OUTPUT, T0);
-		const second = turn("grep", { path: "src", pattern: "foo", i: "again" }, STATUS_OUTPUT, T0 + 1_000);
+		const first = turn("grep", { pattern: "foo", path: "src", i: "look for foo" }, STATUS_OUTPUT, T0, STRIPPED);
+		const second = turn("grep", { path: "src", pattern: "foo", i: "again" }, STATUS_OUTPUT, T0 + 1_000, STRIPPED);
 
-		expect(dedupe([...first, ...second], { tools: [GREP_TOOL] }).prunedCount).toBe(1);
+		expect(dedupe([...first, ...second]).prunedCount).toBe(1);
 		expect(text(first[1])).toBe(dedupedNotice("grep"));
 		expect(text(second[1])).toBe(STATUS_OUTPUT);
 	});
 
 	test("a schema-owned `i` is a real input: calls differing only in it are never deduped", () => {
+		// The loop records no strip for an `i` the tool's schema owns.
 		const first = turn("mcp__docs__page", { doc: "guide", i: "intro" }, STATUS_OUTPUT, T0);
 		const second = turn("mcp__docs__page", { doc: "guide", i: "setup" }, STATUS_OUTPUT, T0 + 1_000);
 
-		expect(dedupe([...first, ...second], { tools: [GREP_TOOL, PAGE_TOOL] }).prunedCount).toBe(0);
+		expect(dedupe([...first, ...second]).prunedCount).toBe(0);
 		expect(text(first[1])).toBe(STATUS_OUTPUT);
 		expect(text(second[1])).toBe(STATUS_OUTPUT);
 	});
@@ -149,30 +178,67 @@ describe("pruneSupersededToolResults: identical-result dedupe", () => {
 		const first = turn("mcp__docs__page", { doc: "guide", i: "intro" }, STATUS_OUTPUT, T0);
 		const second = turn("mcp__docs__page", { i: "intro", doc: "guide" }, STATUS_OUTPUT, T0 + 1_000);
 
-		expect(dedupe([...first, ...second], { tools: [PAGE_TOOL] }).prunedCount).toBe(1);
+		expect(dedupe([...first, ...second]).prunedCount).toBe(1);
 		expect(text(first[1])).toBe(dedupedNotice("mcp__docs__page"));
 	});
 
-	test("without the tool's schema a differing `i` keeps both copies", () => {
+	test("an `i` its call does not record as stripped stays in the identity", () => {
+		// No record: history from before the marker, or intent tracing off.
 		const first = turn("grep", { pattern: "foo", path: "src", i: "look for foo" }, STATUS_OUTPUT, T0);
-		const second = turn("grep", { pattern: "foo", path: "src", i: "again" }, STATUS_OUTPUT, T0 + 1_000);
+		const second = turn("grep", { pattern: "foo", path: "src", i: "again" }, STATUS_OUTPUT, T0 + 1_000, STRIPPED);
 
 		expect(dedupe([...first, ...second]).prunedCount).toBe(0);
-		expect(dedupe([...first, ...second], { tools: [PAGE_TOOL] }).prunedCount).toBe(0);
 		expect(text(first[1])).toBe(STATUS_OUTPUT);
 	});
 
 	test("a nested `i` is tool data even when the top-level `i` is harness intent", () => {
-		const first = turn("grep", { pattern: "foo", path: "src", opts: { i: 1 }, i: "look" }, STATUS_OUTPUT, T0);
+		const first = turn(
+			"grep",
+			{ pattern: "foo", path: "src", opts: { i: 1 }, i: "look" },
+			STATUS_OUTPUT,
+			T0,
+			STRIPPED,
+		);
 		const second = turn(
 			"grep",
 			{ pattern: "foo", path: "src", opts: { i: 2 }, i: "look" },
 			STATUS_OUTPUT,
 			T0 + 1_000,
+			STRIPPED,
 		);
 
-		expect(dedupe([...first, ...second], { tools: [GREP_TOOL] }).prunedCount).toBe(0);
+		expect(dedupe([...first, ...second]).prunedCount).toBe(0);
 		expect(text(first[1])).toBe(STATUS_OUTPUT);
+	});
+
+	test("a schema replaced mid-session never strips `i` from calls its old schema owned", async () => {
+		// The MCP server first declares `i` (a page index); a `tools/list_changed`
+		// then replaces the same-named tool with a schema that does not.
+		const owning = agentTool("mcp__docs__page", type({ doc: "string", i: "string" }), STATUS_OUTPUT);
+		const replacement = agentTool("mcp__docs__page", type({ doc: "string" }), STATUS_OUTPUT);
+		const page = (id: string, i: string): ToolCall => ({
+			type: "toolCall",
+			id,
+			name: "mcp__docs__page",
+			arguments: { doc: "guide", i },
+		});
+
+		const before = await runLoop([owning], [], [page("intro", "intro"), page("setup", "setup")]);
+		const history = await runLoop([replacement], before, [page("look", "look"), page("again", "again")]);
+		const at = Date.now();
+		const entries = history.map(message => messageEntry(message, at));
+		const resultText = (id: string) =>
+			text(entries.find(e => (e.message as ToolResultMessage).toolCallId === id) as SessionEntry);
+
+		const pruned = dedupe(entries, { now: at });
+
+		// Distinct page indexes under the owning schema stay distinct calls.
+		expect(resultText("intro")).toBe(STATUS_OUTPUT);
+		expect(resultText("setup")).toBe(STATUS_OUTPUT);
+		// Under the replacement the loop stripped `i` as intent, so those calls match.
+		expect(resultText("look")).toBe(dedupedNotice("mcp__docs__page"));
+		expect(resultText("again")).toBe(STATUS_OUTPUT);
+		expect(pruned.prunedCount).toBe(1);
 	});
 
 	test("different arguments are never deduped, even with identical output", () => {

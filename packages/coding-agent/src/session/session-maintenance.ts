@@ -900,8 +900,6 @@ export class SessionMaintenance {
 				supersedeComplete: isCompleteReadResult,
 				pruneUseless: dropUseless,
 				dedupeIdentical: dedupeIdenticalResults,
-				// Tells harness intent from a schema-owned `i` in dedupe call identity.
-				tools: this.#host.agent.state.tools,
 				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
 				// Never re-write summarized-away entries; only flush the whole sent
 				// region once the cache is genuinely cold (idle exceeds the 1h TTL).
