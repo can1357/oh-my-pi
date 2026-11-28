@@ -494,6 +494,8 @@ function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlF
 	const submitted = defaultFormData(form);
 	// What a name submits when its controls submit nothing: the last hidden input of that name.
 	const hiddenFallback = new Map(form.hidden);
+	// Names whose value comes from their controls (a default or an answer), not a hidden fallback.
+	const fromControls = new Set(Object.keys(defaultFormData({ ...form, hidden: [] })));
 	const named = new Map<string, FormField[]>();
 	for (const field of form.fields) {
 		if (field.name) named.set(field.name, [...(named.get(field.name) ?? []), field]);
@@ -506,13 +508,18 @@ function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlF
 			const choice = extensionChoiceValue(field, value);
 			if (choice === undefined) return undefined;
 			if (Array.isArray(choice) && choice.length === 0) {
+				fromControls.delete(name);
 				const fallback = hiddenFallback.get(name);
 				if (fallback === undefined) delete submitted[name];
 				else submitted[name] = fallback;
-			} else submitted[name] = choice;
+			} else {
+				fromControls.add(name);
+				submitted[name] = choice;
+			}
 			continue;
 		}
 		if (typeof value !== "string" && typeof value !== "number") return undefined;
+		fromControls.add(name);
 		submitted[name] = textValue(field, String(value));
 	}
 	// Each control against the value its name submits: a name several controls share carries one value,
@@ -521,9 +528,8 @@ function extensionFormData(form: HtmlForm, data: Record<string, unknown>): HtmlF
 	for (const field of form.fields) {
 		if (!field.name) continue;
 		const value = submitted[field.name];
-		// A choice that submits nothing leaves the hidden fallback: check the choice as unanswered.
-		const own =
-			field.kind === "choice" && value !== undefined && value === hiddenFallback.get(field.name) ? undefined : value;
+		// A name its controls leave empty submits only the hidden fallback: check the choice as unanswered.
+		const own = field.kind === "choice" && !fromControls.has(field.name) ? undefined : value;
 		if (!extensionFieldAccepts(field, own)) return undefined;
 	}
 	return submitted;

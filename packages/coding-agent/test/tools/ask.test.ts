@@ -1093,6 +1093,19 @@ describe("AskTool answered by an extension", () => {
 			expect(untouched.accepts({})).toBe(true);
 			expect(text(await untouched.result)).toContain(JSON.stringify({ agree: "no" }, null, 2));
 		});
+		it("accepts choosing the option a hidden fallback also holds", async () => {
+			const form = await openForm(`<form>
+  <input type="hidden" name="plan" value="pro">
+  <fieldset><legend>Plan</legend>
+    <label><input type="radio" name="plan" value="free" required> Free</label>
+    <label><input type="radio" name="plan" value="pro"> Pro</label>
+  </fieldset>
+</form>`);
+			// Left alone, the required group answers nothing even though the fallback holds `pro`.
+			expect(form.accepts({})).toBe(false);
+			expect(form.accepts({ plan: "pro" })).toBe(true);
+			expect(text(await form.result)).toContain(JSON.stringify({ plan: "pro" }, null, 2));
+		});
 		it("refuses an answer to a name several controls share, or that leaves its shared default invalid", async () => {
 			const form = await openForm(`<form>
   <label>Contact <input type="email" name="contact" required></label>
