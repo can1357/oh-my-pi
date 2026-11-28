@@ -112,17 +112,19 @@ import {
 	type SessionInfo,
 } from "./session-listing";
 import {
-	loadEntriesFromFile,
-	loadSessionFile,
 	normalizeAssistantUsage,
 	parseSessionContent,
+	probeSessionFile,
 	readSessionHeaderId,
 	resolveBlobRefsInEntries,
 	resolveBlobRefsInEntriesSync,
+	type SessionFileVisit,
 	type SessionLoadResult,
 	visitEntriesFromFile,
+	visitLoadedSession,
+	visitSessionFile,
 } from "./session-loader";
-import { generateId, migrateToCurrentVersion } from "./session-migrations";
+import { generateId, lacksEntryId, SessionEntryMigration, UnindexedCount } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
 	computeDefaultSessionDirAsync,
@@ -137,6 +139,8 @@ import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
 import {
 	FileSessionStorage,
 	MemorySessionStorage,
+	retryRacedRead,
+	SessionReadConflictError,
 	type SessionStorage,
 	type SessionStorageWriter,
 	SessionWriteConflictError,
@@ -451,15 +455,22 @@ function entryUsage(entry: SessionEntry): Usage | undefined {
 	return undefined;
 }
 
+function normalizeLoadedEntryUsage(entry: SessionEntry): boolean {
+	return entry.type === "message" && entry.message.role === "assistant" && normalizeAssistantUsage(entry.message);
+}
+
 /** Complete incomplete assistant usage in loaded history; returns how many messages were repaired. */
 function normalizeLoadedUsage(entries: SessionEntry[]): number {
 	let repaired = 0;
 	for (const entry of entries) {
-		if (entry.type === "message" && entry.message.role === "assistant" && normalizeAssistantUsage(entry.message)) {
-			repaired++;
-		}
+		if (normalizeLoadedEntryUsage(entry)) repaired++;
 	}
 	return repaired;
+}
+
+/** Report the assistant messages a load completed the usage of. */
+function warnRepairedUsage(count: number): void {
+	if (count > 0) logger.warn("Loaded assistant messages with incomplete usage", { count });
 }
 
 function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
@@ -673,7 +684,14 @@ export class SessionEntryIndex {
 	rebuild(entries: readonly SessionEntry[]): void {
 		this.clear();
 		for (const entry of entries) this.insert(entry);
-		// A captured late-usage leaf can dangle after its target was rolled back or rewritten away.
+		this.settleLeaf(entries);
+	}
+
+	/**
+	 * Finish inserting `entries`, all of them, one by one: a captured late-usage
+	 * leaf can dangle after its target was rolled back or rewritten away.
+	 */
+	settleLeaf(entries: readonly SessionEntry[]): void {
 		if (this.#leaf !== null && !this.#entriesById.has(this.#leaf)) this.setLeaf(lastSelfSelectedLeafId(entries));
 	}
 
@@ -1060,6 +1078,33 @@ export class ForkSourceNotFoundError extends Error {
 		super(`Session "${sourcePath}" not found.`);
 		this.name = "ForkSourceNotFoundError";
 	}
+}
+
+/** A session file streamed into memory; see `SessionManager.#loadTranscript`. */
+interface LoadedTranscript extends SessionFileVisit {
+	/** `undefined` when the file holds no entries (or is missing). */
+	header: SessionHeader | undefined;
+	entries: SessionEntry[];
+	index: SessionEntryIndex;
+	/** Whether a migration changed the entries, so the file needs a rewrite. */
+	migrated: boolean;
+	/** Whether stale replay metadata was stripped from an assistant entry. */
+	sanitized: boolean;
+	/** Assistant messages whose incomplete usage was completed. */
+	repairedUsage: number;
+}
+
+/** How {@link SessionManager.forkFrom} turns each source entry into one of the fork's. */
+interface ForkEntryOptions {
+	resetInheritedCost?: boolean;
+}
+
+/** Where `SessionManager.#loadTranscript` reads a transcript from and what it does to each entry. */
+interface TranscriptLoadOptions {
+	throwIfMissing?: boolean;
+	fork?: ForkEntryOptions;
+	/** The transcript already read whole (a small file `probeSessionFile` loaded): visited instead of reading it again. */
+	preloaded?: SessionLoadResult;
 }
 
 /**
@@ -2286,15 +2331,24 @@ export class SessionManager {
 	}
 
 	#applyEntries(header: SessionHeader, entries: SessionEntry[]): void {
-		this.#header = header;
+		this.#adoptHeader(header);
 		this.#entries = entries;
+		warnRepairedUsage(normalizeLoadedUsage(entries));
+		this.#reindexEntries();
+	}
+
+	/** Index `#entries` again after they changed as a whole. */
+	#reindexEntries(): void {
+		this.#index.rebuild(this.#entries);
+	}
+
+	/** Take the session's identity and title from a loaded `header`. */
+	#adoptHeader(header: SessionHeader): void {
+		this.#header = header;
 		this.#sessionId = header.id;
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
 		this.#titleUpdatedAt = header.timestamp;
-		const repairedUsage = normalizeLoadedUsage(entries);
-		if (repairedUsage > 0) logger.warn("Loaded assistant messages with incomplete usage", { count: repairedUsage });
-		this.#index.rebuild(entries);
 	}
 
 	#freshEntryFields(): { id: string; parentId: string | null; timestamp: string; runtime: RuntimeIdentity } {
@@ -2562,8 +2616,10 @@ export class SessionManager {
 
 	async #setSessionFile(
 		sessionFile: string,
-		loadedSession?: SessionLoadResult,
-		options?: { throwIfMissing?: boolean; newSession?: NewSessionOptions },
+		options?: Pick<TranscriptLoadOptions, "throwIfMissing" | "preloaded"> & {
+			newSession?: NewSessionOptions;
+			open?: { sessionDir?: string; enterableCwd?: string };
+		},
 	): Promise<void> {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
@@ -2574,24 +2630,38 @@ export class SessionManager {
 		this.#sessionClaim = undefined;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
-		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
-		const sourceSize =
-			loaded.sourceSize !== undefined
-				? loaded.sourceSize
-				: this.#storage.existsSync(resolvedSessionFile)
-					? this.#storage.statSync(resolvedSessionFile).size
-					: null;
+		const loaded = await this.#loadTranscript(resolvedSessionFile, {
+			throwIfMissing: options?.throwIfMissing,
+			preloaded: options?.preloaded,
+		});
+		const sourceSize = loaded.sourceSize;
 		if (loaded.invalidHeader) {
 			throw new Error(
 				`Cannot resume session "${resolvedSessionFile}": the session header is missing or malformed. The file was not modified.`,
 			);
 		}
 
+		const { header, titleSlot } = loaded;
+		if (options?.open) {
+			// The probe and load can see different files. Choose the workspace
+			// from the header we will adopt, or keep the launch cwd if it cannot be entered.
+			const recordedCwd = header?.cwd;
+			const usable =
+				!!recordedCwd && (recordedCwd === options.open.enterableCwd || (await directoryIsEnterable(recordedCwd)));
+			if (usable) this.#cwd = recordedCwd;
+			this.#fallbackRuntimeOnly = !!recordedCwd && !usable && path.resolve(recordedCwd) !== path.resolve(this.#cwd);
+			const dir =
+				options.open.sessionDir ??
+				(recordedCwd && !usable
+					? await SessionManager.getDefaultSessionDirAsync(this.#cwd, undefined, this.#storage)
+					: path.dirname(resolvedSessionFile));
+			this.#sessionDir = dir ? path.resolve(dir) : dir;
+			if (dir) this.#storage.ensureDirSync(this.#sessionDir);
+		}
 		this.#sessionFile = resolvedSessionFile;
 		this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
 
-		const { entries: fileEntries, titleSlot } = loaded;
-		if (fileEntries.length === 0) {
+		if (!header) {
 			if (options?.throwIfMissing) {
 				throw new Error(
 					`Cannot resume session "${resolvedSessionFile}": the session file holds no entries. The file was not modified.`,
@@ -2607,47 +2677,164 @@ export class SessionManager {
 			return;
 		}
 
-		const migrated = migrateToCurrentVersion(fileEntries);
-		await resolveBlobRefsInEntries(fileEntries, this.#blobs);
-		// loadEntriesFromFile guarantees entries[0] is a valid session header.
-		const header = fileEntries[0] as SessionHeader;
-
-		// Adopt the loaded session's working directory only when it is verifiably
-		// accessible. Sessions live in a dir keyed by their cwd, so resuming a
-		// session from another project must re-point cwd/sessionDir at that
-		// project — but a deleted OR permission-blocked directory (macOS TCC
-		// denial) must not be adopted: callers without a cwd-change callback
-		// (extension UI, RPC) would otherwise track a directory the process
-		// cannot enter. Keep the current cwd so the session stays where the
-		// user already is.
-		const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
-		if (headerCwd && headerCwd !== path.resolve(this.#cwd) && (await directoryIsEnterable(headerCwd))) {
-			this.#cwd = headerCwd;
-			this.#sessionDir = path.dirname(resolvedSessionFile);
-			this.#fallbackRuntimeOnly = false;
-			this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
-		} else if (headerCwd && headerCwd !== path.resolve(this.#cwd)) {
-			// Header cwd not enterable: keep runtime cwd but mark fallback
-			// so workspace changes stay runtime-only until the transcript
-			// is relocated.
-			this.#fallbackRuntimeOnly = true;
-		} else {
-			this.#fallbackRuntimeOnly = false;
+		if (!options?.open) {
+			// A switch adopts the recorded workspace only when it can enter it.
+			// Otherwise, keep the current cwd and restrict workspace changes to
+			// this process until the session is relocated.
+			const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
+			if (headerCwd && headerCwd !== path.resolve(this.#cwd)) {
+				this.#fallbackRuntimeOnly = !(await directoryIsEnterable(headerCwd));
+				if (!this.#fallbackRuntimeOnly) {
+					this.#cwd = headerCwd;
+					this.#sessionDir = path.dirname(resolvedSessionFile);
+					this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
+				}
+			} else {
+				this.#fallbackRuntimeOnly = false;
+			}
 		}
 
-		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
+		this.#adoptLoadedTranscript(header, loaded);
 		this.#expectedDiskSize = sourceSize;
 		this.#additionalDirectories = header.additionalDirectories ?? [];
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
 		this.#hasTitleSlot = titleSlot !== undefined;
 		this.#fileIsCurrent = true;
-		this.#rewriteRequired = migrated || loaded.malformedRecords > 0;
+		this.#rewriteRequired = loaded.migrated || loaded.malformedRecords > 0 || loaded.sanitized;
 		this.#loadedMalformedRecords = loaded.malformedRecords;
 		this.#forceFileCreation = true;
 		this.#artifactManager = null;
 		this.#artifactManagerLocalRoot = null;
 
-		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
+		if (loaded.sanitized) this.#bodyRevision++;
+	}
+
+	/** Make a {@link LoadedTranscript} this manager's entries, under `header`. */
+	#adoptLoadedTranscript(header: SessionHeader, loaded: LoadedTranscript): void {
+		this.#adoptHeader(header);
+		this.#entries = loaded.entries;
+		this.#index = loaded.index;
+		warnRepairedUsage(loaded.repairedUsage);
+	}
+
+	/**
+	 * Stream the session at `filePath` into memory one entry at a time, so the
+	 * transcript is never held whole: each entry is migrated, its usage
+	 * completed, adapted for a fork and indexed.
+	 *
+	 * A full rewrite or delete that replaced the transcript mid-read
+	 * (`SessionReadConflictError`) makes the whole load run again from its
+	 * start, as often as {@link retryRacedRead} allows before the error surfaces.
+	 */
+	#loadTranscript(filePath: string, options: TranscriptLoadOptions): Promise<LoadedTranscript> {
+		return retryRacedRead(async () => {
+			// A current-version file whose first entry has no id may predate ids
+			// altogether; only a pass over every entry tells (see migrateToCurrentVersion).
+			// Each pass learns it afresh: what a raced read found of the transcript
+			// says nothing about the one read next.
+			let unindexed: boolean | undefined;
+			for (;;) {
+				const loaded = await this.#streamTranscript(filePath, options, unindexed);
+				if (loaded) return loaded;
+				unindexed = await this.#transcriptIsUnindexed(filePath, options);
+			}
+		});
+	}
+
+	/** Visit the transcript at `filePath`, or the copy of it `options.preloaded` already holds. */
+	async #visitTranscript(
+		filePath: string,
+		options: TranscriptLoadOptions,
+		visit: (entry: FileEntry) => void | boolean,
+	): Promise<SessionFileVisit> {
+		if (options.preloaded) return visitLoadedSession(options.preloaded, visit);
+		return visitSessionFile(filePath, this.#storage, visit, { throwIfMissing: options.throwIfMissing });
+	}
+
+	/** Whether `filePath` has non-header entries and none of them has an id. */
+	async #transcriptIsUnindexed(filePath: string, options: TranscriptLoadOptions): Promise<boolean> {
+		const count = new UnindexedCount();
+		await this.#visitTranscript(filePath, options, entry => !count.add(entry));
+		return count.unindexed;
+	}
+
+	/**
+	 * One streamed pass of {@link #loadTranscript}. Returns undefined, having
+	 * kept nothing, when `unindexed` is still unknown and the file needs it.
+	 * A known `unindexed` that this pass's own body contradicts came from a
+	 * body another writer replaced between the passes: the pass then fails as
+	 * a raced read (`SessionReadConflictError`), so the load runs again. Against
+	 * `unindexed: true` it fails at the first entry with an id.
+	 */
+	async #streamTranscript(
+		filePath: string,
+		options: TranscriptLoadOptions,
+		unindexed: boolean | undefined,
+	): Promise<LoadedTranscript | undefined> {
+		const fork = options.fork;
+		let header: SessionHeader | undefined;
+		let migration: SessionEntryMigration | undefined;
+		let needsIndexCheck = false;
+		// What this pass's body says of a known `unindexed`; an unknown one is not counted.
+		const count = unindexed === undefined ? undefined : new UnindexedCount();
+		let sanitized = false;
+		let repairedUsage = 0;
+		const entries: SessionEntry[] = [];
+		const index = new SessionEntryIndex();
+		const startMigration = (current: SessionHeader): SessionEntryMigration => {
+			const started = new SessionEntryMigration(current, unindexed ?? false);
+			started.migrate(current);
+			return started;
+		};
+		const visited = await this.#visitTranscript(filePath, options, raw => {
+			if (!header) {
+				header = raw as SessionHeader;
+				return;
+			}
+			if (!migration) {
+				if (
+					unindexed === undefined &&
+					!((header.version ?? 1) < 2) &&
+					(raw.type === "session" || lacksEntryId(raw))
+				) {
+					needsIndexCheck = true;
+					return false;
+				}
+				migration = startMigration(header);
+			}
+			// An entry with an id already contradicts a body without ids.
+			if (count?.add(raw) && unindexed) throw new SessionReadConflictError(filePath);
+			migration.migrate(raw);
+			if (raw.type === "session" && fork) return;
+			const entry = raw as SessionEntry;
+			if (normalizeLoadedEntryUsage(entry)) repairedUsage++;
+			if (fork?.resetInheritedCost) SessionManager.#resetInheritedUsageCost(entry);
+			entries.push(entry);
+			index.insert(entry);
+		});
+		if (needsIndexCheck) {
+			return undefined;
+		}
+		if (count && count.unindexed !== unindexed) {
+			throw new SessionReadConflictError(filePath);
+		}
+		if (header && !migration) migration = startMigration(header);
+		const migrated = migration?.needed ?? false;
+		migration = undefined;
+		index.settleLeaf(entries);
+		for (const entry of entries) {
+			if (SessionManager.#sanitizeLoadedEntry(entry)) sanitized = true;
+		}
+		await resolveBlobRefsInEntries(entries, this.#blobs);
+		return {
+			...visited,
+			header: visited.invalidHeader ? undefined : header,
+			entries,
+			index,
+			migrated,
+			sanitized,
+			repairedUsage,
+		};
 	}
 
 	/**
@@ -4163,15 +4350,19 @@ export class SessionManager {
 	sanitizeLoadedOpenAIResponsesReplayMetadata(): boolean {
 		let changed = false;
 		for (const entry of this.#entries) {
-			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			const sanitized = sanitizeRehydratedOpenAIResponsesAssistantMessage(entry.message);
-			if (sanitized === entry.message) continue;
-
-			entry.message = sanitized;
-			changed = true;
+			if (SessionManager.#sanitizeLoadedEntry(entry)) changed = true;
 		}
 		if (changed) this.#bodyRevision++;
 		return changed;
+	}
+
+	/** {@link sanitizeLoadedOpenAIResponsesReplayMetadata} for one entry; whether it changed. */
+	static #sanitizeLoadedEntry(entry: SessionEntry): boolean {
+		if (entry.type !== "message" || entry.message.role !== "assistant") return false;
+		const sanitized = sanitizeRehydratedOpenAIResponsesAssistantMessage(entry.message);
+		if (sanitized === entry.message) return false;
+		entry.message = sanitized;
+		return true;
 	}
 
 	getHeader(): SessionHeader | null {
@@ -4498,20 +4689,19 @@ export class SessionManager {
 
 		// A missing source must fail instead of forking an empty parentless session:
 		// the loader swallows ENOENT by default for fresh-session opens, so fork opts out.
-		let sourceEntries: FileEntry[];
+		let loaded: LoadedTranscript;
 		try {
-			sourceEntries = await loadEntriesFromFile(sourcePath, storage, { throwIfMissing: true });
+			loaded = await manager.#loadTranscript(sourcePath, {
+				throwIfMissing: true,
+				fork: { resetInheritedCost: options?.resetInheritedCost },
+			});
 		} catch (err) {
 			if (isEnoent(err) || isEnotdir(err)) throw new ForkSourceNotFoundError(sourcePath);
 			throw err;
 		}
-		migrateToCurrentVersion(sourceEntries);
-		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
 
-		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
-		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
-		normalizeLoadedUsage(history);
-		if (options?.resetInheritedCost) SessionManager.#resetInheritedUsageCost(history);
+		const sourceHeader = loaded.header;
+		const history = loaded.entries;
 		manager.#resetToNewSession(
 			{
 				parentSession: sourceHeader?.id,
@@ -4534,11 +4724,12 @@ export class SessionManager {
 		manager.#titleUpdatedAt = nowIso();
 		manager.#hasTitleSlot = true;
 		manager.#entries = history;
-		manager.#index.rebuild(history);
-		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
+		manager.#index = loaded.index;
+		if (loaded.sanitized) manager.#bodyRevision++;
 		if (options?.repairInterruptedTail) {
+			const repairedFrom = history.length;
 			SessionManager.#repairForkedInterruptedTail(history, manager.#index.pathTo());
-			manager.#index.rebuild(history);
+			for (const entry of history.slice(repairedFrom)) manager.#index.insert(entry);
 		}
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
@@ -4549,8 +4740,8 @@ export class SessionManager {
 	}
 
 	/**
-	 * Zero the monetary attribution (cost, credits, premium requests) on the
-	 * forked history's assistant turns and completed `task` results, in place.
+	 * Zero the monetary attribution (cost, credits, premium requests) of one
+	 * forked entry: an assistant turn or a completed `task` result, in place.
 	 *
 	 * A tan fork is a fresh agent that inherits the parent's transcript purely
 	 * for context; its spend must reflect only its own work. Session cost is
@@ -4559,12 +4750,10 @@ export class SessionManager {
 	 * Token counts are left intact — compaction anchors and context math depend
 	 * on them — since only billing attribution is inherited, not context size.
 	 */
-	static #resetInheritedUsageCost(history: SessionEntry[]): void {
-		for (const entry of history) {
-			resetUsageCost(entryUsage(entry));
-			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
-				resetTaskResultBilling(entry.message.details);
-			}
+	static #resetInheritedUsageCost(entry: SessionEntry): void {
+		resetUsageCost(entryUsage(entry));
+		if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
+			resetTaskResultBilling(entry.message.details);
 		}
 	}
 
@@ -4618,35 +4807,21 @@ export class SessionManager {
 		storage: SessionStorage = new FileSessionStorage(),
 		options?: { initialCwd?: string; parentSession?: string; suppressBreadcrumb?: boolean; throwIfMissing?: boolean },
 	): Promise<SessionManager> {
-		const probed = await loadSessionFile(filePath, storage, { throwIfMissing: options?.throwIfMissing });
-		const header = probed.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
-		// Resume into the session's recorded cwd only when it is verifiably
-		// accessible. A deleted or permission-blocked (macOS TCC denial) project
-		// dir would make the constructor's #cwd — and the `setProjectDir` chdir
-		// interactive mode runs next — fail, so fall back to the launch cwd and
-		// anchor /new and /branch there too, keeping the resumed session where
-		// the user already is.
-		const recordedCwd = header?.cwd;
-		const recordedCwdUsable = !!recordedCwd && (await directoryIsEnterable(recordedCwd));
-		const cwd = recordedCwdUsable ? recordedCwd : (options?.initialCwd ?? getProjectDir());
-		const dir =
-			sessionDir ??
-			(recordedCwd && !recordedCwdUsable
-				? await SessionManager.getDefaultSessionDirAsync(cwd, undefined, storage)
-				: path.dirname(path.resolve(filePath)));
-		const manager = new SessionManager(cwd, dir, true, storage);
+		// A streamed transcript yields only its header here; its entries stream in below.
+		const probed = await probeSessionFile(filePath, storage, { throwIfMissing: options?.throwIfMissing });
+		// Keep the early cwd check for a whole-text probe. If access was denied,
+		// retry it at adoption: permission may have returned in the meantime.
+		const probeCwd = probed.loaded ? probed.header?.cwd : undefined;
+		const enterableCwd = probeCwd && (await directoryIsEnterable(probeCwd)) ? probeCwd : undefined;
+		const manager = new SessionManager(options?.initialCwd ?? getProjectDir(), "", true, storage);
 		manager.#suppressBreadcrumb = options?.suppressBreadcrumb === true;
-		// Freshness gate for fail-closed callers (revive): the cwd probe above
-		// yields, so re-read after it and adopt only the fresh snapshot. A
-		// transcript deleted, truncated, or replaced mid-probe then fails
-		// closed here (ENOENT / holds-no-entries, without minting) instead of
-		// reviving stale history. Other callers keep the single probe read.
-		const loaded = options?.throwIfMissing
-			? await loadSessionFile(filePath, storage, { throwIfMissing: true })
-			: probed;
-		await manager.#setSessionFile(filePath, loaded, {
+		// Fail-closed callers (revive) need a fresh read after the probe. Other
+		// callers can reuse the probe's whole-text read of a small transcript.
+		await manager.#setSessionFile(filePath, {
+			open: { sessionDir, enterableCwd },
 			throwIfMissing: options?.throwIfMissing,
 			newSession: { parentSession: options?.parentSession },
+			preloaded: options?.throwIfMissing ? undefined : probed.loaded,
 		});
 		return manager;
 	}
@@ -4727,7 +4902,12 @@ export class SessionManager {
 		};
 
 		try {
-			await visitEntriesFromFile(filePath, visit, storage);
+			// A full rewrite between two chunks of a long transcript fails the read: read it again from its start.
+			await retryRacedRead(() => {
+				header = undefined;
+				initEntries.length = 0;
+				return visitEntriesFromFile(filePath, visit, storage);
+			});
 		} catch {
 			return null;
 		}

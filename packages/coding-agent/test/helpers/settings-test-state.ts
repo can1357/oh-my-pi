@@ -1,6 +1,6 @@
 import { vi } from "bun:test";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getAgentDir, getProjectDir, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getAgentDir, getProjectDir, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
 
 export interface SettingsTestState {
 	agentDir: string;
@@ -61,4 +61,21 @@ export function restoreEnvValue(key: string, value: string | undefined): void {
 	}
 	process.env[key] = value;
 	Bun.env[key] = value;
+}
+
+/** The variables `setAgentDir` rewrites: the agent dir, and the two profile variables it deletes. */
+const AGENT_DIR_ENV = ["PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE"] as const;
+
+/**
+ * Point the agent dir, and so the session root and blob store, at `dir` until
+ * `cleanup` is disposed, which restores the variables `setAgentDir` rewrites
+ * and rebuilds the directory resolver from them.
+ */
+export function useAgentDir(cleanup: AsyncDisposableStack, dir: string): void {
+	const saved = AGENT_DIR_ENV.map(key => [key, process.env[key]] as const);
+	cleanup.defer(() => {
+		for (const [key, value] of saved) restoreEnvValue(key, value);
+		__resetDirsFromEnvForTests();
+	});
+	setAgentDir(dir);
 }

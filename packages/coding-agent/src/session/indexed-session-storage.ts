@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { toError } from "@oh-my-pi/pi-utils";
+import { SESSION_TITLE_SLOT_BYTES } from "./session-entries";
 import {
 	directChildKeyName,
 	SessionWriteConflictError,
@@ -11,6 +12,7 @@ import {
 } from "./session-storage";
 import { enoent } from "./session-storage-errors";
 import {
+	overlayTitleSlotChunks,
 	overlayTitleSlotContent,
 	overlayTitleSlotPrefix,
 	parseTitleSlotFromContent,
@@ -33,6 +35,15 @@ export interface SessionStorageBackend {
 	loadIndex(): Promise<Iterable<SessionStorageIndexEntry>>;
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
+	/**
+	 * The stored bytes from byte `fromByte` to the end, as chunks in order:
+	 * what {@link readFull} returns from that offset, without holding it whole.
+	 * Each iterator reads one consistent snapshot or throws `SessionReadConflictError`
+	 * before yielding bytes from a replacement or after a delete. `ENOENT` means
+	 * the path was missing when the read began. Without this optional method,
+	 * the storage has no readChunks, and its callers read the whole text.
+	 */
+	readChunks?(path: string, fromByte: number): AsyncIterable<Uint8Array>;
 	/**
 	 * Replace content, atomically rejecting when the shared backend's current
 	 * UTF-8 byte length differs from `expectedSize`.
@@ -123,6 +134,15 @@ export class IndexedSessionStorage implements SessionStorage {
 	 * caller tracking a durable byte size must wait for {@link drain}.
 	 */
 	readonly defersSyncPublish = true;
+	/**
+	 * The bytes from byte `fromByte`, read from the backend in chunks. Set only
+	 * when the backend has its own {@link SessionStorageBackend.readChunks}, so a
+	 * caller that finds it reads in bounded pieces; a caller that does not
+	 * reads the session whole once. The bytes are those {@link readText} reads
+	 * from there: the title slot is synthesized over the stored head, so a read
+	 * that starts inside it reads from the start and overlays it.
+	 */
+	readonly readChunks?: (path: string, fromByte?: number) => AsyncIterable<Uint8Array>;
 	readonly #backend: SessionStorageBackend;
 	readonly #index = new Map<string, IndexEntry>();
 	readonly #writers = new Set<IndexedSessionStorageWriter>();
@@ -151,6 +171,7 @@ export class IndexedSessionStorage implements SessionStorage {
 
 	constructor(backend: SessionStorageBackend) {
 		this.#backend = backend;
+		if (backend.readChunks) this.readChunks = (path, fromByte = 0) => this.#readChunks(path, fromByte);
 	}
 
 	async initialize(): Promise<void> {
@@ -301,6 +322,25 @@ export class IndexedSessionStorage implements SessionStorage {
 		const [prefix, suffix] = await this.#backend.readSlices(path, prefixLimit, suffixLimit);
 		const title = titleUpdateForIndex(entry);
 		return [title ? overlayTitleSlotPrefix(prefix, prefixLimit, title) : prefix, suffix];
+	}
+
+	/**
+	 * {@link readChunks}: the backend's chunks from `fromByte`, with the index's
+	 * title slot laid over a read that starts inside it.
+	 */
+	async *#readChunks(path: string, fromByte: number): AsyncGenerator<Uint8Array> {
+		const entry = this.#index.get(path);
+		if (!entry) throw enoent(path);
+		await this.#awaitPath(path);
+		const start = Math.max(0, fromByte);
+		const title = start < SESSION_TITLE_SLOT_BYTES ? titleUpdateForIndex(entry) : undefined;
+		if (title) yield* overlayTitleSlotChunks(this.#backendChunks(path, 0), title, start);
+		else yield* this.#backendChunks(path, start);
+	}
+
+	/** The stored bytes from a backend that advertised chunked reads in the constructor. */
+	#backendChunks(path: string, fromByte: number): AsyncIterable<Uint8Array> {
+		return this.#backend.readChunks!(path, fromByte);
 	}
 
 	async scanLines(path: string, visit: (line: string) => boolean): Promise<void> {

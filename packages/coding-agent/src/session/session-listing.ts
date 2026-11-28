@@ -14,7 +14,7 @@ import { EVAL_STATE_CONTEXT_TYPE } from "../eval/state";
 import { parseSessionOrigin, type SessionOrigin } from "./session-entries";
 import { visitEntriesFromFile } from "./session-loader";
 import { computeDefaultSessionDirAsync } from "./session-paths";
-import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
+import { FileSessionStorage, retryRacedRead, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { listSessionTitles, lookupSessionTitle, recordSessionTitle, recordSessionTitles } from "./session-index";
 import { overlapsWindow, type TimeWindow } from "./time-window";
 
@@ -1031,16 +1031,20 @@ async function lastActivity(session: SessionInfo, storage: SessionStorage): Prom
 async function holdsEntry(file: string, id: string, storage: SessionStorage): Promise<boolean> {
 	let found = false;
 	try {
-		await visitEntriesFromFile(
-			file,
-			entry => {
-				// The header's id is the session's, never an entry's.
-				if (entry.type === "session" || entry.id !== id) return;
-				found = true;
-				return false;
-			},
-			storage,
-		);
+		// A full rewrite between two chunks of a long transcript fails the read: look again from its start.
+		await retryRacedRead(() => {
+			found = false;
+			return visitEntriesFromFile(
+				file,
+				entry => {
+					// The header's id is the session's, never an entry's.
+					if (entry.type === "session" || entry.id !== id) return;
+					found = true;
+					return false;
+				},
+				storage,
+			);
+		});
 	} catch {
 		return false;
 	}

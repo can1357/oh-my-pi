@@ -139,3 +139,35 @@ export function overlayTitleSlotPrefix(prefix: string, prefixBytes: number, upda
 		.subarray(0, prefixBytes)
 		.toString("utf-8");
 }
+
+/**
+ * `chunks` with the title slot laid over their first
+ * {@link SESSION_TITLE_SLOT_BYTES} bytes, as {@link overlayTitleSlotContent}
+ * lays it over a whole body (a body shorter than the slot reads as the slot
+ * alone), from byte `fromByte` on.
+ */
+export async function* overlayTitleSlotChunks(
+	chunks: AsyncIterable<Uint8Array>,
+	title: SessionTitleUpdate,
+	fromByte: number,
+): AsyncGenerator<Uint8Array> {
+	const slot = Buffer.from(serializeTitleSlot(title), "utf-8");
+	let head: Uint8Array[] | undefined = [];
+	let headBytes = 0;
+	for await (const chunk of chunks) {
+		if (chunk.byteLength === 0) continue;
+		if (!head) {
+			yield chunk;
+			continue;
+		}
+		head.push(chunk);
+		headBytes += chunk.byteLength;
+		if (headBytes < slot.byteLength) continue;
+		// A fresh buffer: the slot never writes into a chunk the backend handed out.
+		const bytes = Buffer.concat(head, headBytes);
+		slot.copy(bytes);
+		head = undefined;
+		yield bytes.subarray(fromByte);
+	}
+	if (head && slot.byteLength > fromByte) yield slot.subarray(fromByte);
+}
