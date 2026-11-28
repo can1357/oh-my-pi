@@ -4,11 +4,16 @@
  */
 import { combine, register, type SettingValueOf } from "../config/registry";
 
-/** One bash-interceptor rule: commands matching `pattern` are redirected to `tool`. */
+/**
+ * One bash-interceptor rule: commands matching `pattern` are blocked with `message`.
+ * When `tool` is set (non-empty), the rule only applies if that tool is available in
+ * the session (and `tool: "bash"` rules are skipped for managed bash services).
+ * When `tool` is omitted or empty, the rule applies unconditionally.
+ */
 export interface BashInterceptorRule {
 	pattern: string;
 	flags?: string;
-	tool: string;
+	tool?: string;
 	message: string;
 	allowSubcommands?: string[];
 }
@@ -223,7 +228,8 @@ export const cfgBashInterceptorEnabled = register({
 		tab: "shell",
 		group: "Bash",
 		label: "Bash Interceptor",
-		description: "Block shell commands that have dedicated tools",
+		description:
+			"Block shell commands matching configured patterns (dedicated-tool redirects and custom policy rules)",
 	},
 });
 
