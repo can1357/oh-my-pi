@@ -135,6 +135,8 @@
 
 - Background job results delivered while the agent is idle are freed once delivered, not kept in memory until the whole turn they started ends ([#20886](https://github.com/can1357/oh-my-pi/pull/20886) by [@sjawhar](https://github.com/sjawhar))
 - Kept the prompt at the bottom when `/compact` shortens a long session or a cancelled submission restores the draft and rebuilds the same transcript ([#20912](https://github.com/can1357/oh-my-pi/pull/20912) by [@thebtf](https://github.com/thebtf))
+- In fullscreen mode, the terminal can select and copy text in `/session` info, the background jobs sheet, and command reports (`/context`, `/changelog`, `/tools`, …), which there always open as a full-screen page instead of above the editor.
+- Scrolling a long command report (`/tools`, `/changelog`, …) past its end no longer stalls the next upward scroll.
 - Misspelled words in the prompt editor are marked with a red curly underline again in kitty, Ghostty, WezTerm and iTerm2, instead of a plain underline.
 - `/tan` forks reuse the parent session's prompt cache: their first request no longer re-sends the whole conversation uncached, and Claude and GPT-6.2 keep the parent's earlier reasoning instead of dropping it.
 - `/resume` into a session without subagents no longer keeps showing the previous session's subagents above the composer

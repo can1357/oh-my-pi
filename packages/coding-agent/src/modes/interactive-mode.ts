@@ -7593,7 +7593,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					onClose: () => this.#hideSessionInfo(),
 					onCopy: (text: string) => void this.#copyToClipboardWithStatus(text),
 				}),
-			{ onClose: () => this.#onSheetClosed("info") },
+			{ mouse: "off", onClose: () => this.#onSheetClosed("info") },
 		);
 	}
 
@@ -7647,7 +7647,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					...(selected ? { selected } : {}),
 					refresh: tick,
 				}),
-			{ onClose: () => this.#onSheetClosed("jobs") },
+			{ mouse: "off", onClose: () => this.#onSheetClosed("jobs") },
 		);
 	}
 
@@ -8574,7 +8574,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	commandReportRows(): number | undefined {
 		const below = this.shell.rowsBelow("report");
-		return below === undefined ? undefined : this.shell.size().rows - below;
+		if (below === undefined) return undefined;
+		// Fullscreen keeps the screen above the editor for the transcript: every report opens as a page there.
+		return this.#frame.screen() === "fullscreen" ? 0 : this.shell.size().rows - below;
 	}
 
 	cycleThinkingLevel(): void {

@@ -8,6 +8,7 @@
  */
 import { type Accessor, type JSXNode, nativeRendering, type ScrollRequest, signal, untrack } from "@oh-my-pi/pi-tui";
 import "../../styles/panels/report-panel";
+import type { ReportGeometry } from "../../styles/panels/report-panel";
 import { matchesSelectCancel, selectKeyId } from "../../../config/keybindings/matchers";
 import { actionKeyId, cancelKbd } from "../../keys/hints";
 import { bindingGlyph, keyTitle } from "../../styles/panels/common";
@@ -39,8 +40,10 @@ const SCROLL_KEYS: Readonly<Record<string, ScrollRequest["by"]>> = {
 
 export function ReportPanel(props: ReportPanelProps): JSXNode {
 	const request = signal<ScrollRequest | undefined>(undefined);
-	/** First body row shown (the terminal clamps it to the body). */
+	/** First body row shown. */
 	const offset = signal(0);
+	/** Unbounded until the first terminal paint; scrolling past the end must not bank rows an upward scroll pays back. */
+	const geometry: ReportGeometry = { maxOffset: Number.POSITIVE_INFINITY };
 	const viewport = () => Math.max(1, (props.maxRows?.() ?? Number.POSITIVE_INFINITY) - REPORT_CHROME_ROWS);
 	const scroll = (by: ScrollRequest["by"]) => {
 		const page = Math.max(1, untrack(viewport) - 1);
@@ -53,7 +56,7 @@ export function ReportPanel(props: ReportPanelProps): JSXNode {
 			end: Number.MAX_SAFE_INTEGER,
 			start: 0,
 		};
-		offset.set(Math.max(0, moves[by]));
+		offset.set(Math.max(0, Math.min(moves[by], geometry.maxOffset)));
 		request.set({ by, n: (untrack(request)?.n ?? 0) + 1 });
 	};
 	return (
@@ -65,6 +68,7 @@ export function ReportPanel(props: ReportPanelProps): JSXNode {
 				closeKey: props.focused?.() ? bindingGlyph("tui.select.cancel", "escape") : props.closeKey,
 				offset: offset(),
 				maxRows: props.maxRows?.(),
+				geometry,
 			})}
 			onKey={key => {
 				const by = SCROLL_KEYS[selectKeyId(key)];
