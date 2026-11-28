@@ -32,6 +32,19 @@ const codexModel = buildModel({
 	compat: { supportsImageDetailOriginal: true },
 });
 
+const nativeOpenAiModel = buildModel({
+	id: "gpt-5.5",
+	name: "OpenAI Test",
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://api.openai.com/v1",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 100_000,
+});
+
 const zeroUsage = {
 	input: 0,
 	output: 0,
@@ -122,10 +135,39 @@ function expectOrderedToolResults(items: ResponseInput): void {
 }
 
 describe("parallel Responses tool-result images", () => {
-	it("encodes generic Responses images inside their tool outputs", () => {
+	it("sends OpenRouter images as one user message after the tool-result batch", () => {
 		const items = buildResponsesInput({
 			model: genericModel,
 			context: makeContext(genericModel),
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: true,
+		});
+
+		expect(items.slice(0, 3).map(item => ("call_id" in item ? item.call_id : undefined))).toEqual([
+			"call_read_36",
+			"call_read_37",
+			"call_bash_38",
+		]);
+		expect(items.slice(3)).toEqual([
+			{ type: "function_call_output", call_id: "call_read_36", output: "first" },
+			{ type: "function_call_output", call_id: "call_read_37", output: "second" },
+			{ type: "function_call_output", call_id: "call_bash_38", output: "done" },
+			{
+				role: "user",
+				content: [
+					{ type: "input_text", text: "Attached image(s) from tool result:" },
+					{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,AAAA" },
+					{ type: "input_image", detail: "auto", image_url: "data:image/png;base64,BBBB" },
+				],
+			},
+			{ role: "user", content: [{ type: "input_text", text: "continue" }] },
+		]);
+	});
+
+	it("keeps native OpenAI Responses images inside their tool outputs", () => {
+		const items = buildResponsesInput({
+			model: nativeOpenAiModel,
+			context: makeContext(nativeOpenAiModel),
 			strictResponsesPairing: true,
 			supportsImageDetailOriginal: true,
 		});

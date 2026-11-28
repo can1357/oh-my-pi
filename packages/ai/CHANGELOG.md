@@ -27,6 +27,7 @@
 - Removed the `SPEECH_FORMATS` value export; import it from `@oh-my-pi/pi-catalog/types`. The `SpeechFormat` type is still exported ([#19183](https://github.com/can1357/oh-my-pi/pull/19183) by [@Xytronix](https://github.com/Xytronix))
 
 ### Fixed
+- Fixed reading an image with the `read` tool failing with `422 Provider returned error` on OpenRouter Responses models; the image now follows the tool results as a user message instead of inside the tool output ([#13486](https://github.com/can1357/oh-my-pi/issues/13486), [#19966](https://github.com/can1357/oh-my-pi/pull/19966) by [@JamieJ5926](https://github.com/JamieJ5926))
 
 - Fixed startup failing with `no such column: salt` when `agent.db` records auth schema v9 but its credentials table has no `salt` column
 - An OpenAI Responses request retried after an empty completion keeps the provider session it started with, so a session the host retired mid-request (a model switch) is not recreated for the next model ([#20858](https://github.com/can1357/oh-my-pi/pull/20858) by [@JustasMasiulis](https://github.com/JustasMasiulis))
