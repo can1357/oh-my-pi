@@ -213,8 +213,8 @@ export interface RenameMove {
  * (symlinks are left out) as a deletion at `from` and a creation at `to`, only
  * once the move succeeded. Paths keep the moved entry itself, resolving only its
  * directory. Moved files are read one at a time after the move; a file over the
- * journal's snapshot limit is left out unread, and so is one the move left in
- * place, such as a file reached through a renamed link to a folder.
+ * journal's snapshot limit is left out unread, and so is a file the move did not
+ * carry, such as one reached through a renamed or relocated link to a folder.
  *
  * @throws the original error, after rolling back the edits.
  */
@@ -227,19 +227,23 @@ export async function applyEditsThenRename(
 ): Promise<void> {
 	const edited: Array<{ filePath: string; outcome: TextEditOutcome }> = [];
 	const editChanges: WorkspaceFileChange[] = [];
-	const moved: RenameMove[] = [];
+	const moved: Array<{ from: string; to: string; dev: bigint; ino: bigint }> = [];
 	try {
 		for (const { filePath, edits } of references) {
 			edited.push({ filePath, outcome: await applyTextEdits(filePath, edits) });
 		}
-		// Journal paths must be resolved before the move takes the old directories away.
+		// Journal paths must be resolved before the move takes the old directories away, and each
+		// file's identity taken so the move can be checked to have carried it.
 		if (onFileChange) {
 			for (const { filePath, outcome } of edited) {
 				editChanges.push({ path: await fs.realpath(filePath), before: outcome.before, after: outcome.after });
 			}
 			for (const { from, to } of moves) {
-				const location = await resolveSyscallTarget(from, false);
-				if (location) moved.push({ from: location, to });
+				const [location, stat] = await Promise.all([
+					resolveSyscallTarget(from, false),
+					fs.lstat(from, { bigint: true }).catch(() => undefined),
+				]);
+				if (location && stat?.isFile()) moved.push({ from: location, to, dev: stat.dev, ino: stat.ino });
 			}
 		}
 		await fs.mkdir(path.dirname(dest), { recursive: true });
@@ -252,11 +256,12 @@ export async function applyEditsThenRename(
 	for (const change of editChanges) onFileChange(change);
 	// UTF-8 never decodes to more UTF-16 units than it has bytes, so only a file over the
 	// limit can exceed it; the journal would record such a file without its text.
-	for (const { from, to } of moved) {
+	for (const { from, to, dev, ino } of moved) {
+		// A link to a folder moves no file: `to` then reaches another file, or the same one in place.
+		const stat = await fs.lstat(to, { bigint: true }).catch(() => undefined);
+		if (!stat?.isFile() || stat.dev !== dev || stat.ino !== ino || stat.size > BigInt(MAX_SNAPSHOT_CHARS)) continue;
 		const location = await resolveSyscallTarget(to, false);
 		if (!location || location === from) continue;
-		const stat = await fs.lstat(to).catch(() => undefined);
-		if (!stat?.isFile() || stat.size > MAX_SNAPSHOT_CHARS) continue;
 		const snapshot = await readSnapshot(to);
 		if (snapshot?.text == null) continue;
 		onFileChange({ path: from, before: snapshot.text, after: null });

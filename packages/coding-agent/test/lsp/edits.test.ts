@@ -135,6 +135,26 @@ describe("applyEditsThenRename", () => {
 		expect(recorded).toEqual([]);
 	});
 
+	it("leaves files reached through a link moved to another folder out of the journal", async () => {
+		// `a/link` reads `target` beside it, so after the move it reaches `b/target` instead.
+		for (const parent of ["a", "b"]) {
+			await Bun.write(path.join(dir, parent, "target", "child.ts"), `export const ${parent} = 1;\n`);
+		}
+		await fs.symlink("target", path.join(dir, "a", "link"), "dir");
+		const recorded: WorkspaceFileChange[] = [];
+
+		await applyEditsThenRename(
+			[],
+			path.join(dir, "a", "link"),
+			path.join(dir, "b", "link"),
+			[{ from: path.join(dir, "a", "link", "child.ts"), to: path.join(dir, "b", "link", "child.ts") }],
+			change => recorded.push(change),
+		);
+
+		expect(await fs.readlink(path.join(dir, "b", "link"))).toBe("target");
+		expect(recorded).toEqual([]);
+	});
+
 	it("restores a UTF-16 reference byte for byte when the move fails", async () => {
 		const blocker = path.join(dir, "blocker");
 		await Bun.write(blocker, "not a dir");
